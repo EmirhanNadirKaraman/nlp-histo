@@ -1,0 +1,246 @@
+{
+  "total_pages": 24,
+  "routes": [
+    {
+      "page": 0,
+      "route": "marker",
+      "reason": "footnote_heavy",
+      "has_tables": false,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 1,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 2,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": true,
+      "has_text": true,
+      "image_count": 1,
+      "needs_marker": true
+    },
+    {
+      "page": 3,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 4,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 5,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 6,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": true,
+      "has_text": true,
+      "image_count": 1,
+      "needs_marker": true
+    },
+    {
+      "page": 7,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": true,
+      "has_text": true,
+      "image_count": 1,
+      "needs_marker": true
+    },
+    {
+      "page": 8,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": true,
+      "has_text": true,
+      "image_count": 1,
+      "needs_marker": true
+    },
+    {
+      "page": 9,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": true,
+      "has_text": true,
+      "image_count": 1,
+      "needs_marker": true
+    },
+    {
+      "page": 10,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": true,
+      "has_text": true,
+      "image_count": 1,
+      "needs_marker": true
+    },
+    {
+      "page": 11,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 12,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": true,
+      "has_text": true,
+      "image_count": 1,
+      "needs_marker": true
+    },
+    {
+      "page": 13,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 14,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 15,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 16,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": true,
+      "has_text": true,
+      "image_count": 1,
+      "needs_marker": true
+    },
+    {
+      "page": 17,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 18,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 19,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 20,
+      "route": "marker",
+      "reason": "footnote_heavy",
+      "has_tables": false,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 21,
+      "route": "marker",
+      "reason": "footnote_heavy",
+      "has_tables": false,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 22,
+      "route": "docling",
+      "reason": "table_detected",
+      "has_tables": true,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    },
+    {
+      "page": 23,
+      "route": "marker",
+      "reason": "footnote_heavy",
+      "has_tables": false,
+      "has_images": false,
+      "has_text": true,
+      "image_count": 0,
+      "needs_marker": true
+    }
+  ],
+  "summary": "4 pages via marker, 20 pages via docling"
+}

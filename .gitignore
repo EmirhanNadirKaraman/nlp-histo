@@ -210,3 +210,4 @@ histopathology_papers/
 files/
 
 .DS_STORE
+.claude/
