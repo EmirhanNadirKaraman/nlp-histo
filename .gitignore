@@ -211,3 +211,5 @@ files/
 
 .DS_STORE
 .claude/
+pdffigures2/
+out/

@@ -4,13 +4,26 @@ Handles connection pooling and session management.
 """
 
 import os
+from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
 from contextlib import contextmanager
 from .models import Base
 
+# Load .env file automatically when this module is imported
+# This way, all scripts that use the database don't need to load it themselves
+try:
+    from dotenv import load_dotenv
+    # Look for .env file in project root (parent of database folder)
+    env_path = Path(__file__).parent.parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    # python-dotenv not installed - will use environment variables or defaults
+    pass
+
 # Database configuration
-# These can be overridden by environment variables
+# These can be overridden by environment variables (loaded from .env above)
 DB_CONFIG = {
     'host': os.getenv('DB_HOST', 'localhost'),
     'port': os.getenv('DB_PORT', '5432'),

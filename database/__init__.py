@@ -3,7 +3,15 @@ Database package for NLP Histopathology project.
 Provides models and connection utilities for PostgreSQL.
 """
 
-from .models import Document, TextElement, Figure, Base
+from .models import (
+    Document,
+    TextElement,
+    Figure,
+    Table,
+    TextElementFigureReference,
+    TextElementTableReference,
+    Base
+)
 from .db_connection import (
     DatabaseConnection,
     get_db_connection,
@@ -16,6 +24,9 @@ __all__ = [
     'Document',
     'TextElement',
     'Figure',
+    'Table',
+    'TextElementFigureReference',
+    'TextElementTableReference',
     'Base',
     'DatabaseConnection',
     'get_db_connection',

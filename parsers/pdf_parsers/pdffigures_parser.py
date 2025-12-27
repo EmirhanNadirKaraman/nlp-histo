@@ -92,7 +92,7 @@ class PDFFiguresParser:
         save_images: bool = True
     ) -> List[Dict]:
         """
-        Extract figures, tables, and captions from PDF.
+        Extract figures, tables, and captions from PDF using SBT.
 
         Args:
             pdf_path: Path to PDF file
@@ -114,7 +114,7 @@ class PDFFiguresParser:
             self.logger.warning("PDFFigures 2.0 not available, skipping figure extraction")
             return []
 
-        pdf_file = Path(pdf_path)
+        pdf_file = Path(pdf_path).resolve()
         if not pdf_file.exists():
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
 
@@ -128,28 +128,36 @@ class PDFFiguresParser:
         output_path.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Run PDFFigures 2.0
+            # Prepare metadata file
             metadata_file = output_path / f"{pdf_file.stem}.json"
 
-            cmd = [
-                'java',
-                '-jar', self.jar_path,
-                str(pdf_file),
-                '-m', str(metadata_file),  # Metadata output
-            ]
+            # Build SBT command for extraction (not visualization)
+            # Use FigureExtractor for JSON output, not FigureExtractorVisualizationCli
+            sbt_args = [str(pdf_file), '-m', str(metadata_file)]
 
-            # Add image output directory if requested
             if save_images:
-                cmd.extend(['-d', str(output_path)])  # Image output directory
+                sbt_args.extend(['-d', str(output_path)])
+
+            # Create SBT command
+            sbt_command = f'runMain org.allenai.pdffigures2.FigureExtractor {" ".join(sbt_args)}'
 
             self.logger.info(f"Running PDFFigures 2.0 on: {pdf_file.name}")
-            self.logger.debug(f"Command: {' '.join(cmd)}")
+            self.logger.debug(f"SBT command: {sbt_command}")
 
+            # Find pdffigures2 directory
+            pdffigures_dir = self._find_pdffigures_dir()
+            if not pdffigures_dir:
+                self.logger.error("PDFFigures2 directory not found")
+                return []
+
+            # Run SBT with the command piped in
+            # Using echo to avoid interactive mode
             result = subprocess.run(
-                cmd,
+                f'cd {pdffigures_dir} && echo "{sbt_command}" | sbt',
+                shell=True,
                 capture_output=True,
                 text=True,
-                timeout=120  # 2 minute timeout
+                timeout=120
             )
 
             if result.returncode != 0:
@@ -177,6 +185,20 @@ class PDFFiguresParser:
         except Exception as e:
             self.logger.error(f"PDFFigures extraction failed: {e}")
             return []
+
+    def _find_pdffigures_dir(self) -> Optional[str]:
+        """Find pdffigures2 directory."""
+        search_paths = [
+            Path('pdffigures2'),
+            Path(__file__).parent.parent.parent / 'pdffigures2',
+            Path.home() / 'pdffigures2',
+        ]
+
+        for path in search_paths:
+            if path.exists() and (path / 'build.sbt').exists():
+                return str(path)
+
+        return None
 
     def _parse_metadata(
         self,

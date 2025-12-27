@@ -17,6 +17,13 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Import text processing utilities
+from parsers.text_processing import (
+    ContextAwareStitcher,
+    is_reference_entry,
+    remove_citations
+)
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -160,166 +167,8 @@ def create_reference_index(text_elements, figures):
     return index
 
 
-class ContextAwareStitcher:
-    """
-    Stitches narrative text while preserving tables and figures.
-    If a paragraph is interrupted by a table/figure, it 'looks over'
-    the object to find the continuation of the sentence.
-    """
-
-    def reconstruct_paragraphs(self, paragraphs):
-        """
-        Reconstruct paragraphs by stitching split narratives.
-
-        Args:
-            paragraphs: List of paragraph strings or dicts
-
-        Returns:
-            List of reconstructed paragraphs with tables/figures preserved
-        """
-        if not paragraphs:
-            return []
-
-        # Convert to uniform format with type tags
-        elements = []
-        for para in paragraphs:
-            if isinstance(para, dict):
-                text = para['text']
-            else:
-                text = para
-
-            # Classify paragraph type
-            text_start = text.strip()[:50].lower()
-            # Check if it's a table (starts with "Table" or is bullet points after a table)
-            if text_start.startswith('table '):
-                elem_type = 'table'
-            # Check if it's a figure
-            elif text_start.startswith('figure '):
-                elem_type = 'figure'
-            # Check if it's table content (bullet points, pipes, etc.)
-            elif (text_start.startswith('-') or text_start.startswith('|') or
-                  text_start.startswith('*') or text_start.startswith('•')):
-                # Likely table content, treat as table to skip over it
-                elem_type = 'table'
-            else:
-                elem_type = 'narrative'
-
-            elements.append({
-                'type': elem_type,
-                'text': text,
-                'consumed': False
-            })
-
-        final_flow = []
-        i = 0
-
-        while i < len(elements):
-            curr = elements[i]
-
-            # If current block is a table or figure, preserve it
-            if curr['type'] in ['table', 'figure']:
-                final_flow.append(curr['text'])
-                i += 1
-                continue
-
-            # If current is narrative, check if it's cut off
-            if self._is_cut_off(curr['text']):
-                # Look ahead for the next NARRATIVE block, skipping tables/figs
-                next_text_idx = self._find_next_narrative(elements, i + 1)
-
-                if next_text_idx is not None:
-                    next_text_elem = elements[next_text_idx]
-
-                    # Stitch them together
-                    curr['text'] = self._merge_text(curr['text'], next_text_elem['text'])
-
-                    # Mark the consumed element
-                    elements[next_text_idx]['consumed'] = True
-
-            # Add the (potentially stitched) block if not consumed
-            if not curr.get('consumed'):
-                final_flow.append(curr['text'])
-            i += 1
-
-        return final_flow
-
-    def _is_cut_off(self, text):
-        """Check if text appears to be cut off mid-sentence."""
-        t = text.strip()
-        if not t:
-            return False
-
-        # Ends with hyphen (word break)
-        if t.endswith('-'):
-            return True
-
-        # Ends with comma (sentence continues)
-        if t.endswith(','):
-            return True
-
-        # Ends with lowercase letter or connector words
-        last_word = t.split()[-1] if t.split() else ''
-        connectors = ['and', 'or', 'but', 'the', 'a', 'an', 'of', 'in', 'on', 'at', 'to', 'for']
-        if last_word.lower() in connectors:
-            return True
-
-        # Ends with lowercase (likely mid-sentence)
-        if t[-1].islower():
-            return True
-
-        return False
-
-    def _find_next_narrative(self, elements, start_idx):
-        """Find the next narrative block, skipping tables/figures."""
-        for j in range(start_idx, len(elements)):
-            if elements[j]['type'] == 'narrative' and not elements[j].get('consumed'):
-                return j
-        return None
-
-    def _merge_text(self, t1, t2):
-        """Merge two text segments intelligently."""
-        t1 = t1.rstrip()
-        t2 = t2.lstrip()
-
-        # Handle hyphenated word breaks
-        if t1.endswith('-'):
-            return t1[:-1] + t2
-
-        # Normal merge with space
-        return t1 + " " + t2
-
-
-def remove_citations(text):
-    """
-    Remove citation numbers from text.
-
-    Citations appear as numbers after periods, like:
-    - "text. 1 More text"
-    - "text. 19,20 More"
-    - "text. 1-3 More"
-
-    Args:
-        text: Text with citations
-
-    Returns:
-        Text with citations removed
-    """
-    import re
-
-    # Pattern: period/comma followed by space(s) and number(s) (possibly comma/dash separated)
-    # Examples: ". 1 ", ". 19,20 ", ". 1-3 ", ", 5 "
-    patterns = [
-        r'\.\s+\d+(?:[,–-]\d+)*\s+',  # After period: ". 1 ", ". 19,20 "
-        r',\s+\d+(?:[,–-]\d+)*\s+',   # After comma: ", 5 "
-        r'\s+\d+(?:[,–-]\d+)*\s+',    # Standalone: " 1 ", " 19,20 "
-    ]
-
-    cleaned = text
-    for pattern in patterns:
-        # Replace citation with just the punctuation and space
-        cleaned = re.sub(pattern, lambda m: m.group()[0] + ' ', cleaned)
-
-    return cleaned
+# Text processing utilities are now imported from parsers.text_processing
+# (ContextAwareStitcher, is_reference_entry, remove_citations)
 
 
 def group_by_path(text_elements):
@@ -499,8 +348,12 @@ def parse_and_save(pdf_path: str, mode: str = "routing", output_dir: str = "outp
                 else:
                     regular_paras.append(text)
 
-            # Write regular paragraphs first (with citations removed)
+            # Write regular paragraphs first (with citations removed, skip references)
             for para in regular_paras:
+                # Skip reference entries
+                if is_reference_entry(para):
+                    continue
+
                 cleaned = remove_citations(para)
                 f.write(f"{cleaned}\n\n")
 
