@@ -94,6 +94,7 @@ class PyMuPDF4LLMParser(BasePDFParser):
         Parse markdown text to hierarchical structure.
 
         Identifies headers (# ## ###) and paragraphs, building hierarchical paths.
+        Skips sections that contain "References" in their header.
 
         Args:
             md_text: Markdown text from PyMuPDF4LLM
@@ -107,19 +108,21 @@ class PyMuPDF4LLMParser(BasePDFParser):
 
         current_paragraph = []
         last_header = None  # Track last header to avoid storing title twice
+        in_references = False  # Track if we're in a References section
+        references_depth = None  # Track depth of References section
 
         for line in lines:
             line = line.rstrip()
 
             # Skip empty lines
             if not line:
-                # If we have accumulated paragraph text, save it
-                if current_paragraph:
+                # If we have accumulated paragraph text, save it (unless in References)
+                if current_paragraph and not in_references:
                     text = ' '.join(current_paragraph).strip()
                     # Skip if accumulated text matches last header (avoid duplication)
                     if text and text != last_header:
                         hierarchy.append(path_builder.get_current_path_dict(text))
-                    current_paragraph = []
+                current_paragraph = []
                 continue
 
             # Check if line is a header
@@ -127,12 +130,12 @@ class PyMuPDF4LLMParser(BasePDFParser):
 
             if header_match:
                 # Save any accumulated paragraph before processing header
-                if current_paragraph:
+                if current_paragraph and not in_references:
                     text = ' '.join(current_paragraph).strip()
                     # Skip if accumulated text matches last header (avoid duplication)
                     if text and text != last_header:
                         hierarchy.append(path_builder.get_current_path_dict(text))
-                    current_paragraph = []
+                current_paragraph = []
 
                 # Process header
                 hashes, header_text = header_match.groups()
@@ -141,24 +144,34 @@ class PyMuPDF4LLMParser(BasePDFParser):
                 # Clean header text (remove markdown formatting)
                 header_text = self._clean_markdown(header_text)
 
-                # Update path
+                # Check if this is a References section or if we're exiting one
+                if 'reference' in header_text.lower():
+                    in_references = True
+                    references_depth = depth
+                elif in_references and references_depth is not None and depth <= references_depth:
+                    # We've exited the References section (new section at same or shallower depth)
+                    in_references = False
+                    references_depth = None
+
+                # Update path (even if in references, to maintain structure)
                 path_builder.process_header(header_text, depth)
 
                 # Remember this header to avoid storing it as text
                 last_header = header_text
 
             else:
-                # Regular paragraph line
-                # Clean markdown formatting
-                clean_line = self._clean_markdown(line)
+                # Regular paragraph line - skip if in References section
+                if not in_references:
+                    # Clean markdown formatting
+                    clean_line = self._clean_markdown(line)
 
-                # Skip if this line exactly matches the last header (avoid duplication)
-                # Don't clear last_header - the same title might repeat later
-                if clean_line and clean_line != last_header:
-                    current_paragraph.append(clean_line)
+                    # Skip if this line exactly matches the last header (avoid duplication)
+                    # Don't clear last_header - the same title might repeat later
+                    if clean_line and clean_line != last_header:
+                        current_paragraph.append(clean_line)
 
-        # Save any remaining paragraph
-        if current_paragraph:
+        # Save any remaining paragraph (if not in References)
+        if current_paragraph and not in_references:
             text = ' '.join(current_paragraph).strip()
             # Skip if accumulated text matches last header (avoid duplication)
             if text and text != last_header:

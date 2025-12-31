@@ -26,10 +26,16 @@ def parse_recursive(element, current_path, collected_data):
     Recursively walks through XML tags.
     If it finds a <sec>, it adds to the path.
     If it finds a <p>, it records the text with the current path.
+    Skips sections that contain "References" in their header.
     """
     # 1. If we are at a Section, update the path
     if element.tag == 'sec':
         header = get_section_header(element)
+
+        # Skip References sections entirely
+        if 'reference' in header.lower():
+            return
+
         # Extend the path (e.g., ["Methods"] -> ["Methods", "2.1 Staining"])
         current_path = current_path + [header]
 
