@@ -37,7 +37,8 @@ def check_existing_tables(db):
         'figures',
         'tables',
         'text_element_figure_references',
-        'text_element_table_references'
+        'text_element_table_references',
+        'entities'
     ]
 
     return {table: table in existing_tables for table in expected_tables}

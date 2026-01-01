@@ -10,6 +10,7 @@ from .models import (
     Table,
     TextElementFigureReference,
     TextElementTableReference,
+    Entity,
     Base
 )
 from .db_connection import (
@@ -27,6 +28,7 @@ __all__ = [
     'Table',
     'TextElementFigureReference',
     'TextElementTableReference',
+    'Entity',
     'Base',
     'DatabaseConnection',
     'get_db_connection',

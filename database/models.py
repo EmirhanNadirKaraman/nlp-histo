@@ -4,7 +4,7 @@ Defines Document and TextElement models with relationships.
 """
 
 from sqlalchemy import (
-    Column, Integer, String, Text, TIMESTAMP, ForeignKey, ARRAY, Index
+    Column, Integer, String, Text, TIMESTAMP, ForeignKey, ARRAY, Index, Float
 )
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.ext.declarative import declarative_base
@@ -253,3 +253,49 @@ class Table(Base):
 
     def __repr__(self):
         return f"<Table(table_id='{self.table_id}', label='{self.table_label}')>"
+
+
+class Entity(Base):
+    """
+    Represents a named entity extracted from text via NER.
+    Each entity is linked to a specific text element.
+    """
+    __tablename__ = 'entities'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    text_element_id = Column(Integer, ForeignKey('text_elements.id', ondelete='CASCADE'), nullable=False, index=True)
+
+    # Entity information
+    entity_text = Column(Text, nullable=False)
+    entity_label = Column(String(50), nullable=False, index=True)  # PERSON, ORG, GPE, etc.
+
+    # Position in text
+    start_char = Column(Integer)
+    end_char = Column(Integer)
+
+    # UMLS entity linking (from scispacy)
+    umls_cui = Column(String(20), index=True)  # UMLS Concept Unique Identifier
+    umls_score = Column(Float)  # Linking confidence score (0.0-1.0)
+    canonical_name = Column(Text)  # Human-readable UMLS concept name
+
+    # NER model metadata
+    model_name = Column(String(100))  # e.g., 'en_core_sci_sm', 'en_core_web_sm'
+    linker_name = Column(String(50))  # e.g., 'umls', 'mesh', 'rxnorm'
+
+    # Metadata
+    created_at = Column(TIMESTAMP, default=func.now())
+
+    # Relationship to text element
+    text_element = relationship("TextElement", backref="entities")
+
+    # Composite index for efficient queries
+    __table_args__ = (
+        Index('idx_text_element_entity', 'text_element_id', 'entity_label'),
+        Index('idx_entity_text', 'entity_text'),
+        Index('idx_umls_cui', 'umls_cui'),
+    )
+
+    def __repr__(self):
+        cui_info = f", CUI={self.umls_cui}" if self.umls_cui else ""
+        canonical_info = f", canonical='{self.canonical_name}'" if self.canonical_name else ""
+        return f"<Entity(text='{self.entity_text}', label='{self.entity_label}'{cui_info}{canonical_info})>"

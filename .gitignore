@@ -213,3 +213,5 @@ files/
 .claude/
 pdffigures2/
 out/
+umls_entities/
+umls_texts/
