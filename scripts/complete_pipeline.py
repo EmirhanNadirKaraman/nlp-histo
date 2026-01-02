@@ -60,7 +60,7 @@ from parsers.text_processing import remove_citations, ContextAwareStitcher
 
 # Import mask_tables for table reconstruction
 try:
-    sys.path.insert(0, str(Path(__file__).parent / "docling"))
+    sys.path.insert(0, str(Path(__file__).parent / "docling_files"))
     from mask_tables import process_pdf_with_masking
     MASK_TABLES_AVAILABLE = True
 except ImportError:
