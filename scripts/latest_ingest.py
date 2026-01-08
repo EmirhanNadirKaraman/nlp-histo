@@ -1260,6 +1260,27 @@ def process_pdf_worker(args):
         }
 
 
+def get_pdf_page_count(pdf_path: Path) -> int:
+    """
+    Get the number of pages in a PDF file.
+
+    Args:
+        pdf_path: Path to the PDF file
+
+    Returns:
+        Number of pages, or 999999 if unable to determine (to sort to end)
+    """
+    if not PYMUPDF_AVAILABLE:
+        return 999999
+
+    try:
+        with fitz.open(str(pdf_path)) as doc:
+            return len(doc)
+    except Exception as e:
+        logger.warning(f"Could not get page count for {pdf_path.name}: {e}")
+        return 999999
+
+
 def main():
     # Setup logging
     setup_logging(debug=False)
@@ -1285,6 +1306,18 @@ def main():
     if not pdf_files:
         logger.warning("No PDF files found!")
         return
+
+    # Sort PDFs by page count (smallest first) for optimal processing
+    logger.info("Sorting PDFs by page count (this may take a moment)...")
+    pdf_files.sort(key=lambda p: get_pdf_page_count(p))
+
+    # Log page count statistics
+    if PYMUPDF_AVAILABLE:
+        page_counts = [get_pdf_page_count(p) for p in pdf_files[:5]]  # Sample first 5
+        if all(pc < 999999 for pc in page_counts):
+            logger.info(f"PDF page count range: {page_counts[0]} (smallest) to {get_pdf_page_count(pdf_files[-1])} (largest)")
+        else:
+            logger.info("Unable to determine page counts for sorting")
 
     # Prepare work items (pre-assign indices for progress tracking)
     work_items = [

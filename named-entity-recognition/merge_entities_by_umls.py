@@ -46,16 +46,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from database import get_db_connection, Entity, TextElement, Document
 
 
-def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entities", output_format="both"):
+def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entities"):
     """
     Merge all sentences where each UMLS entry occurs.
-    Creates separate JSON and/or TXT files for each UMLS CUI.
+    Creates separate JSON and TXT files for each UMLS CUI.
 
     Args:
         pmcid: Optional PMCID to filter results (processes all documents if None)
         min_occurrences: Minimum number of occurrences to include a CUI
         output_dir: Output directory for output files (one file per CUI)
-        output_format: "json", "txt", or "both" (default: both)
 
     Returns:
         dict: Merged entity data grouped by UMLS CUI
@@ -172,12 +171,7 @@ def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entit
         print(f"Retained {len(filtered_data)} unique UMLS concepts\n")
 
         # Save each UMLS CUI to separate file(s)
-        format_msg = {
-            "json": "JSON files",
-            "txt": "TXT files",
-            "both": "JSON and TXT files"
-        }
-        print(f"Writing {len(filtered_data)} {format_msg.get(output_format, 'files')} to {output_dir}/...")
+        print(f"Writing {len(filtered_data)} JSON and TXT files to {output_dir}/...")
 
         for cui, data in filtered_data.items():
             # Create safe filename from CUI
@@ -193,37 +187,35 @@ def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entit
                 base_filename = safe_filename
 
             # Save JSON file
-            if output_format in ["json", "both"]:
-                json_path = output_path / f"{base_filename}.json"
-                with open(json_path, 'w', encoding='utf-8') as f:
-                    json.dump({
-                        "umls_cui": cui,
-                        "canonical_name": data["canonical_name"],
-                        "entity_label": data["entity_label"],
-                        "total_occurrences": data["total_occurrences"],
-                        "unique_entity_texts": data["unique_entity_texts"],
-                        "sentences": data["sentences"]
-                    }, f, indent=2, ensure_ascii=False)
+            json_path = output_path / f"{base_filename}.json"
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "umls_cui": cui,
+                    "canonical_name": data["canonical_name"],
+                    "entity_label": data["entity_label"],
+                    "total_occurrences": data["total_occurrences"],
+                    "unique_entity_texts": data["unique_entity_texts"],
+                    "sentences": data["sentences"]
+                }, f, indent=2, ensure_ascii=False)
 
             # Save TXT file (combined sentences with blank lines)
-            if output_format in ["txt", "both"]:
-                txt_path = output_path / f"{base_filename}.txt"
-                with open(txt_path, 'w', encoding='utf-8') as f:
-                    # Write header
-                    f.write(f"UMLS CUI: {cui}\n")
-                    f.write(f"Canonical Name: {data['canonical_name']}\n")
-                    f.write(f"Entity Label: {data['entity_label']}\n")
-                    f.write(f"Total Occurrences: {data['total_occurrences']}\n")
-                    f.write(f"Unique Sentences: {len(data['sentences'])}\n")
-                    f.write(f"Text Variants: {', '.join(data['unique_entity_texts'])}\n")
-                    f.write("=" * 80 + "\n\n")
+            txt_path = output_path / f"{base_filename}.txt"
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                # Write header
+                f.write(f"UMLS CUI: {cui}\n")
+                f.write(f"Canonical Name: {data['canonical_name']}\n")
+                f.write(f"Entity Label: {data['entity_label']}\n")
+                f.write(f"Total Occurrences: {data['total_occurrences']}\n")
+                f.write(f"Unique Sentences: {len(data['sentences'])}\n")
+                f.write(f"Text Variants: {', '.join(data['unique_entity_texts'])}\n")
+                f.write("=" * 80 + "\n\n")
 
-                    # Write all unique sentences with blank lines between them
-                    for sentence_data in data["sentences"]:
-                        f.write(sentence_data["sentence"])
-                        f.write("\n\n")
+                # Write all unique sentences with blank lines between them
+                for sentence_data in data["sentences"]:
+                    f.write(sentence_data["sentence"])
+                    f.write("\n\n")
 
-        files_saved = len(filtered_data) * (2 if output_format == "both" else 1)
+        files_saved = len(filtered_data) * 2
         print(f"✓ Saved {files_saved} files to {output_dir}/\n")
 
         # Print summary statistics
@@ -269,21 +261,18 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Merge entities by UMLS CUI and generate JSON output",
+        description="Merge entities by UMLS CUI and generate JSON and TXT output",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Process all documents (creates both JSON and TXT files)
   python named-entity-recognition/merge_entities_by_umls.py
 
-  # Create only TXT files with combined sentences
-  python named-entity-recognition/merge_entities_by_umls.py --format txt
-
   # Process specific document
   python named-entity-recognition/merge_entities_by_umls.py --pmcid PMC1448691
 
   # Filter by minimum occurrences (only CUIs with 10+ mentions)
-  python named-entity-recognition/merge_entities_by_umls.py --min-occurrences 10 --format txt
+  python named-entity-recognition/merge_entities_by_umls.py --min-occurrences 10
 
   # Custom output directory
   python named-entity-recognition/merge_entities_by_umls.py --output-dir results/umls_concepts
@@ -307,13 +296,6 @@ Examples:
         default='umls_entities',
         help='Output directory for output files (default: umls_entities/)'
     )
-    parser.add_argument(
-        '--format',
-        type=str,
-        choices=['json', 'txt', 'both'],
-        default='both',
-        help='Output format: json, txt, or both (default: both)'
-    )
 
     args = parser.parse_args()
 
@@ -321,8 +303,7 @@ Examples:
         merge_entities_by_umls(
             pmcid=args.pmcid,
             min_occurrences=args.min_occurrences,
-            output_dir=args.output_dir,
-            output_format=args.format
+            output_dir=args.output_dir
         )
     except Exception as e:
         print(f"\n❌ Error: {e}\n")
