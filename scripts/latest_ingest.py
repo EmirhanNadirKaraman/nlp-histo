@@ -20,11 +20,14 @@ Usage:
 import sys
 import json
 import re
+import threading
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict, Counter
 from datetime import datetime
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -147,16 +150,21 @@ class CompletePipelineProcessor:
         # Load blacklist
         self.blacklist = self.load_blacklist()
 
-        # Initialize converter once (only if Docling is available)
+        # Thread synchronization primitives for parallel processing
+        self.stats_lock = threading.Lock()
+        self.blacklist_lock = threading.Lock()
+        self.progress_lock = threading.Lock()
+
+        # Thread-local storage for Docling converters (one per worker thread)
+        self._converter_local = threading.local()
+        self.pipeline_options = None
+
         if DOCLING_AVAILABLE:
-            pipeline_options = PdfPipelineOptions()
-            pipeline_options.do_table_structure = False
-            pipeline_options.do_ocr = True
-            self.converter = DocumentConverter(
-                format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
-            )
+            # Store configuration (not the converter itself - created per thread)
+            self.pipeline_options = PdfPipelineOptions()
+            self.pipeline_options.do_table_structure = False
+            self.pipeline_options.do_ocr = True
         else:
-            self.converter = None
             logger.warning("Docling not available - PDF processing will be limited")
 
     def load_blacklist(self) -> Dict[str, Dict]:
@@ -187,42 +195,74 @@ class CompletePipelineProcessor:
             logger.error(f"Failed to save blacklist: {e}")
 
     def is_blacklisted(self, pmcid: str) -> bool:
-        """Check if a PMCID is in the blacklist."""
-        return pmcid in self.blacklist
+        """Check if a PMCID is in the blacklist (thread-safe)."""
+        with self.blacklist_lock:
+            return pmcid in self.blacklist
 
     def add_to_blacklist(self, pmcid: str, error_msg: str, pdf_path: str = None):
         """
-        Add a PMCID to the blacklist with error information.
+        Add a PMCID to the blacklist with error information (thread-safe).
 
         Args:
             pmcid: The PMCID that failed
             error_msg: Description of the error
             pdf_path: Optional path to the PDF file
         """
-        self.blacklist[pmcid] = {
-            'error': error_msg,
-            'pdf_path': pdf_path,
-            'timestamp': datetime.now().isoformat(),
-            'attempts': self.blacklist.get(pmcid, {}).get('attempts', 0) + 1
-        }
-        self.save_blacklist()
-        logger.warning(f"Added {pmcid} to blacklist: {error_msg}")
+        with self.blacklist_lock:
+            self.blacklist[pmcid] = {
+                'error': error_msg,
+                'pdf_path': pdf_path,
+                'timestamp': datetime.now().isoformat(),
+                'attempts': self.blacklist.get(pmcid, {}).get('attempts', 0) + 1
+            }
+            self.save_blacklist()
+            logger.warning(f"Added {pmcid} to blacklist: {error_msg}")
+
+    def _get_converter(self):
+        """
+        Get or create thread-local DocumentConverter.
+        Each worker thread gets its own converter instance to avoid conflicts.
+
+        Returns:
+            DocumentConverter instance for this thread, or None if Docling unavailable
+        """
+        # Check if this thread already has a converter
+        if not hasattr(self._converter_local, 'converter'):
+            if not DOCLING_AVAILABLE or self.pipeline_options is None:
+                return None
+
+            thread_name = threading.current_thread().name
+            logger.debug(f"Creating DocumentConverter for thread {thread_name}")
+
+            # Create converter for this thread
+            self._converter_local.converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(
+                        pipeline_options=self.pipeline_options
+                    )
+                }
+            )
+
+        return self._converter_local.converter
 
     def extract_layout_with_docling(self, pdf_path: Path) -> Tuple[List[Dict], Path]:
         """
         Extract full layout using Docling and save to JSON.
+        Uses thread-local converter for thread-safety.
 
         Returns:
             Tuple of (elements list, json_path)
         """
-        if not DOCLING_AVAILABLE:
+        # Get thread-local converter
+        converter = self._get_converter()
+        if not converter:
             logger.error("Docling is not available")
             return None, None
 
         try:
             # Convert document
             logger.info(f"Extracting layout from {pdf_path.name}...")
-            result = self.converter.convert(str(pdf_path))
+            result = converter.convert(str(pdf_path))
             doc = result.document
 
             # Collect all elements
@@ -771,16 +811,18 @@ class CompletePipelineProcessor:
                 session.flush()
                 logger.info(f"Created {figure_refs_created} figure references, {table_refs_created} table references")
 
-                self.stats['processed'] += 1
-                self.stats['total_text_elements'] += len(db_text_elements)
-                self.stats['total_figures'] += len(figure_data)
-                self.stats['total_tables'] += len(table_data)
+                with self.stats_lock:
+                    self.stats['processed'] += 1
+                    self.stats['total_text_elements'] += len(db_text_elements)
+                    self.stats['total_figures'] += len(figure_data)
+                    self.stats['total_tables'] += len(table_data)
 
                 return True
 
         except Exception as e:
             logger.error(f"Failed to ingest {pmcid}: {e}", exc_info=True)
-            self.stats['errors'] += 1
+            with self.stats_lock:
+                self.stats['errors'] += 1
             return False
 
     def process_document(
@@ -987,7 +1029,8 @@ class CompletePipelineProcessor:
                     logger.warning(f"⚠️  Processed but skipped database ingestion for {pmcid}")
             else:
                 logger.info(f"✅ Successfully processed {pmcid} (text-only mode)")
-                self.stats['processed'] += 1
+                with self.stats_lock:
+                    self.stats['processed'] += 1
 
             return True
 
@@ -995,7 +1038,8 @@ class CompletePipelineProcessor:
             error_msg = f"Exception during processing: {str(e)}"
             logger.error(f"❌ Failed to process {pmcid}: {e}", exc_info=True)
             self.add_to_blacklist(pmcid, error_msg, str(pdf_path))
-            self.stats['errors'] += 1
+            with self.stats_lock:
+                self.stats['errors'] += 1
             return False
 
     def check_existing_files(self, pmcid: str) -> Dict[str, bool]:
@@ -1068,94 +1112,119 @@ class CompletePipelineProcessor:
         logger.info(f"{'='*80}\n")
 
 
-def main():
-    # Setup logging
-    setup_logging(debug=False)
+def process_pdf_worker(args):
+    """
+    Worker function for processing a single PDF in a thread.
 
-    # Create processor
-    processor = CompletePipelineProcessor()
-    PDF_DIR = "files/organized_pdfs"
+    Args:
+        args: Tuple of (processor, pdf_file, index, total_count)
 
-    # Batch mode
-    pdf_dir = Path(PDF_DIR)
-    pdf_files = list(pdf_dir.glob("*.pdf"))
+    Returns:
+        Dict with processing result and metadata
+    """
+    processor, pdf_file, index, total_count = args
+    thread_name = threading.current_thread().name
 
-    logger.info(f"Found {len(pdf_files)} PDF files in {pdf_dir}")
+    # Extract PMCID from filename
+    stem = pdf_file.stem
+    if not stem.startswith("PMC"):
+        logger.warning(f"[{thread_name}] Skipping {pdf_file.name} - cannot extract PMCID")
+        return {
+            'status': 'skipped',
+            'pmcid': None,
+            'reason': 'invalid_filename',
+            'pdf_path': str(pdf_file)
+        }
 
-    for index, pdf_file in enumerate(pdf_files):
-        # Extract PMCID from filename
-        print(f"index = {index + 1} / {len(pdf_files)}")
-        stem = pdf_file.stem
-        if stem.startswith("PMC"):
-            pmcid = stem.split('_')[0]
-        else:
-            logger.warning(f"Skipping {pdf_file.name} - cannot extract PMCID")
-            continue
+    pmcid = stem.split('_')[0]
 
-        # 1. CHECK IF BLACKLISTED
+    # Thread-safe progress logging
+    with processor.progress_lock:
+        logger.info(f"[{index}/{total_count}] [{thread_name}] Starting {pmcid}")
+
+    try:
+        # ===== 1. CHECK BLACKLIST =====
         if processor.is_blacklisted(pmcid):
-            blacklist_info = processor.blacklist[pmcid]
-            error_reason = blacklist_info.get('error', 'Unknown error')
-            logger.info(f"[{index + 1}/{len(pdf_files)}] ⚠️  Skipping {pmcid} - Blacklisted (failed {blacklist_info.get('attempts', 1)} time(s))")
-            logger.info(f"  Reason: {error_reason}")
-            processor.stats['blacklisted'] += 1
-            continue
+            with processor.blacklist_lock:
+                blacklist_info = processor.blacklist[pmcid].copy()
 
-        # 2. CHECK IF ALREADY IN DATABASE
+            error_reason = blacklist_info.get('error', 'Unknown error')
+            logger.info(
+                f"[{thread_name}] Skipping {pmcid} - Blacklisted "
+                f"(failed {blacklist_info.get('attempts', 1)} time(s)): {error_reason}"
+            )
+
+            with processor.stats_lock:
+                processor.stats['blacklisted'] += 1
+
+            return {
+                'status': 'blacklisted',
+                'pmcid': pmcid,
+                'reason': error_reason,
+                'pdf_path': str(pdf_file)
+            }
+
+        # ===== 2. CHECK DATABASE =====
         if processor.db:
             with processor.db.session_scope() as session:
                 existing = session.query(Document).filter_by(pmcid=pmcid).first()
                 if existing:
-                    logger.info(f"[{index + 1}/{len(pdf_files)}] ✓ Skipping {pmcid} - Already in database")
-                    processor.stats['skipped'] += 1
-                    continue
+                    logger.info(f"[{thread_name}] Skipping {pmcid} - Already in database")
 
-        # 3. CHECK IF OUTPUT FILES EXIST
+                    with processor.stats_lock:
+                        processor.stats['skipped'] += 1
+
+                    return {
+                        'status': 'skipped',
+                        'pmcid': pmcid,
+                        'reason': 'already_in_db',
+                        'pdf_path': str(pdf_file)
+                    }
+
+        # ===== 3. CHECK EXISTING FILES =====
         file_status = processor.check_existing_files(pmcid)
 
         if file_status['all_exist']:
-            # Files exist - load and ingest directly
-            logger.info(f"[{index + 1}/{len(pdf_files)}] ⚡ Loading existing files for {pmcid}")
-            try:
-                table_data, figure_data, text_elements = processor.load_existing_data(pmcid)
+            # ===== 4a. LOAD FROM CACHE =====
+            logger.info(f"[{thread_name}] Loading existing files for {pmcid}")
 
-                # Process text elements through the pipeline
-                logger.info("Building hierarchical structure from loaded elements...")
-                text_by_path, db_elements_raw = processor.build_hierarchical_structure(
-                    text_elements,
-                    skip_references=True
-                )
+            table_data, figure_data, text_elements = processor.load_existing_data(pmcid)
 
-                logger.info("Stitching paragraphs within hierarchical paths...")
-                stitched_by_path = processor.stitch_paragraphs_by_path(text_by_path)
+            text_by_path, db_elements_raw = processor.build_hierarchical_structure(
+                text_elements,
+                skip_references=True
+            )
+            stitched_by_path = processor.stitch_paragraphs_by_path(text_by_path)
+            db_text_elements = processor.prepare_db_elements(stitched_by_path, db_elements_raw)
 
-                logger.info("Preparing database elements...")
-                db_text_elements = processor.prepare_db_elements(stitched_by_path, db_elements_raw)
+            success = processor.ingest_to_database(
+                pmcid=pmcid,
+                pdf_path=pdf_file,
+                db_text_elements=db_text_elements,
+                table_data=table_data,
+                figure_data=figure_data,
+                force=False
+            )
 
-                # Ingest to database
-                success = processor.ingest_to_database(
-                    pmcid=pmcid,
-                    pdf_path=pdf_file,
-                    db_text_elements=db_text_elements,
-                    table_data=table_data,
-                    figure_data=figure_data,
-                    force=False
-                )
+            if success:
+                logger.info(f"[{thread_name}] Successfully ingested {pmcid} from cache")
+            else:
+                logger.warning(f"[{thread_name}] Failed to ingest {pmcid} from cache")
 
-                if success:
-                    logger.info(f"✅ Successfully ingested {pmcid} from existing files")
-                else:
-                    logger.warning(f"⚠️  Failed to ingest {pmcid} from existing files")
+            return {
+                'status': 'success_cached' if success else 'error',
+                'pmcid': pmcid,
+                'pdf_path': str(pdf_file),
+                'text_elements': len(db_text_elements),
+                'figures': len(figure_data),
+                'tables': len(table_data)
+            }
 
-            except Exception as e:
-                error_msg = f"Error loading existing files: {str(e)}"
-                logger.error(f"❌ Error loading existing files for {pmcid}: {e}", exc_info=True)
-                processor.add_to_blacklist(pmcid, error_msg, str(pdf_file))
-                processor.stats['errors'] += 1
         else:
-            # Files don't exist - process from scratch
-            logger.info(f"[{index + 1}/{len(pdf_files)}] 🔄 Processing {pmcid} from scratch")
-            processor.process_document(
+            # ===== 4b. FULL PROCESSING PIPELINE =====
+            logger.info(f"[{thread_name}] Processing {pmcid} from scratch")
+
+            success = processor.process_document(
                 pdf_path=pdf_file,
                 pmcid=pmcid,
                 force=False,
@@ -1163,7 +1232,145 @@ def main():
                 skip_references=True
             )
 
+            status_msg = "Successfully processed" if success else "Failed to process"
+            logger.info(f"[{thread_name}] {status_msg} {pmcid}")
+
+            return {
+                'status': 'success_full' if success else 'error',
+                'pmcid': pmcid,
+                'pdf_path': str(pdf_file)
+            }
+
+    except Exception as e:
+        # ===== ERROR HANDLING =====
+        error_msg = f"Worker exception: {str(e)}"
+        logger.error(f"[{thread_name}] Error processing {pmcid}: {e}", exc_info=True)
+
+        # Add to blacklist (thread-safe)
+        processor.add_to_blacklist(pmcid, error_msg, str(pdf_file))
+
+        with processor.stats_lock:
+            processor.stats['errors'] += 1
+
+        return {
+            'status': 'error',
+            'pmcid': pmcid,
+            'error': str(e),
+            'pdf_path': str(pdf_file)
+        }
+
+
+def main():
+    # Setup logging
+    setup_logging(debug=False)
+
+    # Create processor instance
+    processor = CompletePipelineProcessor()
+    PDF_DIR = "files/organized_pdfs"
+
+    # Auto-detect worker count: CPU cores / 2, minimum 1
+    cpu_count = os.cpu_count() or 1
+    max_workers = max(1, cpu_count // 2)
+
+    logger.info("="*80)
+    logger.info("PDF Processing Pipeline - Parallel Mode")
+    logger.info(f"Worker threads: {max_workers} (CPU count: {cpu_count})")
+    logger.info("="*80)
+
+    # Collect PDF files
+    pdf_dir = Path(PDF_DIR)
+    pdf_files = list(pdf_dir.glob("*.pdf"))
+    logger.info(f"Found {len(pdf_files)} PDF files in {pdf_dir}")
+
+    if not pdf_files:
+        logger.warning("No PDF files found!")
+        return
+
+    # Prepare work items (pre-assign indices for progress tracking)
+    work_items = [
+        (processor, pdf_file, idx + 1, len(pdf_files))
+        for idx, pdf_file in enumerate(pdf_files)
+    ]
+
+    # Process with ThreadPoolExecutor
+    results = []
+
+    try:
+        with ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="PDFWorker"
+        ) as executor:
+
+            # Submit all tasks and get futures
+            future_to_pdf = {
+                executor.submit(process_pdf_worker, item): item[1]  # item[1] is pdf_file
+                for item in work_items
+            }
+
+            logger.info(f"Submitted {len(future_to_pdf)} tasks to thread pool")
+            logger.info("="*80)
+
+            # Collect results as they complete (order may differ from submission)
+            for future in as_completed(future_to_pdf):
+                pdf_file = future_to_pdf[future]
+
+                try:
+                    result = future.result()  # Will raise if worker raised exception
+                    results.append(result)
+
+                    # Status emoji mapping
+                    status_emoji = {
+                        'success_cached': '⚡',
+                        'success_full': '✅',
+                        'skipped': '✓',
+                        'blacklisted': '⚠️',
+                        'error': '❌'
+                    }.get(result['status'], '?')
+
+                    # Thread-safe progress logging
+                    with processor.progress_lock:
+                        logger.info(
+                            f"{status_emoji} {result.get('pmcid', 'UNKNOWN'):12s} - "
+                            f"{result['status']:15s} "
+                            f"({len(results):4d}/{len(pdf_files):4d} completed)"
+                        )
+
+                except Exception as e:
+                    # Future itself raised an exception (shouldn't happen with our error handling)
+                    logger.error(
+                        f"Future raised exception for {pdf_file.name}: {e}",
+                        exc_info=True
+                    )
+                    results.append({
+                        'status': 'error',
+                        'pdf_path': str(pdf_file),
+                        'error': str(e)
+                    })
+
+    except KeyboardInterrupt:
+        logger.warning("\n⚠️  Received interrupt signal. Waiting for active threads to finish...")
+        logger.warning("Press Ctrl+C again to force quit (may corrupt data)")
+        # ThreadPoolExecutor.__exit__ will wait for all threads to finish
+
+    # Print final statistics
+    logger.info("\n" + "="*80)
     processor.print_stats()
+
+    # Print detailed result summary
+    logger.info("\n" + "="*80)
+    logger.info("Processing Summary by Status")
+    logger.info("="*80)
+
+    status_counts = {}
+    for result in results:
+        status = result['status']
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    for status in sorted(status_counts.keys()):
+        count = status_counts[status]
+        logger.info(f"  {status:20s}: {count:4d}")
+
+    logger.info("="*80)
 
 if __name__ == "__main__":
     main()

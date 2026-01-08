@@ -73,8 +73,8 @@ class DatabaseConnection:
             database_url,
             echo=echo,
             pool_pre_ping=True,  # Verify connections before using
-            pool_size=10,
-            max_overflow=20
+            pool_size=15,         # Increased from 10 for parallel processing
+            max_overflow=25       # Increased from 20 (total capacity: 40)
         )
 
         # Create a configured "Session" class
