@@ -10,7 +10,7 @@ from database import get_db_connection, Entity
 from sqlalchemy import or_
 
 # 1. Configuration
-SOURCE_DIR = "umls_texts/"  # Folder containing all JSONs
+SOURCE_DIR = "umls_entities/"  # Folder containing all JSONs
 DEST_DIR = "relevant_texts/" # Where you want the filtered files to go
 
 # The relevant TUIs for Diseases, Neoplasms, Mental Disorders, and Symptoms

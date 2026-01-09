@@ -182,8 +182,6 @@ def run_ner_on_db(pmcid: str, min_chars: int = 50, save_to_db: bool = False, for
         return extracted_data
 
 if __name__ == "__main__":
-    import sys
-
     # Parse command line arguments
     pmcid = sys.argv[1] if len(sys.argv) > 1 else "PMC7149534"
     min_chars = int(sys.argv[2]) if len(sys.argv) > 2 else 50
