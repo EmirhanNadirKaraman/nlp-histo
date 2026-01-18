@@ -67,15 +67,15 @@ def process_document_worker(args):
             'error': str(e)
         }
 
-def batch_process_all_documents(min_chars: int = 50, force: bool = False):
+def batch_process_all_documents(min_chars: int = 50, force: bool = False, limit: int = None):
     db = get_db_connection()
 
     # 1. PRE-LOAD MODEL (Optimization: Load once for the whole batch)
     print("Loading spaCy model and UMLS Linker into RAM (one-time cost)...")
     nlp = spacy.load("en_core_sci_sm", disable=["parser", "attribute_ruler", "lemmatizer"])
     nlp.add_pipe("scispacy_linker", config={
-        "resolve_abbreviations": True, 
-        "linker_name": "umls", 
+        "resolve_abbreviations": True,
+        "linker_name": "umls",
         "threshold": 0.7
     })
 
@@ -86,6 +86,11 @@ def batch_process_all_documents(min_chars: int = 50, force: bool = False):
     if not pmcids:
         print("No documents found in database.")
         return
+
+    # Apply limit if specified
+    if limit:
+        pmcids = pmcids[:limit]
+        print(f"Limiting to first {limit} documents")
 
     print("="*80)
     print(f"Batch NER Processing Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -172,8 +177,9 @@ def batch_process_all_documents(min_chars: int = 50, force: bool = False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Batch process NER for all documents')
-    parser.add_argument('--min-chars', type=int, default=50)
-    parser.add_argument('--force', '-f', action='store_true')
+    parser.add_argument('--min-chars', type=int, default=50, help='Minimum characters for entity text (default: 50)')
+    parser.add_argument('--force', '-f', action='store_true', help='Force reprocess documents that already have entities')
+    parser.add_argument('--limit', type=int, help='Limit processing to first N documents')
     args = parser.parse_args()
 
-    batch_process_all_documents(min_chars=args.min_chars, force=args.force)
+    batch_process_all_documents(min_chars=args.min_chars, force=args.force, limit=args.limit)

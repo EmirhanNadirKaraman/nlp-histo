@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from database import get_db_connection, Entity, TextElement, Document
 
 
-def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entities"):
+def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entities", limit=None):
     """
     Merge all sentences where each UMLS entry occurs.
     Creates separate JSON and TXT files for each UMLS CUI.
@@ -55,6 +55,7 @@ def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entit
         pmcid: Optional PMCID to filter results (processes all documents if None)
         min_occurrences: Minimum number of occurrences to include a CUI
         output_dir: Output directory for output files (one file per CUI)
+        limit: Optional limit to process only first N documents
 
     Returns:
         dict: Merged entity data grouped by UMLS CUI
@@ -62,7 +63,12 @@ def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entit
     print("="*80)
     print("UMLS Entity Merger - Separate JSON Files")
     print("="*80)
-    print(f"Filter: {'All documents' if not pmcid else f'PMCID {pmcid}'}")
+    if limit:
+        print(f"Filter: First {limit} documents")
+    elif pmcid:
+        print(f"Filter: PMCID {pmcid}")
+    else:
+        print("Filter: All documents")
     print(f"Minimum occurrences: {min_occurrences}")
     print(f"Output directory: {output_dir}/")
     print("="*80 + "\n")
@@ -74,6 +80,12 @@ def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entit
     db = get_db_connection()
 
     with db.session_scope() as session:
+        # Get document IDs to filter by (if limit is specified)
+        doc_ids = None
+        if limit:
+            doc_ids = [doc.id for doc in session.query(Document.id).limit(limit).all()]
+            print(f"Processing entities from {len(doc_ids)} documents\n")
+
         # Build query
         query = (
             session.query(
@@ -94,8 +106,11 @@ def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entit
             .filter(Entity.umls_cui.isnot(None))  # Only entities with UMLS mapping
         )
 
+        # Filter by document IDs if limit specified
+        if doc_ids:
+            query = query.filter(Document.id.in_(doc_ids))
         # Filter by PMCID if specified
-        if pmcid:
+        elif pmcid:
             query = query.filter(Document.pmcid == pmcid)
 
         # Order by CUI for consistent output
@@ -296,6 +311,11 @@ Examples:
         default='umls_entities',
         help='Output directory for output files (default: umls_entities/)'
     )
+    parser.add_argument(
+        '--limit',
+        type=int,
+        help='Process only first N documents (default: all documents)'
+    )
 
     args = parser.parse_args()
 
@@ -303,7 +323,8 @@ Examples:
         merge_entities_by_umls(
             pmcid=args.pmcid,
             min_occurrences=args.min_occurrences,
-            output_dir=args.output_dir
+            output_dir=args.output_dir,
+            limit=args.limit
         )
     except Exception as e:
         print(f"\n❌ Error: {e}\n")

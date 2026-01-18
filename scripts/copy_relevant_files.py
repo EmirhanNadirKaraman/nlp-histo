@@ -2,16 +2,13 @@ import os
 import sys
 import shutil
 from pathlib import Path
+import argparse
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from database import get_db_connection, Entity
 from sqlalchemy import or_
-
-# 1. Configuration
-SOURCE_DIR = "umls_entities/"  # Folder containing all JSONs
-DEST_DIR = "relevant_texts/" # Where you want the filtered files to go
 
 # The relevant TUIs for Diseases, Neoplasms, Mental Disorders, and Symptoms
 # Mapping of TUI codes to their human-readable UMLS Semantic Type names
@@ -26,20 +23,26 @@ UMLS_DISEASE_TYPES = {
     'T033': 'Finding'
 }
 
-def copy_disease_files():
+def copy_disease_files(source_dir="umls_entities/", dest_dir="relevant_texts/"):
+    """
+    Copy disease-related files from source to destination directory.
+
+    Args:
+        source_dir: Directory containing all UMLS entity files
+        dest_dir: Directory where disease-related files will be copied
+    """
     # Create destination directory if it doesn't exist
-    if not os.path.exists(DEST_DIR):
-        os.makedirs(DEST_DIR)
-        print(f"Created directory: {DEST_DIR}")
+    if not os.path.exists(dest_dir):
+        os.makedirs(dest_dir)
+        print(f"Created directory: {dest_dir}")
 
     db = get_db_connection()
     RELEVANT_TUIS = list(UMLS_DISEASE_TYPES.keys())
 
     with db.session_scope() as session:
-        # 2. Query the DB for unique CUIs that have the relevant semantic types
-        # We use a filter that checks if the semantic_types column contains our target TUIs
+        # Query the DB for unique CUIs that have the relevant semantic types
         query_filters = [Entity.semantic_types.contains(tui) for tui in RELEVANT_TUIS]
-        
+
         disease_entities = session.query(Entity.umls_cui).filter(
             or_(*query_filters)
         ).distinct().all()
@@ -47,19 +50,19 @@ def copy_disease_files():
         disease_cuis = {res[0] for res in disease_entities if res[0]}
         print(f"Found {len(disease_cuis)} unique disease CUIs in the database.")
 
-        # 3. Iterate through the files and copy if the CUI matches
+        # Iterate through the files and copy if the CUI matches
         copied_count = 0
-        all_files = os.listdir(SOURCE_DIR)
-        
+        all_files = os.listdir(source_dir)
+
         for filename in all_files:
             if filename.endswith(".txt"):
-                # Extract CUI from filename (e.g., 'C0000737_Abdominal_Pain.json')
+                # Extract CUI from filename (e.g., 'C0000737_Abdominal_Pain.txt')
                 cui = filename.split('_')[0]
-                
+
                 if cui in disease_cuis:
-                    src_path = os.path.join(SOURCE_DIR, filename)
-                    dst_path = os.path.join(DEST_DIR, filename)
-                    
+                    src_path = os.path.join(source_dir, filename)
+                    dst_path = os.path.join(dest_dir, filename)
+
                     try:
                         shutil.copy2(src_path, dst_path)
                         copied_count += 1
@@ -68,7 +71,39 @@ def copy_disease_files():
 
         print("\n--- Process Complete ---")
         print(f"Files scanned: {len(all_files)}")
-        print(f"Files copied to '{DEST_DIR}': {copied_count}")
+        print(f"Files copied to '{dest_dir}': {copied_count}")
+
+        return copied_count
 
 if __name__ == "__main__":
-    copy_disease_files()
+    parser = argparse.ArgumentParser(
+        description="Copy disease-related UMLS entity files",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Default directories
+  python scripts/copy_relevant_files.py
+
+  # Custom directories
+  python scripts/copy_relevant_files.py --source test_umls/ --dest test_relevant/
+
+  # Use with test results
+  python scripts/copy_relevant_files.py --source test_results_50_docs/umls_entities --dest test_results_50_docs/relevant_texts
+        """
+    )
+
+    parser.add_argument(
+        '--source',
+        type=str,
+        default='umls_entities/',
+        help='Source directory containing UMLS entity files (default: umls_entities/)'
+    )
+    parser.add_argument(
+        '--dest',
+        type=str,
+        default='relevant_texts/',
+        help='Destination directory for disease-related files (default: relevant_texts/)'
+    )
+
+    args = parser.parse_args()
+    copy_disease_files(source_dir=args.source, dest_dir=args.dest)
