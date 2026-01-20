@@ -2,6 +2,22 @@
 
 A comprehensive system for extracting, parsing, and storing hierarchical text data from histopathology papers. Supports both PubMed Central XML files and PDF documents with medical-grade parsing capabilities.
 
+## General pipeline
+file-selector
+
+file_selector.py —> chooses PMIDs from oa_file_list, writes into target_pmc_ids.txt
+file_downloader.py —> downloads the tarballs with ids in target_pmc_ids.txt, and puts them into histopathology_papers folder
+tarball_extractor.py —> extracts pdfs and nxml files from the tarballs
+pdf_organizer.py —> puts the pdf and nxml files in separate folders (organized_pdfs and organized_xmls)
+
+scripts + named-entity-recognition
+latest_ingest.py  —> masks tables, extracts text, inserts into database
+batch_ner.py —> performs NER
+merge_entities_by_umls.py —> writes all texts related to the concept into json and txt files
+add_semantic_types_from_cui.py —> adds semantic types to the database
+copy_relevant_files.py —> copies the relevant files inside another folder 
+
+
 ## Features
 
 ### PDF Parsing (Medical-Grade)
@@ -12,12 +28,6 @@ A comprehensive system for extracting, parsing, and storing hierarchical text da
 - **📚 Citation Removal**: Cleans citation numbers for readable output
 - **📖 Reference Tracking**: Detects and indexes all figure/table references in text
 - **📁 Organized Output**: 8 different output formats including grouped readable text
-
-### XML Parsing
-- **Hierarchical Extraction**: Extract sections and paragraphs from JATS XML files
-- **Database Storage**: Store text data in PostgreSQL with unique hierarchical paths
-- **Metadata Extraction**: Title, journal, publication year from XML files
-- **Query Tools**: Example scripts for querying and analyzing stored data
 
 ## Project Structure
 
