@@ -116,6 +116,7 @@ class CompletePipelineProcessor:
         tables_dir: str = "files/tables",
         text_dir: str = "out/text",
         blacklist_file: str = "out/failed_pdfs_blacklist.json"
+        
     ):
         """Initialize the processor."""
         if DB_AVAILABLE:
