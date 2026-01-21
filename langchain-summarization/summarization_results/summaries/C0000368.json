@@ -1,0 +1,225 @@
+{
+  "status": "success",
+  "cui": "C0000368",
+  "concept_name": "3,3'-Diaminobenzidine",
+  "summary": "The immunohistochemical study was conducted using an automated Ventana machine on 3-micron-thick tissue sections, with diaminobenzidine (DAB) used as the chromogen for visualizing the antigen-antibody complex [C1:S1|PMC11503264|446]. The study assessed the percentage of positive tumor cells and staining intensity, both scored semi-quantitatively [C1:S1|PMC11503264|446]. A histoscore was calculated by multiplying these two scores, and adnexal structures were used as internal positive controls [C1:S1|PMC11503264|446].",
+  "rules": [
+    {
+      "rule_id": "R1",
+      "type": "Diagnostic",
+      "condition": "IF performing an immunohistochemical study",
+      "action": "THEN use diaminobenzidine (DAB) as the chromogen to visualize the antigen-antibody complex",
+      "confidence": "High",
+      "evidence_chain": [
+        {
+          "chunk_id": "C1",
+          "sentence_id": "S1",
+          "pmcid": "PMC11503264",
+          "text_element_id": 446,
+          "verbatim": "The antigen-antibody complex was visualized using diaminobenzidine (DAB) as the chromogen."
+        }
+      ],
+      "contraindications": []
+    },
+    {
+      "rule_id": "R2",
+      "type": "Diagnostic",
+      "condition": "IF conducting an immunohistochemical study",
+      "action": "THEN assess the percentage of positive tumor cells and staining intensity, and calculate a histoscore by multiplying these two scores",
+      "confidence": "High",
+      "evidence_chain": [
+        {
+          "chunk_id": "C1",
+          "sentence_id": "S1",
+          "pmcid": "PMC11503264",
+          "text_element_id": 446,
+          "verbatim": "For each case, the percentage of positive tumor cells was assessed and scored semi-quantitatively... The staining intensity was also evaluated semi-quantitatively."
+        },
+        {
+          "chunk_id": "C1",
+          "sentence_id": "S1",
+          "pmcid": "PMC11503264",
+          "text_element_id": 446,
+          "verbatim": "A histoscore was calculated for each case by multiplying the two scores (percentage of positive cells and staining intensity, ranging from 0 to 12)."
+        }
+      ],
+      "contraindications": []
+    },
+    {
+      "rule_id": "R3",
+      "type": "Diagnostic",
+      "condition": "IF performing an immunohistochemical study",
+      "action": "THEN use adnexal structures as internal positive controls in each section",
+      "confidence": "High",
+      "evidence_chain": [
+        {
+          "chunk_id": "C1",
+          "sentence_id": "S1",
+          "pmcid": "PMC11503264",
+          "text_element_id": 446,
+          "verbatim": "Adnexal (pilosebaceous or sweat gland) structures served as internal positive controls in each section."
+        }
+      ],
+      "contraindications": []
+    }
+  ],
+  "audit_trail": {
+    "master_summary": {
+      "concept": "3,3'-Diaminobenzidine",
+      "sections": {
+        "clinical_significance": {
+          "findings": [
+            {
+              "claim": "Immunohistochemical study was performed using diaminobenzidine (DAB) as the chromogen.",
+              "sources": [
+                {
+                  "chunk": "C1",
+                  "sentences": [
+                    "S1|PMC11503264|446"
+                  ],
+                  "verbatim": "The antigen-antibody complex was visualized using diaminobenzidine (DAB) as the chromogen."
+                }
+              ],
+              "strength": "strong"
+            }
+          ]
+        },
+        "histopathological_features": {
+          "findings": [
+            {
+              "claim": "The immunohistochemical study involved assessing the percentage of positive tumor cells and staining intensity.",
+              "sources": [
+                {
+                  "chunk": "C1",
+                  "sentences": [
+                    "S1|PMC11503264|446"
+                  ],
+                  "verbatim": "For each case, the percentage of positive tumor cells was assessed and scored semi-quantitatively... The staining intensity was also evaluated semi-quantitatively."
+                }
+              ],
+              "strength": "strong"
+            },
+            {
+              "claim": "A histoscore was calculated for each case by multiplying the percentage of positive cells and staining intensity.",
+              "sources": [
+                {
+                  "chunk": "C1",
+                  "sentences": [
+                    "S1|PMC11503264|446"
+                  ],
+                  "verbatim": "A histoscore was calculated for each case by multiplying the two scores (percentage of positive cells and staining intensity, ranging from 0 to 12)."
+                }
+              ],
+              "strength": "strong"
+            },
+            {
+              "claim": "Adnexal structures served as internal positive controls in each section.",
+              "sources": [
+                {
+                  "chunk": "C1",
+                  "sentences": [
+                    "S1|PMC11503264|446"
+                  ],
+                  "verbatim": "Adnexal (pilosebaceous or sweat gland) structures served as internal positive controls in each section."
+                }
+              ],
+              "strength": "strong"
+            }
+          ]
+        },
+        "management_outcomes": {
+          "findings": []
+        },
+        "risk_factors_associations": {
+          "findings": []
+        }
+      },
+      "narrative_summary": "The immunohistochemical study was conducted using an automated Ventana machine on 3-micron-thick tissue sections, with diaminobenzidine (DAB) used as the chromogen for visualizing the antigen-antibody complex [C1:S1|PMC11503264|446]. The study assessed the percentage of positive tumor cells and staining intensity, both scored semi-quantitatively [C1:S1|PMC11503264|446]. A histoscore was calculated by multiplying these two scores, and adnexal structures were used as internal positive controls [C1:S1|PMC11503264|446].",
+      "audit_trail": {
+        "chunks_processed": 1,
+        "total_sentences_cited": 1,
+        "unique_pmcids": [
+          "PMC11503264"
+        ],
+        "unique_text_element_ids": [
+          446
+        ],
+        "evidence_conflicts": []
+      }
+    },
+    "rules_provenance": {
+      "rules": [
+        {
+          "rule_id": "R1",
+          "type": "Diagnostic",
+          "condition": "IF performing an immunohistochemical study",
+          "action": "THEN use diaminobenzidine (DAB) as the chromogen to visualize the antigen-antibody complex",
+          "confidence": "High",
+          "evidence_chain": [
+            {
+              "chunk_id": "C1",
+              "sentence_id": "S1",
+              "pmcid": "PMC11503264",
+              "text_element_id": 446,
+              "verbatim": "The antigen-antibody complex was visualized using diaminobenzidine (DAB) as the chromogen."
+            }
+          ],
+          "contraindications": []
+        },
+        {
+          "rule_id": "R2",
+          "type": "Diagnostic",
+          "condition": "IF conducting an immunohistochemical study",
+          "action": "THEN assess the percentage of positive tumor cells and staining intensity, and calculate a histoscore by multiplying these two scores",
+          "confidence": "High",
+          "evidence_chain": [
+            {
+              "chunk_id": "C1",
+              "sentence_id": "S1",
+              "pmcid": "PMC11503264",
+              "text_element_id": 446,
+              "verbatim": "For each case, the percentage of positive tumor cells was assessed and scored semi-quantitatively... The staining intensity was also evaluated semi-quantitatively."
+            },
+            {
+              "chunk_id": "C1",
+              "sentence_id": "S1",
+              "pmcid": "PMC11503264",
+              "text_element_id": 446,
+              "verbatim": "A histoscore was calculated for each case by multiplying the two scores (percentage of positive cells and staining intensity, ranging from 0 to 12)."
+            }
+          ],
+          "contraindications": []
+        },
+        {
+          "rule_id": "R3",
+          "type": "Diagnostic",
+          "condition": "IF performing an immunohistochemical study",
+          "action": "THEN use adnexal structures as internal positive controls in each section",
+          "confidence": "High",
+          "evidence_chain": [
+            {
+              "chunk_id": "C1",
+              "sentence_id": "S1",
+              "pmcid": "PMC11503264",
+              "text_element_id": 446,
+              "verbatim": "Adnexal (pilosebaceous or sweat gland) structures served as internal positive controls in each section."
+            }
+          ],
+          "contraindications": []
+        }
+      ],
+      "audit_summary": {
+        "total_rules": 3,
+        "rules_by_type": {
+          "Diagnostic": 3,
+          "Prognostic": 0,
+          "Management": 0
+        },
+        "pmcids_supporting_rules": [
+          "PMC11503264"
+        ],
+        "average_evidence_per_rule": 1.333
+      }
+    }
+  }
+}
