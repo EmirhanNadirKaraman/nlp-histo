@@ -216,3 +216,4 @@ out/
 umls_entities/
 umls_texts/
 relevant_texts/
+langchain-summarization/summarization_results/

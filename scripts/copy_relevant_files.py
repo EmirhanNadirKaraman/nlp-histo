@@ -23,7 +23,7 @@ UMLS_DISEASE_TYPES = {
     'T033': 'Finding'
 }
 
-def copy_disease_files(source_dir="umls_entities/", dest_dir="relevant_texts/"):
+def copy_disease_files(source_dir="umls_entities/", dest_dir="relevant_json/"):
     """
     Copy disease-related files from source to destination directory.
 
@@ -55,7 +55,7 @@ def copy_disease_files(source_dir="umls_entities/", dest_dir="relevant_texts/"):
         all_files = os.listdir(source_dir)
 
         for filename in all_files:
-            if filename.endswith(".txt"):
+            if filename.endswith(".json"):
                 # Extract CUI from filename (e.g., 'C0000737_Abdominal_Pain.txt')
                 cui = filename.split('_')[0]
 
