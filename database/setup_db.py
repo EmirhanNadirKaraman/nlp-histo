@@ -113,16 +113,7 @@ def setup_database(drop_existing=False, check_only=False):
                 close_db_connection()
                 return
             else:
-                print("⚠ WARNING: Some tables exist but not all!")
-                print("\nThis suggests an incomplete setup or migration.")
-                print("\nOptions:")
-                print("  1. Drop and recreate all tables:")
-                print("     python database/setup_db.py --drop")
-                print("  2. Run migration scripts to add missing tables:")
-                print("     python database/migrate_add_tables_and_references.py")
-                print("\nTo proceed, use one of the options above.")
-                close_db_connection()
-                return
+                print("Some tables are missing. Creating missing tables...\n")
 
         # Drop existing tables if requested
         if drop_existing and tables_exist:

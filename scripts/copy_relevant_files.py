@@ -8,20 +8,9 @@ import argparse
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from database import get_db_connection, Entity
-from sqlalchemy import or_
-
-# The relevant TUIs for Diseases, Neoplasms, Mental Disorders, and Symptoms
-# Mapping of TUI codes to their human-readable UMLS Semantic Type names
-UMLS_DISEASE_TYPES = {
-    'T047': 'Disease or Syndrome',
-    'T191': 'Neoplastic Process',
-    'T048': 'Mental or Behavioral Dysfunction',
-    'T037': 'Injury or Poisoning',
-    'T046': 'Pathologic Function',
-    'T020': 'Congenital Abnormality',
-    'T184': 'Sign or Symptom',
-    'T033': 'Finding'
-}
+from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import array 
+from named_entity_recognition.enums import UMLS_DISEASE_TYPES
 
 def copy_disease_files(source_dir="umls_entities/", dest_dir="relevant_json/"):
     """
@@ -41,13 +30,12 @@ def copy_disease_files(source_dir="umls_entities/", dest_dir="relevant_json/"):
 
     with db.session_scope() as session:
         # Query the DB for unique CUIs that have the relevant semantic types
-        query_filters = [Entity.semantic_types.contains(tui) for tui in RELEVANT_TUIS]
-
-        disease_entities = session.query(Entity.umls_cui).filter(
-            or_(*query_filters)
+        # query_filters = [Entity.semantic_types.contains(tui) for tui in RELEVANT_TUIS]
+        disease_entities = session.query(Entity).filter(
+            Entity.semantic_types.op('&&')(array(RELEVANT_TUIS)) # '&&' checks if the arrays have any common elements
         ).distinct().all()
 
-        disease_cuis = {res[0] for res in disease_entities if res[0]}
+        disease_cuis = {entity.umls_cui for entity in disease_entities if entity.umls_cui}
         print(f"Found {len(disease_cuis)} unique disease CUIs in the database.")
 
         # Iterate through the files and copy if the CUI matches
@@ -56,7 +44,7 @@ def copy_disease_files(source_dir="umls_entities/", dest_dir="relevant_json/"):
 
         for filename in all_files:
             if filename.endswith(".json"):
-                # Extract CUI from filename (e.g., 'C0000737_Abdominal_Pain.txt')
+                # Extract CUI from filename (e.g., 'C0000737_Abdominal_Pain.json')
                 cui = filename.split('_')[0]
 
                 if cui in disease_cuis:

@@ -277,7 +277,7 @@ class Entity(Base):
     umls_cui = Column(String(20), index=True)  # UMLS Concept Unique Identifier
     umls_score = Column(Float)  # Linking confidence score (0.0-1.0)
     canonical_name = Column(Text)  # Human-readable UMLS concept name
-    semantic_types = Column(String, nullable=True)  # To store TUI codes or names
+    semantic_types = Column(ARRAY(Text), nullable=True)  # To store TUI codes or names
 
     # NER model metadata
     model_name = Column(String(100))  # e.g., 'en_core_sci_sm', 'en_core_web_sm'

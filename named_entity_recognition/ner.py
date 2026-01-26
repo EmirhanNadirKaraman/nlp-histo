@@ -1,6 +1,7 @@
 # query the database to get all texts in a document, filter out the ones with few character counts, and run NER from scispacy on it
 import sys
 from pathlib import Path
+from tqdm import tqdm
 
 # Add parent directory to path so we can import database module
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -8,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import spacy
 from sqlalchemy import func
 from database import get_db_connection, TextElement, Document, Entity
+import scispacy
+from scispacy.linking import EntityLinker
 
 def run_ner_on_db(pmcid: str, min_chars: int = 50, save_to_db: bool = False, force: bool = False, nlp=None):
     """
@@ -46,7 +49,7 @@ def run_ner_on_db(pmcid: str, min_chars: int = 50, save_to_db: bool = False, for
 
         except Exception as e:
             # Fallback logic as you had it...
-            pass
+            print(e)
 
     # Retrieve the linker if it exists in the pipeline
     if "scispacy_linker" in nlp.pipe_names:
@@ -72,29 +75,6 @@ def run_ner_on_db(pmcid: str, min_chars: int = 50, save_to_db: bool = False, for
                 print(f"⚠ Document {pmcid} already has {existing_count} entities in database.")
                 print(f"Skipping processing. Use --force to reprocess and replace.\n")
                 return []
-
-        # Delete existing entities if force reprocessing
-        if save_to_db and force:
-            # First get the text_element IDs for this document
-            text_element_ids = (
-                session.query(TextElement.id)
-                .join(Document)
-                .filter(Document.pmcid == pmcid)
-                .all()
-            )
-            text_element_ids = [te_id[0] for te_id in text_element_ids]
-
-            if text_element_ids:
-                # Delete entities for these text elements
-                deleted_count = (
-                    session.query(Entity)
-                    .filter(Entity.text_element_id.in_(text_element_ids))
-                    .delete(synchronize_session=False)
-                )
-                if deleted_count > 0:
-                    session.commit()
-                    print(f"Deleted {deleted_count} existing entities for {pmcid} (force reprocessing)\n")
-
 
         # Step 1: SQL-level filtering (much faster than Python filtering)
         results = (
@@ -130,7 +110,9 @@ def run_ner_on_db(pmcid: str, min_chars: int = 50, save_to_db: bool = False, for
         # Using smaller batch_size (10) because the Linker is RAM-intensive
         batch_size = 10 if linker else 20
 
-        for i, doc in enumerate(nlp.pipe(texts, batch_size=batch_size)):
+        for i, doc in tqdm(enumerate(nlp.pipe(texts, batch_size=batch_size)), 
+                           total=len(texts), 
+                           desc="🔍 Running NER"):
             if doc.ents:
                 section_info = {"section": metadata[i], "entities": []}
 
@@ -138,46 +120,62 @@ def run_ner_on_db(pmcid: str, min_chars: int = 50, save_to_db: bool = False, for
                     umls_cui = None
                     umls_score = None
                     canonical = None
+                    semantic_types = None
 
                     # Extract UMLS Linking Info if available
                     if linker and hasattr(ent._, 'kb_ents') and ent._.kb_ents:
                         # Get top match: (CUI, Score)
-                        umls_cui, umls_score = ent._.kb_ents[0]
-                        # Look up the human-readable concept
-                        try:
-                            concept = linker.kb.cui_to_entity.get(umls_cui)
-                            if concept:
-                                canonical = concept.canonical_name
-                        except Exception as e:
-                            # Skip canonical name if lookup fails
-                            pass
 
-                    # Collect for display
-                    section_info["entities"].append((ent.text, ent.label_, umls_cui, canonical))
+                        for umls_cui, umls_score in ent._.kb_ents:
+                            # Look up the human-readable concept
+                            try:
+                                concept = linker.kb.cui_to_entity.get(umls_cui)
+                                if concept:
+                                    canonical = concept.canonical_name
+                                    semantic_types = concept.types
+                            except Exception as e:
+                                # Skip canonical name if lookup fails
+                                print(e)
 
-                    # Prepare entities for database if save_to_db is True
-                    if save_to_db:
-                        entities_to_save.append(Entity(
-                            text_element_id=text_element_ids[i],
-                            entity_text=ent.text,
-                            entity_label=ent.label_,
-                            umls_cui=umls_cui,
-                            umls_score=umls_score,
-                            canonical_name=canonical,
-                            start_char=ent.start_char,
-                            end_char=ent.end_char,
-                            model_name=model_name,
-                            linker_name=linker_name
-                        ))
+                            # Prepare entities for database if save_to_db is True
+                            if save_to_db:
+                                entities_to_save.append(Entity(
+                                    text_element_id=text_element_ids[i],
+                                    entity_text=ent.text,
+                                    entity_label=ent.label_,
+                                    umls_cui=umls_cui,
+                                    umls_score=umls_score,
+                                    canonical_name=canonical,
+                                    start_char=ent.start_char,
+                                    end_char=ent.end_char,
+                                    model_name=model_name,
+                                    linker_name=linker_name,
+                                    semantic_types=semantic_types
+                                ))
+                        # Collect for display
+                        section_info["entities"].append((ent.text, ent.label_, umls_cui, canonical, semantic_types))
 
                 extracted_data.append(section_info)
 
         # Step 3: Save to database if requested
         if save_to_db and entities_to_save:
-            print(f"Saving {len(entities_to_save)} entities to database...")
-            session.add_all(entities_to_save)
-            session.commit()
-            print(f"✓ Saved {len(entities_to_save)} entities successfully!")
+            try: 
+                if force:
+                    print(f"Queueing deletion of old entities for {pmcid}...")
+                    session.query(Entity).filter(
+                        Entity.text_element_id.in_(text_element_ids)
+                    ).delete(synchronize_session=False)
+
+                print(f"Saving {len(entities_to_save)} entities to database...")
+                # session.add_all(entities_to_save)
+                session.bulk_save_objects(entities_to_save)
+                session.commit()
+                print(f"✓ Saved {len(entities_to_save)} entities successfully!")
+                
+            except Exception as e:
+                session.rollback()
+                print(f"❌ Error during DB transaction: {e}")
+                raise e            
 
         return extracted_data
 
@@ -203,9 +201,9 @@ if __name__ == "__main__":
             print(f"{i}. Section: {item['section']}")
             print(f"   Entities:")
             for ent_data in item['entities'][:10]:  # Show first 10 entities per section
-                text, label, cui, canonical = ent_data
+                text, label, cui, canonical, semantic_types = ent_data
                 if cui and canonical:
-                    print(f"     - {text} ({label}) -> {canonical} [CUI: {cui}]")
+                    print(f"     - {text} ({label}) -> {canonical} [CUI: {cui}]: {semantic_types}")
                 else:
                     print(f"     - {text} ({label})")
             if len(item['entities']) > 10:
