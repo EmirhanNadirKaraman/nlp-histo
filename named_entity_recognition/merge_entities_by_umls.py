@@ -116,20 +116,9 @@ def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entit
         # Order by CUI for consistent output
         query = query.order_by(Entity.umls_cui)
 
-        print("Querying database...")
-        results = query.all()
-
-        if not results:
-            print("No entities with UMLS mappings found.")
-            if pmcid:
-                print(f"\nMake sure document {pmcid} has been processed with NER:")
-                print(f"  python named-entity-recognition/ner.py {pmcid} --save")
-            return {}
-
-        print(f"Found {len(results)} entity occurrences with UMLS mappings\n")
+        print("Querying database (streaming results)...")
 
         # Group by UMLS CUI
-        print("Merging entities by UMLS CUI...")
         umls_groups = defaultdict(lambda: {
             "canonical_name": None,
             "entity_label": None,
@@ -139,7 +128,9 @@ def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entit
             "seen_sentences": set()  # Track unique sentence texts
         })
 
-        for row in results:
+        row_count = 0
+        for row in query.yield_per(1000):
+            row_count += 1
             cui = row.umls_cui
 
             # Set metadata (first occurrence)
@@ -165,6 +156,15 @@ def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entit
                     "end_char": row.end_char,
                     "umls_score": float(row.umls_score) if row.umls_score else None
                 })
+
+        if row_count == 0:
+            print("No entities with UMLS mappings found.")
+            if pmcid:
+                print(f"\nMake sure document {pmcid} has been processed with NER:")
+                print(f"  python named-entity-recognition/ner.py {pmcid} --save")
+            return {}
+
+        print(f"Processed {row_count} entity occurrences with UMLS mappings\n")
 
         # Filter by minimum occurrences and convert sets to lists
         print(f"Filtering CUIs with at least {min_occurrences} occurrences...")
