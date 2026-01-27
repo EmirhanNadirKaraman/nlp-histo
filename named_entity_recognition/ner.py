@@ -15,13 +15,13 @@ from database import get_db_connection, TextElement, Document, Entity
 
 def load_ner_model():
     """Load fast NER model without linker."""
-    nlp = spacy.load("en_core_sci_sm", disable=["parser", "attribute_ruler", "lemmatizer"])
+    nlp = spacy.load("en_core_sci_lg", disable=["parser", "attribute_ruler", "lemmatizer"])
     return nlp
 
 
 def load_linker_model():
     """Load model with UMLS linker for entity linking."""
-    nlp = spacy.load("en_core_sci_sm", disable=["parser", "attribute_ruler", "lemmatizer"])
+    nlp = spacy.load("en_core_sci_lg", disable=["parser", "attribute_ruler", "lemmatizer"])
     nlp.add_pipe("scispacy_linker", config={
         "resolve_abbreviations": True,
         "linker_name": "umls",
@@ -135,18 +135,22 @@ def run_ner_on_db(pmcid: str, min_chars: int = 50, save_to_db: bool = False, for
     db = get_db_connection()
 
     with db.session_scope() as session:
-        # Check if entities already exist for this document
+        # Get model name early for skip check
+        model_name = nlp.meta.get('name', 'unknown')
+
+        # Check if entities from THIS MODEL already exist for this document
         if save_to_db and not force:
             existing_count = (
                 session.query(func.count(Entity.id))
                 .join(TextElement)
                 .join(Document)
                 .filter(Document.pmcid == pmcid)
+                .filter(Entity.model_name == model_name)
                 .scalar()
             )
 
             if existing_count > 0:
-                print(f"⚠ Document {pmcid} already has {existing_count} entities in database.")
+                print(f"⚠ Document {pmcid} already has {existing_count} entities from model '{model_name}'.")
                 print("Skipping processing. Use --force to reprocess and replace.\n")
                 return []
 
@@ -172,9 +176,6 @@ def run_ner_on_db(pmcid: str, min_chars: int = 50, save_to_db: bool = False, for
         metadata = [r[2] for r in results]
 
         print(f"Processing {len(texts)} text blocks for {pmcid}...")
-
-        # Get model name for metadata
-        model_name = nlp.meta.get('name', 'unknown')
 
         # Step 2: FAST NER pass (no linker) - collect all entities
         all_entities = []  # List of (doc_idx, ent_text, ent_label, start_char, end_char)
@@ -269,9 +270,10 @@ def run_ner_on_db(pmcid: str, min_chars: int = 50, save_to_db: bool = False, for
         if save_to_db and entities_to_save:
             try:
                 if force:
-                    print(f"Queueing deletion of old entities for {pmcid}...")
+                    print(f"Queueing deletion of old entities from model '{model_name}' for {pmcid}...")
                     session.query(Entity).filter(
-                        Entity.text_element_id.in_(text_element_ids)
+                        Entity.text_element_id.in_(text_element_ids),
+                        Entity.model_name == model_name
                     ).delete(synchronize_session=False)
 
                 print(f"Saving {len(entities_to_save)} entities to database...")

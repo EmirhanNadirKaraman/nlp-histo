@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from database import get_db_connection, Entity, TextElement, Document
 
 
-def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entities", limit=None):
+def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir=None, limit=None, model_name=None):
     """
     Merge all sentences where each UMLS entry occurs.
     Creates separate JSON and TXT files for each UMLS CUI.
@@ -54,15 +54,32 @@ def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entit
     Args:
         pmcid: Optional PMCID to filter results (processes all documents if None)
         min_occurrences: Minimum number of occurrences to include a CUI
-        output_dir: Output directory for output files (one file per CUI)
+        output_dir: Output directory for output files (one file per CUI).
+                    If None, auto-generates based on model_name.
         limit: Optional limit to process only first N documents
+        model_name: Optional model name to filter entities (e.g., 'en_core_sci_lg')
 
     Returns:
         dict: Merged entity data grouped by UMLS CUI
     """
+    # Auto-generate output directory based on model name if not specified
+    if output_dir is None:
+        if model_name:
+            # Extract short name: en_core_sci_lg -> lg, en_core_sci_sm -> sm
+            if model_name.endswith('_lg'):
+                output_dir = "umls_entities_lg"
+            elif model_name.endswith('_sm'):
+                output_dir = "umls_entities_sm"
+            else:
+                output_dir = f"umls_entities_{model_name}"
+        else:
+            output_dir = "umls_entities"
+
     print("="*80)
     print("UMLS Entity Merger - Separate JSON Files")
     print("="*80)
+    if model_name:
+        print(f"Model filter: {model_name}")
     if limit:
         print(f"Filter: First {limit} documents")
     elif pmcid:
@@ -105,6 +122,10 @@ def merge_entities_by_umls(pmcid=None, min_occurrences=1, output_dir="umls_entit
             .join(Document, TextElement.document_id == Document.id)
             .filter(Entity.umls_cui.isnot(None))  # Only entities with UMLS mapping
         )
+
+        # Filter by model name if specified
+        if model_name:
+            query = query.filter(Entity.model_name == model_name)
 
         # Filter by document IDs if limit specified
         if doc_ids:
@@ -281,16 +302,19 @@ def main():
         epilog="""
 Examples:
   # Process all documents (creates both JSON and TXT files)
-  python named-entity-recognition/merge_entities_by_umls.py
+  python named_entity_recognition/merge_entities_by_umls.py
+
+  # Filter by model (auto-sets output dir to umls_entities_lg)
+  python named_entity_recognition/merge_entities_by_umls.py --model en_core_sci_lg
 
   # Process specific document
-  python named-entity-recognition/merge_entities_by_umls.py --pmcid PMC1448691
+  python named_entity_recognition/merge_entities_by_umls.py --pmcid PMC1448691
 
   # Filter by minimum occurrences (only CUIs with 10+ mentions)
-  python named-entity-recognition/merge_entities_by_umls.py --min-occurrences 10
+  python named_entity_recognition/merge_entities_by_umls.py --min-occurrences 10
 
   # Custom output directory
-  python named-entity-recognition/merge_entities_by_umls.py --output-dir results/umls_concepts
+  python named_entity_recognition/merge_entities_by_umls.py --output-dir results/umls_concepts
         """
     )
 
@@ -308,13 +332,19 @@ Examples:
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='umls_entities',
-        help='Output directory for output files (default: umls_entities/)'
+        default=None,
+        help='Output directory for output files (default: auto-based on model)'
     )
     parser.add_argument(
         '--limit',
         type=int,
         help='Process only first N documents (default: all documents)'
+    )
+    parser.add_argument(
+        '--model',
+        type=str,
+        default='en_core_sci_lg',
+        help='Filter by model name (default: en_core_sci_lg). Output dir auto-set if not specified.'
     )
 
     args = parser.parse_args()
@@ -324,7 +354,8 @@ Examples:
             pmcid=args.pmcid,
             min_occurrences=args.min_occurrences,
             output_dir=args.output_dir,
-            limit=args.limit
+            limit=args.limit,
+            model_name=args.model
         )
     except Exception as e:
         print(f"\n❌ Error: {e}\n")

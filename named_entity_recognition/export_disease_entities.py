@@ -35,28 +35,44 @@ from named_entity_recognition.enums import UMLS_DISEASE_TYPES
 
 
 def export_disease_entities(
-    output_dir: str = "disease_entities",
+    output_dir: str = None,
     min_occurrences: int = 1,
     semantic_types: list = None,
     limit: int = None,
-    pmcid: str = None
+    pmcid: str = None,
+    model_name: str = None
 ):
     """
     Query disease-related entities and export grouped by UMLS CUI.
 
     Args:
-        output_dir: Output directory for JSON/TXT files
+        output_dir: Output directory for JSON/TXT files. If None, auto-generates based on model_name.
         min_occurrences: Minimum occurrences to include a CUI
         semantic_types: List of TUI codes to filter (default: all disease types)
         limit: Limit to first N documents
         pmcid: Filter to specific PMCID
+        model_name: Optional model name to filter entities (e.g., 'en_core_sci_lg')
 
     Returns:
         dict: Exported entity data grouped by UMLS CUI
     """
+    # Auto-generate output directory based on model name if not specified
+    if output_dir is None:
+        if model_name:
+            if model_name.endswith('_lg'):
+                output_dir = "disease_entities_lg"
+            elif model_name.endswith('_sm'):
+                output_dir = "disease_entities_sm"
+            else:
+                output_dir = f"disease_entities_{model_name}"
+        else:
+            output_dir = "disease_entities"
     print("=" * 80)
     print("Disease Entity Exporter")
     print("=" * 80)
+
+    if model_name:
+        print(f"Model filter: {model_name}")
 
     # Use default disease types if not specified
     if semantic_types is None:
@@ -109,6 +125,10 @@ def export_disease_entities(
             # Filter by semantic types using array overlap operator
             .filter(Entity.semantic_types.op('&&')(array(semantic_types)))
         )
+
+        # Filter by model name if specified
+        if model_name:
+            query = query.filter(Entity.model_name == model_name)
 
         # Apply optional filters
         if pmcid:
@@ -294,6 +314,9 @@ Examples:
   # Export all disease entities
   python named_entity_recognition/export_disease_entities.py
 
+  # Filter by model (auto-sets output dir to disease_entities_lg)
+  python named_entity_recognition/export_disease_entities.py --model en_core_sci_lg
+
   # Custom output directory
   python named_entity_recognition/export_disease_entities.py --output-dir results/diseases
 
@@ -324,8 +347,14 @@ Available semantic types:
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='disease_entities',
-        help='Output directory for JSON/TXT files (default: disease_entities/)'
+        default=None,
+        help='Output directory for JSON/TXT files (default: auto-based on model)'
+    )
+    parser.add_argument(
+        '--model',
+        type=str,
+        default='en_core_sci_lg',
+        help='Filter by model name (default: en_core_sci_lg). Output dir auto-set if not specified.'
     )
     parser.add_argument(
         '--min-occurrences',
@@ -357,7 +386,8 @@ Available semantic types:
         min_occurrences=args.min_occurrences,
         semantic_types=args.semantic_types,
         limit=args.limit,
-        pmcid=args.pmcid
+        pmcid=args.pmcid,
+        model_name=args.model
     )
 
 

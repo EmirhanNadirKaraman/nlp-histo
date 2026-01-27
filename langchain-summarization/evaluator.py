@@ -30,7 +30,7 @@ from database.models import TextElement, Document
 # GLOBAL INITIALIZATION (Load once, use everywhere)
 # =============================================================================
 print("Initializing Medical Logic Engine...")
-nlp = spacy.load("en_core_sci_sm", disable=["parser", "attribute_ruler", "lemmatizer"])
+nlp = spacy.load("en_core_sci_lg", disable=["parser", "attribute_ruler", "lemmatizer"])
 nlp.add_pipe("sentencizer")
 nlp.add_pipe("scispacy_linker", config={
     "resolve_abbreviations": True,
