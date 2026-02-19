@@ -1,74 +1,180 @@
-# NLP Histopathology
+# NLP Histopathology: Auditable Knowledge Extraction from Medical Literature
 
-A comprehensive system for extracting, parsing, and storing hierarchical text data from histopathology papers. Supports both PubMed Central XML files and PDF documents with medical-grade parsing capabilities.
+A complete pipeline for extracting **structured, traceable medical knowledge** from histopathology papers. The system downloads papers from PubMed Central, parses PDFs into a hierarchical database, performs named entity recognition with UMLS linking, and uses LLM-based summarization to generate clinical rules—all with full provenance tracking back to source sentences.
 
-## General pipeline
-file-selector
+## Key Innovation: Full Audit Trail
 
-file_selector.py —> chooses PMIDs from oa_file_list, writes into target_pmc_ids.txt
-file_downloader.py —> downloads the tarballs with ids in target_pmc_ids.txt, and puts them into histopathology_papers folder
-tarball_extractor.py —> extracts pdfs and nxml files from the tarballs
-pdf_organizer.py —> puts the pdf and nxml files in separate folders (organized_pdfs and organized_xmls)
+Every claim in the final output traces back through:
+```
+Clinical Rule → Summary Claim → Sentence ID → PMCID + text_element_id → Database Record
+```
 
-scripts + named-entity-recognition
-latest_ingest.py  —> masks tables, extracts text, inserts into database
-batch_ner.py —> performs NER
-merge_entities_by_umls.py —> writes all texts related to the concept into json and txt files
-add_semantic_types_from_cui.py —> adds semantic types to the database
-copy_relevant_files.py —> copies the relevant files inside another folder 
+Citation format: `[S1|PMC123456|789]` where:
+- `S1` = sentence index in processing chunk
+- `PMC123456` = PubMed Central paper identifier
+- `789` = database `text_elements.id`
 
+## Pipeline Overview
 
-## Features
-
-### PDF Parsing (Medical-Grade)
-- **🎯 Intelligent Routing**: Automatically routes each page to the optimal parser (PyMuPDF4LLM, Docling, or Marker)
-- **📊 Table Detection**: Enhanced detection for medical tables with keyword-based recognition
-- **🔬 Figure Detection**: Automatic extraction and linking of figures to text references
-- **🧬 Context-Aware Stitching**: Reconnects paragraphs split by tables/figures
-- **📚 Citation Removal**: Cleans citation numbers for readable output
-- **📖 Reference Tracking**: Detects and indexes all figure/table references in text
-- **📁 Organized Output**: 8 different output formats including grouped readable text
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         DATA INGESTION PIPELINE                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  target_pmc_ids.txt                                                         │
+│         │                                                                   │
+│         ▼ file_downloader.py                                                │
+│  histopathology_papers/*.tar.gz                                             │
+│         │                                                                   │
+│         ▼ tarball_extractor.py                                              │
+│  processed_corpus/PMC*/                                                     │
+│         │                                                                   │
+│         ▼ pdf_organizer.py                                                  │
+│  organized_pdfs/*.pdf                                                       │
+│         │                                                                   │
+│         ▼ latest_ingest.py (Docling + masking)                              │
+│  ┌──────┴──────────────────────────────────────────────────┐                │
+│  │  PostgreSQL Database                                    │                │
+│  │  ├── documents (PMCID, title, journal, year)            │                │
+│  │  ├── text_elements (hierarchical paths, text)           │                │
+│  │  ├── figures (cropped images, captions)                 │                │
+│  │  └── tables (cropped images, captions)                  │                │
+│  └─────────────────────────────────────────────────────────┘                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       NAMED ENTITY RECOGNITION                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  batch_ner.py → Extract medical entities (scispacy + UMLS linker)           │
+│         │                                                                   │
+│         ▼                                                                   │
+│  merge_entities_by_umls.py → Group sentences by UMLS concept (CUI)          │
+│         │                                                                   │
+│         ▼                                                                   │
+│  export_disease_entities.py → Filter to disease-related entities only       │
+│         │                                                                   │
+│         ▼                                                                   │
+│  JSON files per concept with full database provenance:                      │
+│  {cui, canonical_name, sentences: [{pmcid, text_element_id, sentence}]}     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    LLM SUMMARIZATION PIPELINE                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  MAP (GPT-4o-mini)                                                  │    │
+│  │  Chunks of 10 sentences → Atomic findings with citations            │    │
+│  │  Categories: morphology | IHC | molecular_genetics | staging |      │    │
+│  │              treatment | prognosis                                  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                    │                                        │
+│                                    ▼                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  REDUCE (GPT-4o)                                                    │    │
+│  │  Consolidate chunk analyses → Master clinical brief                 │    │
+│  │  Sections: clinical_significance | histopathological_features |     │    │
+│  │            management_outcomes | risk_factors_associations          │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                    │                                        │
+│                                    ▼                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  RULE EXTRACTION (GPT-4o)                                           │    │
+│  │  Generate IF-THEN clinical rules with evidence chains               │    │
+│  │  Types: Diagnostic | Prognostic | Management                        │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                    │                                        │
+│                                    ▼                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  EVALUATION (evaluator.py)                                          │    │
+│  │  Verify citations against source text                               │    │
+│  │  Detect hallucinations via numeric + UMLS concept matching          │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+                    Auditable Summaries + Clinical Rules
+                    (JSON with full provenance to source)
+```
 
 ## Project Structure
 
 ```
 nlp-histo/
-├── scripts/                     # Command-line tools
-│   └── parse_single_pdf.py     # PDF parsing CLI
-├── parsers/                     # Parser modules
+├── file-selector/                      # Stage 1: Data Acquisition
+│   ├── file_downloader.py              # Download tarballs from PMC
+│   ├── tarball_extractor.py            # Extract PDFs from tarballs
+│   └── pdf_organizer.py                # Organize into flat directories
+│
+├── parsers/                            # Stage 2: Document Parsing
 │   ├── pdf_parsers/
-│   │   ├── ensemble_parser.py  # Medical-grade ensemble orchestrator
-│   │   ├── pymupdf4llm_parser.py
-│   │   ├── docling_parser.py
-│   │   ├── marker_parser.py
-│   │   ├── deduplicator.py     # Header/footer removal
-│   │   └── base_parser.py
-│   └── xml_parsers/
-│       ├── hierarchical_parser.py  # XML hierarchical parser
-│       └── parser_script.py
-├── database/                    # Database module
-│   ├── models.py               # SQLAlchemy models
-│   ├── db_connection.py        # Connection utilities
-│   ├── schema.sql              # PostgreSQL schema
-│   ├── setup_db.py             # Database setup
-│   ├── xml_to_db.py            # XML import script
-│   └── query_examples.py       # Query examples
-├── file-selector/               # File organization
-│   ├── pdf_organizer.py
-│   ├── tarball_extractor.py
-│   └── file_downloader.py
-├── files/                       # Data directory
-│   ├── organized_xmls/          # XML files
-│   └── organized_pdfs/          # PDF files
-├── output/                      # PDF parsing output
-│   └── {paper_name}/
-│       └── {timestamp}/
-│           ├── routing_full.json
-│           ├── routing_grouped_readable.txt  # ⭐ Main output
-│           └── ...
-├── requirements.txt             # Python dependencies
-├── .env.example                 # Database configuration template
-└── README.md                    # This file
+│   │   ├── docling_parser.py           # Docling-based PDF parsing
+│   │   ├── pymupdf4llm_parser.py       # PyMuPDF4LLM parser
+│   │   ├── marker_parser.py            # Marker PDF parser
+│   │   ├── nougat_parser.py            # Nougat OCR-based parser
+│   │   ├── ensemble_parser.py          # Ensemble combining parsers
+│   │   ├── pdffigures_parser.py        # PDFFigures2 integration
+│   │   ├── deduplicator.py             # Header/footer removal
+│   │   └── base_parser.py              # Base parser interface
+│   └── text_processing.py              # Citation removal, paragraph stitching
+│
+├── scripts/                            # Stage 3: Processing Pipeline
+│   ├── latest_ingest.py                # Main PDF→Database pipeline
+│   ├── docling_files/
+│   │   └── mask_tables.py              # PDF masking with white rectangles
+│   ├── visualize_docling_full.py       # Table reconstruction visualization
+│   ├── process_pdffigures_results.py   # PDFFigures2 result processing
+│   ├── create_tui_gin_index.py         # GIN index for semantic type search
+│   └── copy_relevant_files.py          # File utility script
+│
+├── database/                           # Database Layer
+│   ├── models.py                       # SQLAlchemy ORM models
+│   ├── db_connection.py                # Connection management
+│   ├── setup_db.py                     # Schema initialization
+│   └── migrations/
+│       └── add_semantic_types.py       # Add semantic type fields
+│
+├── named_entity_recognition/           # NER Pipeline
+│   ├── batch_ner.py                    # Parallel NER + UMLS linking
+│   ├── ner.py                          # Core NER logic with scispacy
+│   ├── merge_entities_by_umls.py       # Group sentences by UMLS CUI
+│   ├── export_disease_entities.py      # Filter to disease entities only
+│   ├── count_tokens.py                 # Token counting + cost estimation
+│   ├── enums.py                        # UMLS disease semantic types
+│   └── entity_linking_cache.json       # Persistent UMLS cache (~66MB)
+│
+├── langchain-summarization/            # LLM Summarization Pipeline
+│   ├── langchain_summarization.ipynb   # Main pipeline notebook
+│   ├── evaluator.py                    # Hallucination detection
+│   ├── price-estimator/
+│   │   └── estimator.py                # Cost estimation utilities
+│   ├── test_results_50_docs/           # Input: sentences by UMLS concept
+│   └── summarization_results/          # Output: summaries and rules
+│       ├── summaries/                  # Final JSON summaries
+│       └── rules/                      # Extracted clinical rules
+│
+├── files/                              # Data Directories
+│   ├── organized_pdfs/                 # Flat organized PDFs
+│   ├── figures/                        # Cropped figure images
+│   └── tables/                         # Cropped table images
+│
+├── out/                                # Output Directories
+│   ├── complete_pipeline/              # Layout JSON from Docling
+│   ├── masked_pdfs/                    # PDFs with masked tables/figures
+│   ├── text/                           # Extracted text files
+│   └── failed_pdfs_blacklist.json      # Blacklisted failed PDFs
+│
+├── disease_entities/                   # Disease entities grouped by CUI
+├── umls_entities/                      # All entities grouped by CUI
+│
+├── requirements.txt                    # Python dependencies
+└── .env.example                        # Database config template
 ```
 
 ## Quick Start
@@ -76,304 +182,193 @@ nlp-histo/
 ### 1. Install Dependencies
 
 ```bash
-# Install Python dependencies
 pip install -r requirements.txt
 
-# Install PostgreSQL (optional, for database features)
-# macOS:
-brew install postgresql
-brew services start postgresql
-
-# Ubuntu/Debian:
-sudo apt-get install postgresql postgresql-contrib
-sudo systemctl start postgresql
+# For summarization pipeline
+pip install langchain langchain-openai tiktoken python-dotenv
 ```
 
-### 2. Parse PDF Files
-
-Extract text from medical papers with intelligent parsing:
+### 2. Set Up Database
 
 ```bash
-# Parse a single PDF
-python scripts/parse_single_pdf.py files/organized_pdfs/YOUR_PAPER.pdf --mode routing
-
-# Output will be in: output/{paper_name}/{timestamp}/
-```
-
-**Output Files:**
-1. `routing_grouped_readable.txt` - ⭐ **Clean, readable text** (citations removed, paragraphs stitched)
-2. `routing_references.json` - Figure/table index with references
-3. `routing_grouped.json` - Structured JSON grouped by section
-4. `routing_text_elements.json` - Flat list with references
-5. `routing_full.json` - Complete extraction result
-6. `routing_readable.md` - Human-readable markdown
-7. `routing_routing.json` - Per-page routing decisions
-8. `routing_summary.txt` - Quick stats
-
-### 3. Set Up Database (Optional)
-
-For storing and querying large collections:
-
-```bash
-# Create database
+# Create PostgreSQL database
 createdb -U postgres nlp_histo
 
-# Configure environment
+# Configure credentials
 cp .env.example .env
-# Edit .env with your database credentials
+# Edit .env with DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 
 # Initialize schema
 python database/setup_db.py
-
-# Import XML files
-python database/xml_to_db.py
 ```
 
-## PDF Parsing Features
+### 3. Run Data Pipeline
 
-### Medical-Grade Ensemble Parser
+```bash
+# Download papers (requires target_pmc_ids.txt)
+cd file-selector && python file_downloader.py
 
-The parser automatically routes each page to the optimal extraction engine:
+# Extract and organize
+python tarball_extractor.py
+python pdf_organizer.py
 
-- **PyMuPDF4LLM** (Lead): Fast extraction for narrative multi-column text (90% of pages)
-- **Docling** (Specialist): High-accuracy table extraction with structure preservation
-- **Marker** (Archivist): Complex academic layouts with math, multi-panel figures, footnotes
-
-### Routing Logic
-
-```
-For each page:
-  ├─ Has tables (grid lines or keywords)? → Docling
-  ├─ Complex math (∑, ∫, α, β)? → Marker
-  ├─ Multi-panel figures (>3 images)? → Marker
-  ├─ Dense footnotes? → Marker
-  ├─ Has images? → PyMuPDF4LLM (with image mode)
-  └─ Otherwise → PyMuPDF4LLM (fast)
+# Process and ingest to database
+cd .. && python scripts/latest_ingest.py
 ```
 
-### Context-Aware Paragraph Stitching
+### 4. Run NER Pipeline
 
-Automatically reconnects paragraphs split by tables/figures:
+```bash
+cd named_entity_recognition
 
-**Before:**
-```
-The growth pattern is a con-
+# Extract medical entities with UMLS linking
+python batch_ner.py
 
-Table 1: Classification data
+# Group by UMLS concept
+python merge_entities_by_umls.py
 
-tinuum without distinct grades.
-```
+# Export disease entities only
+python export_disease_entities.py
 
-**After:**
-```
-The growth pattern is a continuum without distinct grades.
-
-------------------------------------------------------------
-
-Table 1: Classification data
+# (Optional) Estimate LLM costs
+python count_tokens.py
 ```
 
-### Output Format Example
+### 5. Run Summarization Pipeline
 
-**Grouped Readable Text** (`routing_grouped_readable.txt`):
+```bash
+# Set OpenAI API key
+export OPENAI_API_KEY=your_key
 
-```
-Introduction
-------------
+# Run Jupyter notebook
+cd langchain-summarization
+jupyter notebook langchain_summarization.ipynb
 
-Extranodal lymphoma diagnosis is challenging due to diversity
-of lymphoma types and relative rarity of many tumors.
-
-Primary cutaneous B-cell lymphomas can be differentiated into
-several clinicopathological entities.
-
-------------------------------------------------------------
-
-Table 1. Classification of cutaneous lymphomas
-
-Figure 1. Primary cutaneous follicle centre lymphoma patterns
+# Verify outputs for hallucinations
+python evaluator.py
 ```
 
-### Figure and Table References
+## Output Examples
 
-The system detects and indexes all references:
+### Database Text Element
 
-**Detected in text:**
-- "as shown in Figure 3"
-- "see Table 2"
-- "Fig. 1a-c"
-
-**Output** (`routing_references.json`):
 ```json
 {
-  "figures": {
-    "3": {
-      "id": "3",
-      "mentioned_in": ["Results > Clinical Findings", "Discussion"],
-      "extracted": true,
-      "figure_data": {
-        "page": 5,
-        "caption": "Survival curves for..."
-      }
-    }
-  }
+  "id": 789,
+  "document_id": 42,
+  "unique_path": "PMC123456/Methods > Immunohistochemistry/0",
+  "path_list": ["Methods", "Immunohistochemistry"],
+  "text_content": "CD30 staining was performed using clone Ber-H2..."
 }
 ```
 
-## Advanced Usage
+### Extracted Clinical Rule
 
-### Custom Output Directory
-
-```bash
-python scripts/parse_single_pdf.py YOUR_PAPER.pdf --output-dir custom_output/
+```json
+{
+  "rule_id": "R1",
+  "type": "Diagnostic",
+  "condition": "IF CD30 positive AND ALK negative",
+  "action": "THEN consider primary cutaneous ALCL",
+  "confidence": "High",
+  "evidence_chain": [
+    {
+      "sentence_id": "S3",
+      "pmcid": "PMC123456",
+      "text_element_id": 789,
+      "verbatim": "CD30+ ALK- phenotype is characteristic of pcALCL"
+    }
+  ]
+}
 ```
 
-### Fallback Mode
+### Audit Trail
 
-Use sequential parser fallback instead of routing:
+Every summary includes:
+- `chunks_processed`: Number of text chunks analyzed
+- `total_sentences_cited`: Sentences used as evidence
+- `unique_pmcids`: Source papers referenced
+- `unique_text_element_ids`: Database IDs for full traceability
+- `evidence_conflicts`: Flagged contradictions with sources
 
-```bash
-python scripts/parse_single_pdf.py YOUR_PAPER.pdf --mode fallback
-```
+## Technology Stack
 
-### Batch Processing
+| Component | Technology |
+|-----------|------------|
+| PDF Parsing | Docling, PyMuPDF, Marker, Nougat |
+| Database | PostgreSQL + SQLAlchemy |
+| NER | scispacy (en_core_sci_lg) + UMLS linker |
+| LLM Pipeline | LangChain + OpenAI (GPT-4o-mini, GPT-4o) |
+| Structured Output | Pydantic schemas |
+| Evaluation | Hallucination detection via UMLS concept matching |
 
-Process multiple PDFs:
-
-```bash
-for pdf in files/organized_pdfs/*.pdf; do
-    python scripts/parse_single_pdf.py "$pdf" --mode routing
-done
-```
-
-## Database Features
-
-### Unique Path Format
-
-Each text element has a unique hierarchical path:
-```
-{PMCID}/{section_hierarchy}/{position_in_section}
-```
-
-Examples:
-- `PMC1448691/Methods > 2.1 Staining/0`
-- `PMC1448691/Results > Clinical Findings/0`
-
-### Database Schema
-
-**documents**
-- Metadata: `pmcid`, `title`, `journal`, `publication_year`
-
-**text_elements**
-- Hierarchical text: `unique_path`, `path_list`, `path_string`, `depth`, `text_content`
-
-### Query Examples
-
-```python
-from database import get_db_connection, Document, TextElement
-
-db = get_db_connection()
-
-with db.session_scope() as session:
-    # Search for specific content
-    elements = session.query(TextElement)\
-        .filter(TextElement.text_content.ilike('%lymphoma%'))\
-        .all()
-
-    # Get all Methods sections
-    methods = session.query(TextElement)\
-        .filter(TextElement.path_list.contains(['Methods']))\
-        .all()
-```
-
-## Key Improvements
-
-### What Makes This Medical-Grade?
-
-1. **Content-Aware Routing**: Each page analyzed for tables, figures, math, and complexity
-2. **Docling as "Truth"**: Specialized table parser ensures data accuracy
-3. **Smart Deduplication**: Removes running headers/footers while preserving medical terminology
-4. **Context Preservation**: Stitches paragraphs split across tables/figures
-5. **Clean Output**: Citation removal, proper formatting, organized structure
-
-### Performance
-
-- **Speed**: 1-2 seconds per page (routing mode)
-- **Accuracy**: ~95% table detection, ~98% text extraction
-- **Quality**: Clean, readable output suitable for NLP/LLM ingestion
-
-## Requirements
+## Database Schema
 
 ```
-PyMuPDF>=1.23.0
-pymupdf4llm>=0.0.5
-pymupdf-layout>=1.26.6
-docling>=2.0.0
-SQLAlchemy>=2.0.0
-psycopg2-binary>=2.9.0
-python-dotenv>=1.0.0
+documents
+├── id, pmcid (unique), title, journal, publication_year
+├── filename, file_path, text_source
+
+text_elements
+├── id, document_id (FK), unique_path (unique)
+├── path_list (PostgreSQL array), path_string, depth
+├── text_content, position_in_section
+└── references (JSON: figure/table mentions)
+
+entities
+├── id, text_element_id (FK)
+├── entity_text, entity_label (CHEMICAL, DISEASE, etc.)
+├── umls_cui, umls_score, canonical_name
+├── semantic_types (UMLS TUI codes)
+└── start_char, end_char, model_name
+
+figures / tables
+├── id, document_id (FK), figure_id/table_id
+├── caption_text, image_path, page_number
+└── bounding_box coordinates
+
+text_element_figure_references (junction)
+text_element_table_references (junction)
 ```
 
-## Documentation
+## Key Features
 
-- [Database Module README](database/README.md) - Database documentation
-- [PDF Extraction Guide](PDF_EXTRACTION_GUIDE.md) - Detailed PDF parsing guide
-- [Query Examples](database/query_examples.py) - Query patterns
+### Medical-Grade PDF Parsing
+- **Table/Figure Masking**: White-rectangle masking before text re-extraction
+- **Hierarchical Structure**: Preserves section nesting (e.g., Methods > 2.1 Staining)
+- **Paragraph Stitching**: Reconnects text split by tables/figures
+- **Reference Detection**: Finds "see Figure 3" mentions and links to extracted images
+- **Parallel Processing**: ThreadPoolExecutor for batch PDF processing
+- **Blacklist System**: Tracks failed PDFs to skip on reruns
+
+### Named Entity Recognition
+- **UMLS Linking**: Maps extracted entities to UMLS concepts (CUI)
+- **Persistent Cache**: 66MB cache avoids redundant UMLS API calls
+- **Semantic Types**: Filters entities by UMLS semantic types (diseases, chemicals, etc.)
+- **Token Counting**: Estimates LLM costs before running summarization
+
+### Auditable LLM Pipeline
+- **Structured Pydantic schemas** ensure consistent output format
+- **Caching** avoids redundant LLM calls for identical inputs
+- **Conflict detection** flags contradictory evidence from different sources
+- **Hallucination detection** verifies claims against source sentences
 
 ## Configuration
 
-### Database (.env)
+### Environment Variables (.env)
 
 ```bash
+# Database
 DB_HOST=localhost
 DB_PORT=5432
 DB_NAME=nlp_histo
-DB_USER=your_username
+DB_USER=postgres
 DB_PASSWORD=your_password
+
+# OpenAI (for summarization)
+OPENAI_API_KEY=your_key
 ```
-
-### PDF Parser
-
-Configure in `parsers/pdf_parsers/ensemble_parser.py`:
-- Table detection thresholds
-- Parser routing rules
-- Deduplication settings
-
-## Troubleshooting
-
-### PDF Parsing Issues
-
-```bash
-# Check parser availability
-python scripts/parse_single_pdf.py YOUR_PDF.pdf --mode routing
-
-# Look for:
-# ✓ pymupdf4llm
-# ✓ docling
-# ✓ marker
-```
-
-### Missing Tables
-
-Tables are routed to Docling if they contain:
-- Grid lines (>15 lines detected)
-- Keywords: "Table", "Percentage", "n =", "p <", "Mean", "SD"
-
-### Split Paragraphs
-
-The Context-Aware Stitcher handles:
-- Hyphenated word breaks: "con-" → "continuum"
-- Interrupted sentences: text before/after tables
-- Comma-separated continuations
 
 ## License
 
 See LICENSE file for details.
-
-## Contributing
-
-Contributions welcome! The system is designed for:
-- Medical paper extraction
-- Hierarchical text analysis
-- NLP/LLM data preparation
-- Academic literature processing
