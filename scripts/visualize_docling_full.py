@@ -146,217 +146,8 @@ def reconstruct_tables_from_lists(json_path, threshold_multiplier=1.2):
 
     return reconstructed
 
-
-# def reconstruct_tables_from_lists(json_path, threshold_multiplier=1.2):
-#     """
-#     Groups elements into a table by finding row clusters first,
-#     then looking for captions above or below.
-#     """
-#     with open(json_path, 'r') as f:
-#         data = json.load(f)
-
-#     elements = data.get("elements", [])
-#     reconstructed = []
-#     used_indices = set()
-#     i = 0
-
-#     while i < len(elements):
-#         if i in used_indices:
-#             i += 1
-#             continue
-
-#         el = elements[i]
-        
-#         # 1. Identify a potential starting row 
-#         if el.get("type") in ["TEXT", "LIST_ITEM"]:
-#             cluster = [el]
-#             cluster_indices = [i]
-            
-#             # Scan forward to build the vertical cluster
-#             j = i + 1
-#             max_gap = 20  # Initial guess
-#             last_y2 = el["bbox"]["y2"]
-            
-#             while j < len(elements):
-#                 next_el = elements[j]
-#                 if next_el.get("type") not in ["TEXT", "LIST_ITEM"]:
-#                     break
-                
-#                 vertical_gap = abs(next_el["bbox"]["y1"] - last_y2)
-                
-#                 # Refine threshold based on first row-to-row spacing
-#                 if len(cluster) == 1:
-#                     max_gap = vertical_gap * threshold_multiplier
-
-#                 if vertical_gap < max_gap:
-#                     cluster.append(next_el)
-#                     cluster_indices.append(j)
-#                     last_y2 = next_el["bbox"]["y2"]
-#                     j += 1
-#                 else:
-#                     break
-
-#             # 2. Search for a Table Caption around this cluster
-#             caption_el = None
-#             caption_idx = None
-
-#             # Check Above
-#             if i > 0:
-#                 prev_el = elements[i-1]
-#                 if prev_el.get("type") == "CAPTION" and "table" in (prev_el.get("text") or "").lower():
-#                     caption_el = prev_el
-#                     caption_idx = i - 1
-            
-#             # Check Below (if not found above)
-#             if not caption_el and j < len(elements):
-#                 next_el = elements[j]
-#                 if next_el.get("type") == "CAPTION" and "table" in (next_el.get("text") or "").lower():
-#                     caption_el = next_el
-#                     caption_idx = j
-
-#             # 3. If a caption is found, combine them into a RECONSTRUCTED_TABLE
-#             if caption_el:
-#                 all_items = cluster + [caption_el]
-#                 all_bboxes = [e["bbox"] for e in all_items]
-                
-#                 table_group = {
-#                     "type": "RECONSTRUCTED_TABLE",
-#                     "caption": caption_el.get("text"),
-#                     "page": el.get("page"),
-#                     "bbox": {
-#                         "x1": min(b["x1"] for b in all_bboxes),
-#                         "y1": max(b["y1"] for b in all_bboxes), # Preserved your logic
-#                         "x2": max(b["x2"] for b in all_bboxes),
-#                         "y2": min(b["y2"] for b in all_bboxes)  # Preserved your logic
-#                     },
-#                     "sub_element_indices": cluster_indices + [caption_idx]
-#                 }
-#                 reconstructed.append(table_group)
-#                 used_indices.update(cluster_indices)
-#                 used_indices.add(caption_idx)
-#                 i = j # Advance the main pointer
-#                 continue
-        
-#         # If no cluster/caption pair found, preserve original element
-#         reconstructed.append(el)
-#         i += 1
-
-#     return reconstructed
-
-# def reconstruct_tables_from_lists(json_path, threshold_multiplier=1.2):
-#     """
-#     Groups elements into a table by finding row clusters first,
-#     then looking for captions above or below.
-    
-#     Fixes:
-#     - Variable name consistency (max_gap)
-#     - Prevents data loss when no caption is found
-#     - Ensures proper index skipping to avoid duplicates
-#     """
-#     with open(json_path, 'r') as f:
-#         data = json.load(f)
-
-#     elements = data.get("elements", [])
-#     reconstructed = []
-#     used_indices = set()
-#     i = 0
-
-#     while i < len(elements):
-#         # Bug #3 Fix: Skip elements already processed as part of a table or cluster
-#         if i in used_indices:
-#             i += 1
-#             continue
-
-#         el = elements[i]
-        
-#         # 1. Identify a potential starting row
-#         if el.get("type") in ["TEXT", "LIST_ITEM"]:
-#             cluster = [el]
-#             cluster_indices = [i]
-            
-#             j = i + 1
-#             max_gap = 20  # Baseline guess
-#             last_y2 = el["bbox"]["y2"]
-            
-#             while j < len(elements):
-#                 next_el = elements[j]
-#                 if next_el.get("type") not in ["TEXT", "LIST_ITEM"]:
-#                     break
-                
-#                 vertical_gap = abs(next_el["bbox"]["y1"] - last_y2)
-                
-#                 # Refine threshold based on first row-to-row spacing
-#                 if len(cluster) == 1:
-#                     max_gap = vertical_gap * threshold_multiplier
-
-#                 # Bug #1 Fix: Use consistent variable name (max_gap)
-#                 if vertical_gap < max_gap:
-#                     cluster.append(next_el)
-#                     cluster_indices.append(j)
-#                     last_y2 = next_el["bbox"]["y2"]
-#                     j += 1
-#                 else:
-#                     break
-
-#             # 2. Search for a Table Caption around this cluster
-#             caption_el = None
-#             caption_idx = None
-
-#             # Check Above
-#             if i > 0:
-#                 prev_el = elements[i-1]
-#                 if prev_el.get("type") == "CAPTION" and "table" in (prev_el.get("text") or "").lower():
-#                     caption_el = prev_el
-#                     caption_idx = i - 1
-            
-#             # Check Below (if not found above)
-#             if not caption_el and j < len(elements):
-#                 next_el = elements[j]
-#                 if next_el.get("type") == "CAPTION" and "table" in (next_el.get("text") or "").lower():
-#                     caption_el = next_el
-#                     caption_idx = j
-
-#             # 3. Handle the cluster based on Caption presence
-#             if caption_el:
-#                 # Found a table! Combine everything.
-#                 all_items = cluster + [caption_el]
-#                 all_bboxes = [e["bbox"] for e in all_items]
-                
-#                 table_group = {
-#                     "type": "RECONSTRUCTED_TABLE",
-#                     "caption": caption_el.get("text"),
-#                     "page": el.get("page"),
-#                     "bbox": {
-#                         "x1": min(b["x1"] for b in all_bboxes),
-#                         "y1": max(b["y1"] for b in all_bboxes), # Preserved your logic
-#                         "x2": max(b["x2"] for b in all_bboxes),
-#                         "y2": min(b["y2"] for b in all_bboxes)  # Preserved your logic
-#                     },
-#                     "sub_element_indices": cluster_indices + [caption_idx]
-#                 }
-#                 reconstructed.append(table_group)
-#                 used_indices.update(cluster_indices)
-#                 used_indices.add(caption_idx)
-#                 i = j 
-#                 continue # Skip to next element after the cluster
-#             else:
-#                 # Bug #2 Fix: No caption found - keep ALL cluster elements individually
-#                 # instead of dropping them.
-#                 for elem in cluster:
-#                     reconstructed.append(elem)
-#                 used_indices.update(cluster_indices)
-#                 i = j
-#                 continue
-        
-#         # For non-text elements (Figures, Headers, etc.), preserve original
-#         reconstructed.append(el)
-#         i += 1
-
-#     return reconstructed
-
-def _visualize_elements(pdf_file: Path, elements: list, metadata: dict,
-                       element_types: list = None, output_suffix: str = "",
-                       reconstruct: bool = False):
+def _visualize_elements(pdf_file: Path, elements: list, metadata: dict, output_path: str,
+                        element_types: list = None):
     """
     Internal function to visualize elements on PDF.
 
@@ -440,7 +231,7 @@ def _visualize_elements(pdf_file: Path, elements: list, metadata: dict,
         )
 
         # Title
-        title = "Docling Elements (Reconstructed):" if reconstruct else "Docling Elements:"
+        title = "Docling Elements:"
         first_page.insert_text((lx, ly+10), title,
                               fontsize=9, color=(0,0,0))
 
@@ -460,9 +251,11 @@ def _visualize_elements(pdf_file: Path, elements: list, metadata: dict,
                                   fontsize=7, color=(0,0,0))
 
     # Save
-    output_dir = Path("out/comparisons")
+    output_dir = Path("out/visualization")
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"{pdf_file.stem}_full_layout{output_suffix}.pdf"
+
+    output_file = output_dir / output_path
+    print(output_file)
 
     doc.save(str(output_file))
     doc.close()
@@ -476,8 +269,8 @@ def _visualize_elements(pdf_file: Path, elements: list, metadata: dict,
     return output_file
 
 
-def visualize_full_layout(pdf_path: str, json_path: str, output_path: str = None,
-                          element_types: list = None, save_both: bool = True):
+def visualize_full_layout(pdf_path: str, json_path: str, output_path: str, 
+                          element_types: list = None):
     """
     Create visualization of all Docling detected elements.
 
@@ -500,35 +293,9 @@ def visualize_full_layout(pdf_path: str, json_path: str, output_path: str = None
     if not layout_data:
         return
 
-    # Save both versions if requested
-    if save_both:
-        # Version 1: Without reconstruction
-        print("\n" + "="*80)
-        print("Creating visualization WITHOUT table reconstruction")
-        print("="*80)
-        elements_original = layout_data.get('elements', [])
-        metadata = layout_data.get('metadata', {})
-        _visualize_elements(pdf_file, elements_original, metadata, element_types,
-                           output_suffix="_original", reconstruct=False)
-
-        # Version 2: With reconstruction
-        print("\n" + "="*80)
-        print("Creating visualization WITH table reconstruction")
-        print("="*80)
-        elements_reconstructed = reconstruct_tables_from_lists(str(json_file))
-        # elements_reconstructed = reconstruct_tables_flexible(str(json_file))
-        _visualize_elements(pdf_file, elements_reconstructed, metadata, element_types,
-                           output_suffix="_reconstructed", reconstruct=True)
-        return
-
-    # Single version (with reconstruction by default)
-    print("Reconstructing tables from list elements...")
-    elements = reconstruct_tables_from_lists(str(json_file))
-    # elements = reconstruct_tables_flexible(str(json_file))
+    elements_original = layout_data.get('elements', [])
     metadata = layout_data.get('metadata', {})
-
-    return _visualize_elements(pdf_file, elements, metadata, element_types,
-                              output_suffix="", reconstruct=True)
+    _visualize_elements(pdf_file, elements_original, metadata, output_path, element_types)
 
 
 def main():
