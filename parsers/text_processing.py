@@ -136,8 +136,9 @@ class ContextAwareStitcher:
             return False
 
         # Ends with hyphen (word break)
-        if t.endswith('-'):
-            return True
+        # TODO: uncomment or remove this
+        # if t.endswith('-'):
+        #     return True
 
         # Ends with comma (sentence continues)
         if t.endswith(','):
