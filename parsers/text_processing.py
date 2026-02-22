@@ -185,9 +185,12 @@ class ContextAwareStitcher:
         t1 = t1.rstrip()
         t2 = t2.lstrip()
 
-        # Handle hyphenated word breaks
+        # Hyphen at end of t1: join without space to preserve compound words
+        # (e.g. "ALK-" + "positive" → "ALK-positive").
+        # True mid-word breaks (e.g. "lympho-" + "cyte") become "lympho-cyte",
+        # which is preferable to "ALK- positive" with a spurious space.
         if t1.endswith('-'):
-            return t1[:-1] + t2
+            return t1 + t2
 
         # Normal merge with space
         return t1 + " " + t2
