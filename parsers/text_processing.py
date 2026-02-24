@@ -264,21 +264,29 @@ def remove_citations(text: str) -> str:
         >>> remove_citations("14. Smith et al. 2020")
         "14. Smith et al. 2020"  # Start-of-line numbers preserved
     """
-    # Pattern for citations after punctuation
-    # Matches: ". 1 ", ". 19,20 ", ". 1-3 ", ". 4,5", ", 5 ", etc.
-    # Does NOT match start-of-line references like "14. Author..."
+    # URLs (http/https)
+    cleaned = re.sub(r'https?://\S+', '', text)
+
+    # Bracket-style citations: [1], [1,2], [1-29], [3,11,21,22], [1–3]
+    # Must contain only digits, commas, hyphens, or en-dashes — not e.g. [Table 1]
+    cleaned = re.sub(r'\[\d+(?:[,–\-]\d+)*\]', '', cleaned)
 
     # After period: ". 1 ", ". 19,20 ", ". 4,5" (with or without trailing space/text)
     # Use negative lookbehind to avoid matching start of line
-    cleaned = re.sub(r'(?<!\n)\.\s+\d+(?:[,–\-]\d+)*(?=\s|$)', '. ', text)
+    cleaned = re.sub(r'(?<!\n)\.\s+\d+(?:[,–\-]\d+)*(?=\s|$)', '. ', cleaned)
 
     # After comma: ", 5 ", ", 1,2 "
     cleaned = re.sub(r',\s+\d+(?:[,–\-]\d+)*(?=\s|$)', ', ', cleaned)
 
     # Standalone citations in middle of text: " 1 ", " 19,20 "
-    # But be careful not to remove all numbers - only those that look like citations
     # (preceded by space and followed by space or end)
     cleaned = re.sub(r'(?<=\s)\d+(?:[,–\-]\d+)+(?=\s|$)', '', cleaned)
+
+    # Clean up whitespace artifacts left by citation removal.
+    # A space immediately before . , ; is never valid in English prose.
+    cleaned = re.sub(r'\s+([.,;])', r'\1', cleaned)
+    # Collapse any double spaces introduced by removals
+    cleaned = re.sub(r'  +', ' ', cleaned)
 
     return cleaned
 
