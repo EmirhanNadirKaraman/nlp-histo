@@ -9,6 +9,7 @@ Reference model: microsoft/table-transformer-detection
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +17,13 @@ from pipeline.config import TATRConfig
 from pipeline.models.dto import BoundingBox, DetectedRegion, TableDetectionResult
 
 logger = logging.getLogger(__name__)
+
+# The TATR model is loaded once per process and shared across all instances.
+# from_pretrained is not thread-safe when called concurrently on the same
+# cached weights, so we serialise with a lock and reuse the result globally.
+_LOAD_LOCK = threading.Lock()
+_SHARED_PROCESSOR = None
+_SHARED_MODEL = None
 
 # Points-per-inch for PDF coordinates, and the DPI we render pages at for TATR
 _PDF_PPI = 72
@@ -38,15 +46,35 @@ class TATRTableDetector:
     # ── Lazy model loading ────────────────────────────────────────────────────
 
     def _load_model(self) -> None:
-        if self._model is not None:
-            return
-        from transformers import AutoImageProcessor, AutoModelForObjectDetection  # type: ignore
+        global _SHARED_PROCESSOR, _SHARED_MODEL
 
-        logger.info("Loading TATR model (%s)…", self._config.model_name)
-        self._processor = AutoImageProcessor.from_pretrained(self._config.model_name)
-        self._model = AutoModelForObjectDetection.from_pretrained(self._config.model_name)
-        self._model.eval()
-        logger.info("TATR model loaded.")
+        # Fast path — model already loaded by this or another instance
+        if _SHARED_MODEL is not None:
+            self._processor = _SHARED_PROCESSOR
+            self._model = _SHARED_MODEL
+            return
+
+        with _LOAD_LOCK:
+            # Another thread may have loaded it while we waited for the lock
+            if _SHARED_MODEL is not None:
+                self._processor = _SHARED_PROCESSOR
+                self._model = _SHARED_MODEL
+                return
+
+            from transformers import AutoImageProcessor, AutoModelForObjectDetection  # type: ignore
+
+            logger.info("Loading TATR model (%s)…", self._config.model_name)
+            _SHARED_PROCESSOR = AutoImageProcessor.from_pretrained(self._config.model_name)
+            _SHARED_MODEL = AutoModelForObjectDetection.from_pretrained(
+                self._config.model_name,
+                low_cpu_mem_usage=False,
+                device_map=None,
+            )
+            _SHARED_MODEL.eval()
+            logger.info("TATR model loaded.")
+
+            self._processor = _SHARED_PROCESSOR
+            self._model = _SHARED_MODEL
 
     # ── Detection ─────────────────────────────────────────────────────────────
 
@@ -63,6 +91,10 @@ class TATRTableDetector:
         import fitz          # type: ignore  (PyMuPDF)
         import torch         # type: ignore
         from PIL import Image as PILImage  # type: ignore
+
+        # Limit PyTorch's intra-op threads to 1 so multiple worker threads
+        # don't all compete for the full CPU core count simultaneously.
+        torch.set_num_threads(1)
 
         self._load_model()
 

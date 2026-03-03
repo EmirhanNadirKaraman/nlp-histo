@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from pipeline.config import MaskingConfig
-from pipeline.models.dto import BoundingBox
+from pipeline.models.dto import BoundingBox, LayoutResult, TableDetectionResult
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,32 @@ class PyMuPDFRegionMasker:
     ) -> None:
         self._config = config or MaskingConfig()
         self._output_dir = output_dir
+
+    _FIGURE_TYPES = frozenset({"PICTURE", "FIGURE"})
+
+    def collect_regions(
+        self,
+        detection: TableDetectionResult,
+        layout: LayoutResult,
+    ) -> List[BoundingBox]:
+        """
+        Build the list of bounding boxes to mask, driven by config flags.
+
+        Args:
+            detection: Table detection result (used when mask_tables=True).
+            layout:    Full layout result (used when mask_figures=True).
+
+        Returns:
+            Combined list of BoundingBoxes to paint white.
+        """
+        regions: List[BoundingBox] = []
+        if self._config.mask_tables:
+            regions.extend(r.bbox for r in detection.regions)
+        if self._config.mask_figures:
+            regions.extend(
+                el.bbox for el in layout.elements if el.type in self._FIGURE_TYPES
+            )
+        return regions
 
     def mask(self, pdf_path: Path, regions: List[BoundingBox]) -> Path:
         """
@@ -72,10 +98,12 @@ class PyMuPDFRegionMasker:
             page = doc[page_num]
             page_h = page.rect.height
 
-            rects = [
-                b.to_fitz_rect(page_h).inflate(exp)
-                for b in by_page[page_no]
-            ]
+            rects = []
+            for b in by_page[page_no]:
+                r = b.to_fitz_rect(page_h)
+                if exp:
+                    r = fitz.Rect(r.x0 - exp, r.y0 - exp, r.x1 + exp, r.y1 + exp)
+                rects.append(r)
 
             if self._config.merge_overlapping_boxes:
                 rects = merge_rects(rects)

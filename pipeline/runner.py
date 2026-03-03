@@ -30,6 +30,11 @@ Usage::
 from __future__ import annotations
 
 import logging
+import sys
+from pathlib import Path as _Path
+
+# Allow running as `python pipeline/runner.py` from the project root
+sys.path.insert(0, str(_Path(__file__).parent.parent))
 import traceback
 from pathlib import Path
 from typing import List, Optional
@@ -63,6 +68,7 @@ class PipelineRunner:
         self._artifact_filter  = None
         self._media_cropper    = None
         self._table_detector   = None
+        self._visualizer       = None
         self._outputs: list    = []
 
     # ── Stage factory helpers ─────────────────────────────────────────────────
@@ -135,19 +141,26 @@ class PipelineRunner:
     def _get_outputs(self) -> list:
         if not self._outputs:
             from pipeline.outputs.writer import TextFileWriter
+            from pipeline.outputs.media_json_writer import MediaJsonWriter
             self._outputs.append(TextFileWriter(
                 output_dir=self._cfg.paths.text_dir,
+            ))
+            self._outputs.append(MediaJsonWriter(
+                output_dir=self._cfg.paths.json_dir,
             ))
             if self._cfg.database.enabled:
                 from pipeline.outputs.db_ingester import PostgresDatabaseIngester
                 self._outputs.append(PostgresDatabaseIngester())
-            if self._cfg.visualization.enabled:
-                from pipeline.outputs.visualizer import DetectionVisualizer
-                self._outputs.append(DetectionVisualizer(
-                    config=self._cfg.visualization,
-                    output_dir=self._cfg.paths.vis_dir,
-                ))
         return self._outputs
+
+    def _get_visualizer(self):
+        if self._visualizer is None and self._cfg.visualization.enabled:
+            from pipeline.stages.visualizer import DetectionVisualizer
+            self._visualizer = DetectionVisualizer(
+                config=self._cfg.visualization,
+                output_dir=self._cfg.paths.vis_dir,
+            )
+        return self._visualizer
 
     # ── Single document ───────────────────────────────────────────────────────
 
@@ -199,11 +212,17 @@ class PipelineRunner:
             else:
                 detection = detector.detect(pdf_path)
 
+        # ── Step 2b: Visualization ────────────────────────────────────────────
+        if vis := self._get_visualizer():
+            vis.visualize_layout(layout, pmcid)
+            vis.visualize_detections(detection, layout, pmcid)
+
         # ── Step 3: Region masking ─────────────────────────────────────────────
-        if self._cfg.masking.enabled and detection.regions:
-            logger.info("[%s] Step 3 — masking %d regions", pmcid, len(detection.regions))
-            regions = [r.bbox for r in detection.regions]
-            masked_path = self._get_region_masker().mask(pdf_path, regions)
+        masker = self._get_region_masker()
+        regions_to_mask = masker.collect_regions(detection, layout) if self._cfg.masking.enabled else []
+        if regions_to_mask:
+            logger.info("[%s] Step 3 — masking %d regions", pmcid, len(regions_to_mask))
+            masked_path = masker.mask(pdf_path, regions_to_mask)
         else:
             masked_path = pdf_path
 
@@ -240,6 +259,7 @@ class PipelineRunner:
         pdf_dir: Path,
         glob: str = "*.pdf",
         pmcid_fn=None,
+        max_docs: Optional[int] = None,
     ) -> dict:
         """
         Process all PDFs in ``pdf_dir``.
@@ -256,7 +276,9 @@ class PipelineRunner:
         self._cfg.prepare()
 
         pdfs: List[Path] = sorted(pdf_dir.glob(glob))
-        logger.info("Batch: found %d PDFs in %s", len(pdfs), pdf_dir)
+        if max_docs is not None:
+            pdfs = pdfs[:max_docs]
+        logger.info("Batch: processing %d PDFs in %s", len(pdfs), pdf_dir)
 
         stats = {"processed": 0, "failed": 0, "skipped": 0}
 
@@ -275,3 +297,36 @@ class PipelineRunner:
             stats["processed"], stats["failed"], stats["skipped"],
         )
         return stats
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+    from pipeline.config import PipelineConfig
+
+    # ── Configuration ──────────────────────────────────────────────────────────
+    # Edit pipeline/config.py to change defaults (detector, visualization, etc.)
+    cfg = PipelineConfig()
+    cfg.database.enabled = False
+    # cfg.database.db_url = "postgresql://postgres@localhost/nlp_histo"
+    cfg.prepare()
+
+    # ── Single document ────────────────────────────────────────────────────────
+    # PipelineRunner(cfg).run_document(
+    #     pdf_path=Path("files/organized_pdfs/PMC10047158_dermatopathology-10-00017.pdf"),
+    #     pmcid="PMC10047158",
+    # )
+
+    # ── Sequential batch ───────────────────────────────────────────────────────
+    # PipelineRunner(cfg).run_batch(pdf_dir=Path("files/organized_pdfs"), max_docs=5)
+
+    # ── Parallel batch (use pipeline/batch.py instead) ────────────────────────
+    from pipeline.batch import ParallelBatchRunner
+    ParallelBatchRunner(cfg, max_workers=4).run(
+        pdf_dir=Path("files/organized_pdfs"),
+        max_docs=5,
+    )
+
+
+if __name__ == "__main__":
+    main()

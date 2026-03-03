@@ -46,8 +46,8 @@ class PyMuPDFMediaCropper:
         tables_dir:  Optional[Path] = None,
     ) -> None:
         self._config      = config or CroppingConfig()
-        self._figures_dir = figures_dir or Path("files/figures")
-        self._tables_dir  = tables_dir  or Path("files/tables")
+        self._figures_dir = figures_dir or Path("out/figures")
+        self._tables_dir  = tables_dir  or Path("out/tables")
 
     def crop(
         self,
@@ -76,12 +76,16 @@ class PyMuPDFMediaCropper:
         scale = self._config.dpi / 72.0
         mat   = fitz.Matrix(scale, scale)
 
+        fig_idx = tab_idx = 0
+
         for el in layout.elements:
             if el.type in _PICTURE_TYPES and self._config.save_figure_crops:
                 cap  = nearest_caption(el.to_dict(), captions)
                 cap_text = cap["text"] if cap else None
                 num  = parse_caption_num(cap_text or "", FIG_NUM_RE)
-                label = f"Figure {num}" if num else "Figure"
+                if num is None:
+                    fig_idx += 1
+                label = f"Figure {num}" if num else f"Figure_p{el.page}_{fig_idx}"
                 media = self._crop_element(
                     doc, el.bbox, layout.page_dims, mat, label,
                     num, cap_text, "figure", pdf_path.stem, self._figures_dir,
@@ -93,7 +97,9 @@ class PyMuPDFMediaCropper:
                 cap  = nearest_caption(el.to_dict(), captions)
                 cap_text = cap["text"] if cap else None
                 num  = parse_caption_num(cap_text or "", TAB_NUM_RE)
-                label = f"Table {num}" if num else "Table"
+                if num is None:
+                    tab_idx += 1
+                label = f"Table {num}" if num else f"Table_p{el.page}_{tab_idx}"
                 media = self._crop_element(
                     doc, el.bbox, layout.page_dims, mat, label,
                     num, cap_text, "table", pdf_path.stem, self._tables_dir,

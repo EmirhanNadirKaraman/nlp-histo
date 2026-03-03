@@ -35,6 +35,7 @@ from pipeline.config import (
     BaselineMode,
 )
 from pipeline.runner import PipelineRunner
+from pipeline.batch import ParallelBatchRunner
 from pipeline.blacklist import BlacklistManager
 from pipeline.resources import ModelRegistry
 
@@ -55,6 +56,7 @@ __all__ = [
     "BaselineMode",
     # Runtime
     "PipelineRunner",
+    "ParallelBatchRunner",
     "BlacklistManager",
     "ModelRegistry",
 ]

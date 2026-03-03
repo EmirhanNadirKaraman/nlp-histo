@@ -41,8 +41,8 @@ class PathConfig:
     vis_dir: Path = Path("out/visualization")
 
     # Crops / media
-    figures_dir: Path = Path("files/figures")
-    tables_dir: Path = Path("files/tables")
+    figures_dir: Path = Path("out/figures")
+    tables_dir: Path = Path("out/tables")
 
     # Metadata / bookkeeping
     blacklist_file: Path = Path("out/failed_pdfs_blacklist.json")
@@ -91,7 +91,7 @@ class TATRConfig:
 class MaskingConfig:
     enabled: bool = True
     mask_tables: bool = True
-    mask_figures: bool = False
+    mask_figures: bool = True
     mask_header_footer_sidebar: bool = True
     merge_overlapping_boxes: bool = True
     merge_iou_threshold: float = 0.3
@@ -131,10 +131,10 @@ class TextAssemblyConfig:
 
 @dataclass(slots=True)
 class VisualizationConfig:
-    enabled: bool = False
-    save_tatr_visualization: bool = False
-    save_combined_visualization: bool = False
-    max_pages: Optional[int] = 10
+    enabled: bool = True
+    save_tatr_visualization: bool = True
+    save_combined_visualization: bool = True
+    max_pages: Optional[int] = None
 
 
 @dataclass(slots=True)
@@ -171,7 +171,7 @@ class PipelineConfig:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
-    table_detector: TableDetectorType = TableDetectorType.TATR
+    table_detector: TableDetectorType = TableDetectorType.HYBRID
 
     def validate(self) -> None:
         if self.tatr.threshold < 0.0 or self.tatr.threshold > 1.0:
