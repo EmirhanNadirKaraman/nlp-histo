@@ -51,9 +51,10 @@ class MediaJsonWriter:
     def write(
         self,
         pmcid: str,
-        rows: List[HierarchicalRow],   # noqa: ARG002 — interface compat
+        _rows: List[HierarchicalRow],
         figures: List[CroppedMedia],
         tables: List[CroppedMedia],
+        _pdf_path=None,
     ) -> None:
         """
         Write ``{output_dir}/{pmcid}_media.json``.

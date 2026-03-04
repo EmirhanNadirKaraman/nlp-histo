@@ -131,8 +131,44 @@ def parse_caption_num(text, pattern):
     return int(m.group(1)) if m else None
 
 
+def _deduplicate_caption(text: str) -> str:
+    """
+    Remove exact repetitions that Docling sometimes produces when a caption is
+    encoded multiple times in the PDF (visible text + alt-text concatenated).
+
+    Handles 2×, 3×, 4×, ... repetitions with or without a space separator.
+    Example: 'Figure 1. Foo. Figure 1. Foo. Figure 1. Foo.' → 'Figure 1. Foo.'
+    """
+    if not text:
+        return text
+    stripped = text.strip()
+    n = len(stripped)
+
+    for reps in range(2, 6):
+        for sep in (' ', ''):
+            sep_len = len(sep)
+            remainder = n - (reps - 1) * sep_len
+            if remainder <= 0 or remainder % reps != 0:
+                continue
+            unit_len = remainder // reps
+            unit = stripped[:unit_len]
+            if sep.join([unit] * reps) == stripped:
+                return unit.rstrip()
+
+    return stripped
+
+
 def nearest_caption(el, captions):
-    """Return the spatially closest CAPTION element on the same page."""
+    """
+    Return the nearest CAPTION element on the same page using edge-to-edge
+    vertical gap rather than centroid distance.
+
+    Captions sit directly above or below figures, so the gap between the
+    figure's bottom edge and the caption's top edge (or vice versa) is a
+    much more reliable signal than centroid-to-centroid distance.
+    A small horizontal offset term breaks ties when two captions are
+    equidistant vertically.
+    """
     page = el.get('page')
     b    = el.get('bbox')
     if not page or not b:
@@ -140,12 +176,32 @@ def nearest_caption(el, captions):
     same_page = [c for c in captions if c.get('page') == page]
     if not same_page:
         return None
-    cx = (b['x1'] + b['x2']) / 2
-    cy = (b['y1'] + b['y2']) / 2
-    return min(same_page, key=lambda c: (
-        ((c['bbox']['x1'] + c['bbox']['x2']) / 2 - cx) ** 2 +
-        ((c['bbox']['y1'] + c['bbox']['y2']) / 2 - cy) ** 2
-    ))
+
+    fig_top = max(b['y1'], b['y2'])   # Docling coords: y=0 at bottom, so top > bottom
+    fig_bot = min(b['y1'], b['y2'])
+    fig_cx  = (b['x1'] + b['x2']) / 2
+
+    def _edge_distance(cap):
+        cb      = cap.get('bbox', {})
+        cap_top = max(cb.get('y1', 0), cb.get('y2', 0))
+        cap_bot = min(cb.get('y1', 0), cb.get('y2', 0))
+        cap_cx  = (cb.get('x1', 0) + cb.get('x2', 0)) / 2
+
+        if cap_bot >= fig_top:          # caption is entirely above the figure
+            vert = cap_bot - fig_top
+        elif cap_top <= fig_bot:        # caption is entirely below the figure
+            vert = fig_bot - cap_top
+        else:                           # overlapping vertically (rare)
+            vert = 0
+
+        horiz = abs(fig_cx - cap_cx) * 0.1   # small tiebreaker
+        return vert + horiz
+
+    best = min(same_page, key=_edge_distance)
+    if best and best.get('text'):
+        best = dict(best)
+        best['text'] = _deduplicate_caption(fix_ligatures(best['text']))
+    return best
 
 
 # ── Figure panel detection ────────────────────────────────────────────────────
@@ -313,6 +369,39 @@ def is_relevant_para(text: str, nlp=None) -> bool:
 
 
 # ── Text extraction ───────────────────────────────────────────────────────────
+def _reference_list_skip_set(elements) -> set:
+    """
+    Return a set of indices for LIST/LIST_ITEM elements that belong to a
+    bibliography group.
+
+    A consecutive run of LIST/LIST_ITEM elements is considered a bibliography
+    group — and all its indices are returned — when at least 2 of its items
+    match ``is_reference_entry``.  This catches reference lists that Docling
+    extracts as list elements rather than plain TEXT paragraphs.
+    """
+    from parsers.text_processing import is_reference_entry
+
+    skip: set = set()
+    i, n = 0, len(elements)
+    while i < n:
+        if elements[i].get('type', '') in ('LIST', 'LIST_ITEM'):
+            run_start = i
+            while i < n and elements[i].get('type', '') in ('LIST', 'LIST_ITEM'):
+                i += 1
+            run = range(run_start, i)
+            ref_count = sum(
+                1 for idx in run
+                if is_reference_entry(
+                    fix_ligatures((elements[idx].get('text') or '').strip())
+                )
+            )
+            if ref_count >= 2:
+                skip.update(run)
+        else:
+            i += 1
+    return skip
+
+
 def extract_text(elements, nlp=None, table_bboxes=None, use_centroid=False):
     """
     Walk Docling elements in document order and return
@@ -331,12 +420,16 @@ def extract_text(elements, nlp=None, table_bboxes=None, use_centroid=False):
 
     overlap_fn    = centroid_inside if use_centroid else bbox_overlaps
     picture_pages = build_picture_pages(elements)
+    ref_list_skip = _reference_list_skip_set(elements)
 
     hierarchy = {}
     by_path   = defaultdict(list)
     n_skipped = 0
 
-    for el in elements:
+    for idx, el in enumerate(elements):
+        if idx in ref_list_skip:
+            n_skipped += 1
+            continue
         etype = el.get('type', '')
         text  = fix_ligatures((el.get('text') or '').strip())
         if not text:

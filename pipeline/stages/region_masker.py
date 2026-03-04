@@ -12,8 +12,12 @@ from typing import List, Optional
 
 from pipeline.config import MaskingConfig
 from pipeline.models.dto import BoundingBox, LayoutResult, TableDetectionResult
+from parsers.layout_utils import MIN_ANCHOR_H, nlp_is_meaningful
 
 logger = logging.getLogger(__name__)
+
+_SIDEBAR_MAX_W  = 150  # pts — narrowness threshold for annotation columns
+_COLUMN_GAP_MIN = 50   # pts — minimum x1 gap to identify a column boundary
 
 
 class PyMuPDFRegionMasker:
@@ -43,13 +47,17 @@ class PyMuPDFRegionMasker:
         self,
         detection: TableDetectionResult,
         layout: LayoutResult,
+        nlp=None,
     ) -> List[BoundingBox]:
         """
         Build the list of bounding boxes to mask, driven by config flags.
 
         Args:
             detection: Table detection result (used when mask_tables=True).
-            layout:    Full layout result (used when mask_figures=True).
+            layout:    Full layout result (used when mask_figures=True and
+                       mask_header_footer_sidebar=True).
+            nlp:       Optional scispaCy model for NER-based fallback in
+                       header/footer detection (Category 3).  Skipped if None.
 
         Returns:
             Combined list of BoundingBoxes to paint white.
@@ -61,7 +69,125 @@ class PyMuPDFRegionMasker:
             regions.extend(
                 el.bbox for el in layout.elements if el.type in self._FIGURE_TYPES
             )
+        if self._config.mask_header_footer_sidebar:
+            regions.extend(self._detect_header_footer_sidebars(layout, nlp=nlp))
         return regions
+
+    def _detect_header_footer_sidebars(
+        self,
+        layout: LayoutResult,
+        nlp=None,
+    ) -> List[BoundingBox]:
+        """
+        Detect sidebar, header, and footer regions for masking.
+
+        Ported directly from merged_pipeline._detect_header_footer_elements:
+          - Category 1 — Sidebar: narrow left/right annotation columns,
+            detected by x1 gap analysis.
+          - Category 2 — Header/footer: full-width strips outside anchor
+            block y-bounds per page.
+          - Category 3 — NER fallback: single-line TEXT elements on pages
+            with no anchor blocks (only when nlp is provided).
+        """
+        docling_elements = layout.to_element_dicts()
+        page_dims        = layout.page_dims
+
+        anchor_x1s = sorted(
+            el['bbox']['x1'] for el in docling_elements
+            if abs(el['bbox'].get('y1', 0) - el['bbox'].get('y2', 0)) >= MIN_ANCHOR_H
+        )
+        sig_gaps = []
+        for i in range(len(anchor_x1s) - 1):
+            gap = anchor_x1s[i + 1] - anchor_x1s[i]
+            if gap > _COLUMN_GAP_MIN:
+                sig_gaps.append((gap, anchor_x1s[i], anchor_x1s[i + 1]))
+
+        x_left_bound_main   = sig_gaps[0][2]  if sig_gaps           else None
+        x_right_bound_start = sig_gaps[-1][1] if len(sig_gaps) >= 2 else None
+
+        def _is_sidebar(el):
+            b = el.get('bbox', {})
+            x1, x2 = b.get('x1', 0), b.get('x2', 0)
+            if (x2 - x1) >= _SIDEBAR_MAX_W:
+                return False
+            if x_left_bound_main  is not None and x2 < x_left_bound_main:
+                return True
+            if x_right_bound_start is not None and x1 > x_right_bound_start:
+                return True
+            return False
+
+        # Pass 1: per-page anchor y-bounds (excluding sidebar elements)
+        page_bounds: dict = {}
+        for el in docling_elements:
+            if _is_sidebar(el):
+                continue
+            page = el.get('page')
+            if page is None:
+                continue
+            b = el.get('bbox', {})
+            h = abs(b.get('y1', 0) - b.get('y2', 0))
+            if h >= MIN_ANCHOR_H:
+                y1, y2 = b['y1'], b['y2']
+                if page in page_bounds:
+                    top, bot = page_bounds[page]
+                    page_bounds[page] = (max(top, y1), min(bot, y2))
+                else:
+                    page_bounds[page] = (y1, y2)
+
+        # Pass 2: build mask list
+        mask_bboxes: List[BoundingBox] = []
+
+        def _dims(page):
+            d = page_dims.get(page) or page_dims.get(str(page)) or {}
+            return d.get('width', 595.0), d.get('height', 842.0)
+
+        # Category 1: sidebar elements (mask by individual bbox)
+        n_sidebar = 0
+        for el in docling_elements:
+            if _is_sidebar(el) and (el.get('text') or '').strip():
+                b = el['bbox']
+                mask_bboxes.append(BoundingBox(
+                    x1=b['x1'], y1=b['y1'], x2=b['x2'], y2=b['y2'],
+                    page=el['page'],
+                ))
+                n_sidebar += 1
+
+        # Category 2: header/footer strips (full-width, per page)
+        n_strips = 0
+        for page, (top_bound, bot_bound) in page_bounds.items():
+            pw, ph = _dims(page)
+            if top_bound < ph:
+                mask_bboxes.append(BoundingBox(x1=0, y1=ph, x2=pw, y2=top_bound, page=page))
+                n_strips += 1
+            if bot_bound > 0:
+                mask_bboxes.append(BoundingBox(x1=0, y1=bot_bound, x2=pw, y2=0, page=page))
+                n_strips += 1
+
+        # Category 3: NER fallback for pages with no anchor blocks
+        n_ner = 0
+        if nlp is not None:
+            pages_with_anchors = set(page_bounds.keys())
+            for el in docling_elements:
+                if el.get('type') != 'TEXT' or _is_sidebar(el):
+                    continue
+                page = el.get('page')
+                if page in pages_with_anchors:
+                    continue
+                text = (el.get('text') or '').strip()
+                b = el.get('bbox', {})
+                h = abs(b.get('y1', 0) - b.get('y2', 0))
+                if h < MIN_ANCHOR_H and not nlp_is_meaningful(text, nlp):
+                    mask_bboxes.append(BoundingBox(
+                        x1=b['x1'], y1=b['y1'], x2=b['x2'], y2=b['y2'],
+                        page=page,
+                    ))
+                    n_ner += 1
+
+        logger.info(
+            "Header/footer/sidebar: %d sidebar, %d strip region(s), %d NER-filtered",
+            n_sidebar, n_strips, n_ner,
+        )
+        return mask_bboxes
 
     def mask(self, pdf_path: Path, regions: List[BoundingBox]) -> Path:
         """

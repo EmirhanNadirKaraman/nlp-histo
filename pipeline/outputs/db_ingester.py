@@ -32,15 +32,16 @@ class PostgresDatabaseIngester:
         If None, the connection is created lazily on first write.
     """
 
-    def __init__(self, db=None) -> None:
+    def __init__(self, db=None, db_url: str | None = None) -> None:
         self._db = db
+        self._db_url = db_url
 
     # ── Lazy DB connection ────────────────────────────────────────────────────
 
     def _get_db(self):
         if self._db is None:
             from database import get_db_connection  # type: ignore
-            self._db = get_db_connection()
+            self._db = get_db_connection(database_url=self._db_url)
         return self._db
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -51,6 +52,7 @@ class PostgresDatabaseIngester:
         rows: List[HierarchicalRow],
         figures: List[CroppedMedia],
         tables: List[CroppedMedia],
+        pdf_path=None,
     ) -> None:
         """
         Ingest all data for ``pmcid`` into the database.
@@ -58,10 +60,11 @@ class PostgresDatabaseIngester:
         Skips the document if it already exists (idempotent by pmcid).
 
         Args:
-            pmcid:   PubMed Central document identifier.
-            rows:    Hierarchical text rows.
-            figures: Cropped figure metadata.
-            tables:  Cropped table metadata.
+            pmcid:    PubMed Central document identifier.
+            rows:     Hierarchical text rows.
+            figures:  Cropped figure metadata.
+            tables:   Cropped table metadata.
+            pdf_path: Path to the source PDF (stored in documents.file_path).
         """
         from database import Document, Figure, Table, TextElement  # type: ignore
         from database.models import (  # type: ignore
@@ -81,6 +84,7 @@ class PostgresDatabaseIngester:
             doc = Document(
                 pmcid=pmcid,
                 filename=f"{pmcid}.pdf",
+                file_path=str(pdf_path) if pdf_path else f"{pmcid}.pdf",
                 text_source="pdf",
             )
             session.add(doc)
@@ -125,8 +129,8 @@ class PostgresDatabaseIngester:
                 position_counter[row.path_string] += 1
                 unique_path = f"{pmcid}/{row.path_string}/{pos}"
 
-                fig_refs = [int(m) for m in _FIG_REF_RE.findall(row.text)]
-                tab_refs = [int(m) for m in _TAB_REF_RE.findall(row.text)]
+                fig_refs = list(dict.fromkeys(int(m) for m in _FIG_REF_RE.findall(row.text)))
+                tab_refs = list(dict.fromkeys(int(m) for m in _TAB_REF_RE.findall(row.text)))
 
                 te = TextElement(
                     document_id=doc.id,

@@ -3,6 +3,15 @@ PyMuPDFMediaCropper
 
 Crops figure and table regions from a PDF using PyMuPDF, saves each crop as a
 PNG image, and returns CroppedMedia metadata for both categories.
+
+Figures: sourced from PICTURE/FIGURE Docling elements, merged by caption number.
+Tables:  sourced from detection regions (TATR/hybrid) as primary, plus
+         TABLE/RECONSTRUCTED_TABLE Docling elements as supplementary,
+         merged by caption number.
+
+Merging logic ported from merged_pipeline._crop_and_save:
+  - Elements sharing the same caption number are unioned via union_bbox().
+  - The longer caption string wins.
 """
 from __future__ import annotations
 
@@ -11,18 +20,16 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from pipeline.config import CroppingConfig
-from pipeline.models.dto import BoundingBox, CroppedMedia, LayoutResult
+from pipeline.models.dto import BoundingBox, CroppedMedia, LayoutResult, TableDetectionResult
 from parsers.layout_utils import (
     FIG_NUM_RE,
     TAB_NUM_RE,
     nearest_caption,
     parse_caption_num,
+    union_bbox,
 )
 
 logger = logging.getLogger(__name__)
-
-_PICTURE_TYPES = frozenset({"PICTURE"})
-_TABLE_TYPES   = frozenset({"TABLE", "RECONSTRUCTED_TABLE"})
 
 
 class PyMuPDFMediaCropper:
@@ -53,13 +60,17 @@ class PyMuPDFMediaCropper:
         self,
         pdf_path: Path,
         layout: LayoutResult,
+        detection: Optional[TableDetectionResult] = None,
     ) -> Tuple[List[CroppedMedia], List[CroppedMedia]]:
         """
         Crop and save figure and table regions.
 
         Args:
-            pdf_path: Path to the original (unmasked) PDF.
-            layout:   Layout result containing PICTURE / TABLE element positions.
+            pdf_path:  Path to the original (unmasked) PDF.
+            layout:    Layout result containing element positions and page dims.
+            detection: Table detection result (TATR/hybrid) used as primary
+                       source for table crops.  Docling TABLE elements are
+                       used as a supplementary source regardless.
 
         Returns:
             ``(figures, tables)`` — two lists of CroppedMedia.
@@ -67,42 +78,170 @@ class PyMuPDFMediaCropper:
         import fitz  # type: ignore
 
         element_dicts = layout.to_element_dicts()
-        captions = [e for e in element_dicts if e.get("type") == "CAPTION"]
+        all_captions  = [e for e in element_dicts if e.get("type") == "CAPTION"]
+
+        doc   = fitz.open(str(pdf_path))
+        scale = self._config.dpi / 72.0
+        mat   = fitz.Matrix(scale, scale)
 
         figures: List[CroppedMedia] = []
         tables:  List[CroppedMedia] = []
 
-        doc = fitz.open(str(pdf_path))
-        scale = self._config.dpi / 72.0
-        mat   = fitz.Matrix(scale, scale)
+        # ── Figures ───────────────────────────────────────────────────────────
+        if self._config.save_figure_crops:
+            merged_figures: dict = {}
+            claimed_captions: dict = {}   # caption_key → num of figure that claimed it
 
-        fig_idx = tab_idx = 0
+            def _caption_key(cap_el):
+                b = cap_el.get("bbox", {})
+                return (b.get("x1"), b.get("y1"), b.get("x2"), b.get("y2"))
 
-        for el in layout.elements:
-            if el.type in _PICTURE_TYPES and self._config.save_figure_crops:
-                cap  = nearest_caption(el.to_dict(), captions)
-                cap_text = cap["text"] if cap else None
-                num  = parse_caption_num(cap_text or "", FIG_NUM_RE)
-                if num is None:
-                    fig_idx += 1
-                label = f"Figure {num}" if num else f"Figure_p{el.page}_{fig_idx}"
-                media = self._crop_element(
-                    doc, el.bbox, layout.page_dims, mat, label,
-                    num, cap_text, "figure", pdf_path.stem, self._figures_dir,
+            def _bbox_edge_gap(a, b):
+                """Minimum edge-to-edge distance between two bboxes (Docling coords)."""
+                a_top, a_bot = max(a["y1"], a["y2"]), min(a["y1"], a["y2"])
+                b_top, b_bot = max(b["y1"], b["y2"]), min(b["y1"], b["y2"])
+                vert = max(0, b_bot - a_top) if b_bot > a_top else max(0, a_bot - b_top)
+                horiz = max(0, max(a["x1"], b["x1"]) - min(a["x2"], b["x2"]))
+                return max(vert, horiz)
+
+            available_captions = list(all_captions)
+
+            for el in element_dicts:
+                if el.get("type") not in ("PICTURE", "FIGURE"):
+                    continue
+                b = el.get("bbox") or {}
+                w = b.get("x2", 0) - b.get("x1", 0)
+                h = abs(b.get("y1", 0) - b.get("y2", 0))
+                if w < self._config.min_figure_pts or h < self._config.min_figure_pts:
+                    logger.debug("Skipping small figure (%.0f×%.0f pts)", w, h)
+                    continue
+
+                # Find nearest available (unclaimed) caption
+                cap_el  = nearest_caption(el, available_captions)
+                caption = cap_el.get("text", "") if cap_el else ""
+                parsed_num = parse_caption_num(caption, FIG_NUM_RE)
+
+                # Check if this caption is already claimed by another figure
+                cap_key = _caption_key(cap_el) if cap_el else None
+                if cap_key and cap_key in claimed_captions:
+                    # Caption already taken — check proximity to the figure that owns it
+                    owner_num = claimed_captions[cap_key]
+                    owner_bbox = merged_figures[owner_num]["bbox"]
+                    gap = _bbox_edge_gap(b, owner_bbox) if owner_bbox else float("inf")
+                    if gap <= self._config.subfigure_proximity_pts:
+                        # Close enough — treat as subfigure panel, merge into owner
+                        existing = merged_figures[owner_num]
+                        existing["bbox"] = union_bbox(existing["bbox"], b)
+                        logger.debug("Merged subfigure panel into Figure %s (gap=%.0f pts)", owner_num, gap)
+                        continue
+                    else:
+                        # Far away — different figure, output without caption
+                        cap_el  = None
+                        caption = ""
+                        parsed_num = None
+
+                if self._config.merge_figures_by_caption and parsed_num is not None:
+                    num = str(parsed_num)
+                else:
+                    num = str(len(merged_figures) + 1)
+
+                merged_figures[num] = {
+                    "figure_id": parsed_num or num,
+                    "caption":   caption or None,
+                    "page":      el.get("page"),
+                    "bbox":      el.get("bbox"),
+                }
+                if cap_key is not None:
+                    claimed_captions[cap_key] = num
+                    available_captions = [c for c in available_captions
+                                          if _caption_key(c) != cap_key]
+
+            for fig in merged_figures.values():
+                page_no = fig["page"]
+                b       = fig["bbox"]
+                if page_no is None or b is None:
+                    continue
+                bbox    = BoundingBox(x1=b["x1"], y1=b["y1"], x2=b["x2"], y2=b["y2"], page=page_no)
+                num_int = int(fig["figure_id"]) if str(fig["figure_id"]).isdigit() else None
+                label   = f"Figure {fig['figure_id']}"
+                media   = self._crop_element(
+                    doc, bbox, layout.page_dims, mat, label,
+                    num_int, fig["caption"] or None, "figure", pdf_path.stem, self._figures_dir,
                 )
                 if media:
                     figures.append(media)
 
-            elif el.type in _TABLE_TYPES and self._config.save_table_crops:
-                cap  = nearest_caption(el.to_dict(), captions)
-                cap_text = cap["text"] if cap else None
-                num  = parse_caption_num(cap_text or "", TAB_NUM_RE)
-                if num is None:
-                    tab_idx += 1
-                label = f"Table {num}" if num else f"Table_p{el.page}_{tab_idx}"
-                media = self._crop_element(
-                    doc, el.bbox, layout.page_dims, mat, label,
-                    num, cap_text, "table", pdf_path.stem, self._tables_dir,
+        # ── Tables ────────────────────────────────────────────────────────────
+        if self._config.save_table_crops:
+            merged_tables: dict = {}
+
+            # Primary source: detection regions (TATR / hybrid)
+            if detection:
+                for region in detection.regions:
+                    page_no = region.bbox.page
+                    b       = region.bbox.to_dict()
+                    pseudo_el = {"page": page_no, "bbox": b}
+                    cap_el  = nearest_caption(pseudo_el, all_captions)
+                    caption = cap_el.get("text", "") if cap_el else ""
+                    parsed_num = parse_caption_num(caption, TAB_NUM_RE)
+                    if self._config.merge_tables_by_caption and parsed_num is not None:
+                        num = str(parsed_num)
+                    else:
+                        num = str(len(merged_tables) + 1)
+                    if num not in merged_tables:
+                        merged_tables[num] = {
+                            "table_id": parsed_num or num,
+                            "caption":  caption or f"Table {num}",
+                            "page":     page_no,
+                            "bbox":     b,
+                        }
+                    elif self._config.merge_tables_by_caption:
+                        existing = merged_tables[num]
+                        existing["bbox"] = union_bbox(existing["bbox"], b)
+                        if len(caption) > len(existing["caption"] or ""):
+                            existing["caption"] = caption
+                        logger.debug("Merged duplicate TATR Table %s", num)
+
+            # Supplementary source: Docling TABLE / RECONSTRUCTED_TABLE elements
+            for el in element_dicts:
+                if el.get("type") not in ("TABLE", "RECONSTRUCTED_TABLE"):
+                    continue
+                page_no = el.get("page")
+                b       = el.get("bbox") or {}
+                if page_no is None or not b:
+                    continue
+                cap_el  = nearest_caption(el, all_captions)
+                caption = cap_el.get("text", "") if cap_el else el.get("caption") or ""
+                parsed_num = parse_caption_num(caption, TAB_NUM_RE)
+                if self._config.merge_tables_by_caption and parsed_num is not None:
+                    num = str(parsed_num)
+                else:
+                    num = str(len(merged_tables) + 1)
+                if num not in merged_tables:
+                    merged_tables[num] = {
+                        "table_id": parsed_num or num,
+                        "caption":  caption or f"Table {num}",
+                        "page":     page_no,
+                        "bbox":     b,
+                    }
+                elif self._config.merge_tables_by_caption:
+                    existing = merged_tables[num]
+                    existing["bbox"] = union_bbox(existing["bbox"], b)
+                    if len(caption) > len(existing["caption"] or ""):
+                        existing["caption"] = caption
+                    logger.debug("Merged Docling Table %s into existing entry", num)
+
+            for tbl in merged_tables.values():
+                page_no = tbl["page"]
+                b       = tbl["bbox"]
+                if page_no is None or not b:
+                    continue
+                bbox    = BoundingBox(x1=b["x1"], y1=b["y1"], x2=b["x2"], y2=b["y2"], page=page_no)
+                num_int = int(tbl["table_id"]) if str(tbl["table_id"]).isdigit() else None
+                label   = f"Table {tbl['table_id']}"
+                media   = self._crop_element(
+                    doc, bbox, layout.page_dims, mat, label,
+                    num_int, tbl["caption"] or None, "table", pdf_path.stem, self._tables_dir,
                 )
                 if media:
                     tables.append(media)

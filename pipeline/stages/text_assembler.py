@@ -17,6 +17,7 @@ from typing import List, Optional
 from pipeline.config import TextAssemblyConfig
 from pipeline.models.dto import HierarchicalRow, LayoutResult
 from parsers.layout_utils import extract_text
+from parsers.text_processing import is_reference_entry
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +74,10 @@ class HierarchicalTextAssembler:
 
         rows: List[HierarchicalRow] = []
         for path_str, path_list, depth, text in rows_raw:
-            if self._skip_refs and path_list:
-                if path_list[0].strip().lower() in self._REF_HEADERS:
+            if self._skip_refs:
+                if path_list and path_list[0].strip().lower() in self._REF_HEADERS:
+                    continue
+                if is_reference_entry(text):
                     continue
             rows.append(HierarchicalRow(
                 path_string=path_str,

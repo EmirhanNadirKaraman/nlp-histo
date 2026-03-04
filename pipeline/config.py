@@ -117,6 +117,10 @@ class CroppingConfig:
     dpi: int = 200
     include_captions_in_metadata: bool = True
     panel_counting_enabled: bool = False
+    min_figure_pts: int = 50        # minimum width AND height in PDF points; smaller figures are skipped
+    merge_figures_by_caption: bool = False  # merge PICTURE elements sharing the same caption number
+    merge_tables_by_caption: bool = False   # merge TABLE/detection regions sharing the same caption number
+    subfigure_proximity_pts: int = 20       # max edge-to-edge gap to treat adjacent figures as subfigure panels
 
 
 @dataclass(slots=True)
@@ -184,7 +188,14 @@ class PipelineConfig:
             raise ValueError(f"runtime.num_workers must be >= 1, got {self.runtime.num_workers}")
 
         if self.database.enabled and not self.database.db_url:
-            raise ValueError("database.enabled=True but database.db_url is not set")
+            try:
+                from database.db_connection import get_database_url  # type: ignore
+                self.database.db_url = get_database_url()
+            except Exception:
+                raise ValueError(
+                    "database.enabled=True but database.db_url is not set "
+                    "and no .env / environment variables found"
+                )
 
     def prepare(self) -> None:
         self.validate()

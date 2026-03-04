@@ -69,6 +69,7 @@ class PipelineRunner:
         self._media_cropper    = None
         self._table_detector   = None
         self._visualizer       = None
+        self._nlp              = None
         self._outputs: list    = []
 
     # ── Stage factory helpers ─────────────────────────────────────────────────
@@ -150,8 +151,19 @@ class PipelineRunner:
             ))
             if self._cfg.database.enabled:
                 from pipeline.outputs.db_ingester import PostgresDatabaseIngester
-                self._outputs.append(PostgresDatabaseIngester())
+                self._outputs.append(PostgresDatabaseIngester(db_url=self._cfg.database.db_url))
         return self._outputs
+
+    def _get_nlp(self):
+        if self._nlp is None and self._cfg.masking.mask_header_footer_sidebar:
+            try:
+                import spacy  # type: ignore
+                self._nlp = spacy.load("en_core_sci_sm")
+                logger.info("scispaCy model loaded for NER-based header/footer detection.")
+            except (ImportError, OSError) as exc:
+                logger.warning("scispaCy not available — NER fallback disabled: %s", exc)
+                self._nlp = False  # falsy sentinel so we don't retry
+        return self._nlp or None
 
     def _get_visualizer(self):
         if self._visualizer is None and self._cfg.visualization.enabled:
@@ -183,7 +195,7 @@ class PipelineRunner:
             result = self._process(pdf_path, pmcid)
             logger.info("✅ %s — done (%d rows)", pmcid, len(result))
             return True
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("❌ %s — failed: %s", pmcid, exc)
             if self._cfg.runtime.save_error_traces:
                 logger.debug(traceback.format_exc())
@@ -219,7 +231,7 @@ class PipelineRunner:
 
         # ── Step 3: Region masking ─────────────────────────────────────────────
         masker = self._get_region_masker()
-        regions_to_mask = masker.collect_regions(detection, layout) if self._cfg.masking.enabled else []
+        regions_to_mask = masker.collect_regions(detection, layout, nlp=self._get_nlp()) if self._cfg.masking.enabled else []
         if regions_to_mask:
             logger.info("[%s] Step 3 — masking %d regions", pmcid, len(regions_to_mask))
             masked_path = masker.mask(pdf_path, regions_to_mask)
@@ -243,12 +255,12 @@ class PipelineRunner:
 
         # ── Step 7: Media cropping ────────────────────────────────────────────
         logger.info("[%s] Step 7 — media cropping", pmcid)
-        figures, tables = self._get_media_cropper().crop(pdf_path, layout)
+        figures, tables = self._get_media_cropper().crop(pdf_path, layout, detection=detection)
 
         # ── Step 8: Outputs ───────────────────────────────────────────────────
         logger.info("[%s] Step 8 — writing outputs", pmcid)
         for output in self._get_outputs():
-            output.write(pmcid, rows, figures, tables)
+            output.write(pmcid, rows, figures, tables, pdf_path=pdf_path)
 
         return rows
 
@@ -307,8 +319,7 @@ def main() -> None:
     # ── Configuration ──────────────────────────────────────────────────────────
     # Edit pipeline/config.py to change defaults (detector, visualization, etc.)
     cfg = PipelineConfig()
-    cfg.database.enabled = False
-    # cfg.database.db_url = "postgresql://postgres@localhost/nlp_histo"
+    cfg.database.enabled = True  # set to True to ingest; db_url auto-loaded from .env
     cfg.prepare()
 
     # ── Single document ────────────────────────────────────────────────────────

@@ -221,22 +221,27 @@ def is_reference_entry(text: str) -> bool:
     """
     text_stripped = text.strip()
 
-    # Must start with number + period
-    if not re.match(r'^\d+\.\s+', text_stripped):
-        return False
+    # Pattern 1: numbered reference  "53. Smith J, ..."
+    if re.match(r'^\d+\.\s+', text_stripped):
+        has_author  = bool(re.search(r'[A-Z][a-z]+\s+[A-Z][\.,]', text_stripped))
+        has_year    = bool(re.search(r'\b(19|20)\d{2}\b', text_stripped))
+        has_journal = bool(re.search(r'\b(doi|DOI|http|www|PMID|ISBN)', text_stripped))
+        if has_author or (has_year and has_journal) or (has_year and len(text_stripped) > 100):
+            return True
 
-    # Check for author pattern: Capital letter + lowercase, followed by comma or period
-    # e.g., "Smith J," or "Jones A."
-    has_author = bool(re.search(r'[A-Z][a-z]+\s+[A-Z][\.,]', text_stripped))
+    # Pattern 2: author-year style  "Lastname, F.; Lastname, F.; ..."
+    # At least two authors separated by semicolons, each "Word, X." or "Word, X.Y."
+    if len(re.findall(r'\w[\w\u00C0-\u024F]+,\s+[A-Z]\.', text_stripped)) >= 2:
+        return True
 
-    # Check for year pattern: 1900-2099
-    has_year = bool(re.search(r'\b(19|20)\d{2}\b', text_stripped))
+    # Pattern 3: "Author FI, Author FI, et al. Title. Journal Year; ..."
+    # Starts with an author-like token, "et al." appears in the first 150 chars, year present.
+    if re.match(r'^[A-Z][a-z]+[\s,]+[A-Z]', text_stripped):
+        if re.search(r'\bet\s+al\.', text_stripped[:150], re.IGNORECASE):
+            if re.search(r'\b(19|20)\d{2}\b', text_stripped):
+                return True
 
-    # Check for common journal/publication patterns
-    has_journal = bool(re.search(r'\b(doi|DOI|http|www|PMID|ISBN)', text_stripped))
-
-    # If it has author pattern OR (year AND journal markers), it's likely a reference
-    return has_author or (has_year and has_journal) or (has_year and len(text_stripped) > 100)
+    return False
 
 
 def remove_citations(text: str) -> str:

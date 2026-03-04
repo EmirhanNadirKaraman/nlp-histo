@@ -41,8 +41,9 @@ class TextFileWriter:
         self,
         pmcid: str,
         rows: List[HierarchicalRow],
-        figures: List[CroppedMedia],   # noqa: ARG002 — interface compat
-        tables: List[CroppedMedia],    # noqa: ARG002 — interface compat
+        _figures: List[CroppedMedia],
+        _tables: List[CroppedMedia],
+        _pdf_path=None,
     ) -> None:
         """
         Write rows to ``{output_dir}/{pmcid}_text.txt``.
