@@ -154,6 +154,15 @@ class PipelineRunner:
                 self._outputs.append(PostgresDatabaseIngester(db_url=self._cfg.database.db_url))
         return self._outputs
 
+    def _already_in_db(self, pmcid: str) -> bool:
+        try:
+            from database import get_db_connection, Document  # type: ignore
+            db = get_db_connection(database_url=self._cfg.database.db_url)
+            with db.session_scope() as session:
+                return session.query(Document).filter_by(pmcid=pmcid).first() is not None
+        except Exception:
+            return False  # if DB is unreachable, let the run proceed
+
     def _get_nlp(self):
         if self._nlp is None and self._cfg.masking.mask_header_footer_sidebar:
             try:
@@ -190,6 +199,11 @@ class PipelineRunner:
         if self._cfg.runtime.skip_blacklisted and self._blacklist.contains(pmcid):
             logger.info("⚡ %s — skipped (blacklisted)", pmcid)
             return False
+
+        if self._cfg.runtime.skip_existing_in_db and self._cfg.database.enabled:
+            if self._already_in_db(pmcid):
+                logger.info("⚡ %s — skipped (already in database)", pmcid)
+                return True
 
         try:
             result = self._process(pdf_path, pmcid)

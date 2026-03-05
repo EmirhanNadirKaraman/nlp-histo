@@ -43,7 +43,7 @@ class TextFileWriter:
         rows: List[HierarchicalRow],
         _figures: List[CroppedMedia],
         _tables: List[CroppedMedia],
-        _pdf_path=None,
+        pdf_path=None,  # noqa: ARG002
     ) -> None:
         """
         Write rows to ``{output_dir}/{pmcid}_text.txt``.

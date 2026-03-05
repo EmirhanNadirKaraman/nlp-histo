@@ -156,6 +156,7 @@ class RuntimeConfig:
     log_level: LogLevel = LogLevel.INFO
     fail_fast: bool = False
     skip_blacklisted: bool = True
+    skip_existing_in_db: bool = True   # skip documents already in the database
     update_blacklist_on_failure: bool = True
     save_error_traces: bool = True
     seed: int = 42

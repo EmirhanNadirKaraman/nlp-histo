@@ -54,7 +54,7 @@ class MediaJsonWriter:
         _rows: List[HierarchicalRow],
         figures: List[CroppedMedia],
         tables: List[CroppedMedia],
-        _pdf_path=None,
+        pdf_path=None,  # noqa: ARG002
     ) -> None:
         """
         Write ``{output_dir}/{pmcid}_media.json``.
