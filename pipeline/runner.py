@@ -219,6 +219,45 @@ class PipelineRunner:
                 raise
             return False
 
+    def _patch_section_header_types(
+        self,
+        masked_layout: LayoutResult,
+        full_layout: LayoutResult,
+    ) -> None:
+        """
+        Restore SECTION_HEADER types lost during masked re-extraction.
+
+        Builds a bbox-keyed lookup of every SECTION_HEADER in the full layout
+        and promotes any matching TEXT element in the masked layout back to
+        SECTION_HEADER.  Matching is done on (page, x1, y1, x2, y2) rounded
+        to 2 decimal places to absorb floating-point noise.
+        """
+        full_headers: set = set()
+        for el in full_layout.elements:
+            if el.type == "SECTION_HEADER":
+                b = el.bbox
+                full_headers.add((
+                    el.page,
+                    round(b.x1, 2), round(b.y1, 2),
+                    round(b.x2, 2), round(b.y2, 2),
+                ))
+
+        patched = 0
+        for el in masked_layout.elements:
+            if el.type != "SECTION_HEADER":
+                b = el.bbox
+                key = (
+                    el.page,
+                    round(b.x1, 2), round(b.y1, 2),
+                    round(b.x2, 2), round(b.y2, 2),
+                )
+                if key in full_headers:
+                    el.type = "SECTION_HEADER"
+                    patched += 1
+
+        if patched:
+            logger.info("  Patched %d element(s) TEXT → SECTION_HEADER from full layout", patched)
+
     def _process(self, pdf_path: Path, pmcid: str):
         # ── Step 1: Layout extraction ──────────────────────────────────────────
         logger.info("[%s] Step 1 — layout extraction", pmcid)
@@ -255,6 +294,13 @@ class PipelineRunner:
         # ── Step 4: Re-extract from masked PDF ────────────────────────────────
         logger.info("[%s] Step 4 — re-extraction from masked PDF", pmcid)
         masked_layout: LayoutResult = self._get_masked_extractor().extract(masked_path)
+
+        # ── Step 4b: Patch element types from full layout ─────────────────────
+        # Masking changes visual context, causing Docling to misclassify some
+        # SECTION_HEADER elements as TEXT on the second pass.  Restore the
+        # correct type for any element the full layout authoritatively labelled
+        # as SECTION_HEADER.
+        self._patch_section_header_types(masked_layout, layout)
 
         # ── Step 5: Artifact filtering ────────────────────────────────────────
         if self._cfg.filtering.enabled:

@@ -49,10 +49,13 @@ class DoclingLayoutExtractor:
         from docling.datamodel.pipeline_options import PdfPipelineOptions          # type: ignore
         from docling.datamodel.base_models import InputFormat                       # type: ignore
 
+        from docling.datamodel.pipeline_options import AcceleratorOptions, AcceleratorDevice  # type: ignore
+
         opts = PdfPipelineOptions()
         opts.do_table_structure = self._config.do_table_structure
         opts.do_ocr = self._config.do_ocr
         opts.images_scale = 2.0
+        opts.accelerator_options = AcceleratorOptions(device=AcceleratorDevice.CPU)
 
         self._converter = DocumentConverter(
             format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
