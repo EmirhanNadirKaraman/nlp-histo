@@ -264,13 +264,21 @@ def nlp_is_meaningful(text: str, nlp) -> bool:
     return any(tok.pos_ == 'VERB' for tok in doc) or has_bio_entity(doc) or len(words) >= 5
 
 
+_SIDEBAR_METADATA = re.compile(
+    r'^(Received|Revised|Accepted|Published|Citation|Academic\s+Editor'
+    r'|Handling\s+Editor|Copyright|Licensee)\s*[:\s]',
+    re.IGNORECASE,
+)
+
+
 def filter_artifacts(elements, nlp=None) -> list:
     """
     Remove common layout artifacts from Docling re-extraction output.
 
     1. Elements with no alphabetic characters.
-    2. Single-line TEXT elements outside the y-range of anchor blocks on the same page.
-    3. On pages with no anchors, single-line TEXT elements that fail NER scoring.
+    2. Short sidebar metadata lines (Received/Revised/Accepted/Published/etc.).
+    3. Single-line TEXT elements outside the y-range of anchor blocks on the same page.
+    4. On pages with no anchors, single-line TEXT elements that fail NER scoring.
     """
     page_bounds: dict = {}
     for el in elements:
@@ -297,6 +305,8 @@ def filter_artifacts(elements, nlp=None) -> list:
         if not text:
             continue
         if not re.search(r'[a-zA-Z]', text):
+            continue
+        if _SIDEBAR_METADATA.match(text):
             continue
 
         if etype == 'TEXT':
@@ -326,6 +336,19 @@ _BOILERPLATE_STARTS = re.compile(
     re.IGNORECASE
 )
 
+# Author byline: comma/and-separated "First Last" pairs with optional affiliation
+# markers (*, †, ‡, superscript digits). Requires ≥2 authors so single proper
+# names aren't caught. e.g. "Anna Colagrande, Giuseppe Ingravallo * and Gerardo Cazzato *"
+_AUTHOR_BYLINE_RE = re.compile(
+    r'^[A-Z][a-z\u00C0-\u017E]+(?:-[A-Z][a-z\u00C0-\u017E]+)?'
+    r'\s+[A-Z][a-zA-Z\u00C0-\u017E-]+[\s\d*†‡]*'
+    r'(?:(?:[,;]\s*|\s+and\s+)'
+    r'[A-Z][a-z\u00C0-\u017E]+(?:-[A-Z][a-z\u00C0-\u017E]+)?'
+    r'\s+[A-Z][a-zA-Z\u00C0-\u017E-]+[\s\d*†‡]*'
+    r')+'
+    r'$'
+)
+
 
 def is_relevant_para(text: str, nlp=None) -> bool:
     """
@@ -347,6 +370,8 @@ def is_relevant_para(text: str, nlp=None) -> bool:
         return False
 
     if _BOILERPLATE_STARTS.match(t):
+        return False
+    if _AUTHOR_BYLINE_RE.match(t):
         return False
     if is_reference_entry(t):
         return False

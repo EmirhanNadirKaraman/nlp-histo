@@ -117,15 +117,18 @@ class PipelineRunner:
     def _get_artifact_filter(self):
         if self._artifact_filter is None:
             from pipeline.stages.artifact_filter import ArtifactFilter
-            self._artifact_filter = ArtifactFilter(config=self._cfg.filtering)
+            nlp = self._get_nlp() if self._cfg.filtering.apply_ner_filtering else None
+            self._artifact_filter = ArtifactFilter(config=self._cfg.filtering, nlp=nlp)
         return self._artifact_filter
 
     def _get_text_assembler(self):
         if self._text_assembler is None:
             from pipeline.stages.text_assembler import HierarchicalTextAssembler
+            nlp = self._get_nlp() if self._cfg.filtering.apply_paragraph_relevance_filtering else None
             self._text_assembler = HierarchicalTextAssembler(
                 config=self._cfg.text,
                 skip_references_section=True,
+                nlp=nlp,
             )
         return self._text_assembler
 
@@ -164,13 +167,18 @@ class PipelineRunner:
             return False  # if DB is unreachable, let the run proceed
 
     def _get_nlp(self):
-        if self._nlp is None and self._cfg.masking.mask_header_footer_sidebar:
+        needs_nlp = (
+            self._cfg.masking.mask_header_footer_sidebar
+            or self._cfg.filtering.apply_ner_filtering
+            or self._cfg.filtering.apply_paragraph_relevance_filtering
+        )
+        if self._nlp is None and needs_nlp:
             try:
                 import spacy  # type: ignore
                 self._nlp = spacy.load("en_core_sci_sm")
-                logger.info("scispaCy model loaded for NER-based header/footer detection.")
+                logger.info("scispaCy model loaded.")
             except (ImportError, OSError) as exc:
-                logger.warning("scispaCy not available — NER fallback disabled: %s", exc)
+                logger.warning("scispaCy not available — NER features disabled: %s", exc)
                 self._nlp = False  # falsy sentinel so we don't retry
         return self._nlp or None
 
@@ -309,6 +317,17 @@ class PipelineRunner:
                 masked_layout.elements
             )
 
+        # ── Step 5b: Raw text dump (pre-assembly) ─────────────────────────────
+        if self._cfg.text.write_raw_text:
+            raw_path = self._cfg.paths.text_raw_dir / f"{pmcid}_raw.txt"
+            self._cfg.paths.text_raw_dir.mkdir(parents=True, exist_ok=True)
+            with raw_path.open("w", encoding="utf-8") as f:
+                for el in masked_layout.elements:
+                    text = (el.text or "").strip()
+                    if text:
+                        f.write(f"[{el.type}] {text}\n\n")
+            logger.info("[%s] Raw text written to %s", pmcid, raw_path)
+
         # ── Step 6: Text assembly ─────────────────────────────────────────────
         logger.info("[%s] Step 6 — text assembly", pmcid)
         rows = self._get_text_assembler().assemble(masked_layout)
@@ -380,12 +399,18 @@ def main() -> None:
     # Edit pipeline/config.py to change defaults (detector, visualization, etc.)
     cfg = PipelineConfig()
     cfg.database.enabled = True  # set to True to ingest; db_url auto-loaded from .env
+    cfg.text.write_raw_text = True
     cfg.prepare()
 
     # ── Single document ────────────────────────────────────────────────────────
     # PipelineRunner(cfg).run_document(
     #     pdf_path=Path("files/organized_pdfs/PMC10047158_dermatopathology-10-00017.pdf"),
     #     pmcid="PMC10047158",
+    # )
+
+    # PipelineRunner(cfg).run_document(
+    #     pdf_path=Path("files/organized_pdfs/PMC10047213_dermatopathology-10-00018.pdf"),
+    #     pmcid="PMC10047213",
     # )
 
     # ── Sequential batch ───────────────────────────────────────────────────────

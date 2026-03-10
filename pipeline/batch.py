@@ -141,20 +141,40 @@ class ParallelBatchRunner:
             Dict with keys ``processed``, ``failed``, ``skipped``.
         """
         self._cfg.prepare()
-        self._stats = {"processed": 0, "failed": 0, "skipped": 0}
-
         pdfs: List[Path] = sorted(pdf_dir.glob(glob))
         if max_docs is not None:
             pdfs = pdfs[:max_docs]
+        return self.run_paths(pdfs, pmcid_fn=pmcid_fn)
+
+    def run_paths(
+        self,
+        paths: List[Path],
+        pmcid_fn: Optional[Callable[[Path], str]] = None,
+    ) -> Dict[str, int]:
+        """
+        Process an explicit list of PDF paths using a thread pool.
+
+        Useful when the caller has already filtered / sampled the file list
+        (e.g. random subset for evaluation).
+
+        Args:
+            paths:    Pre-built list of PDF paths to process.
+            pmcid_fn: Optional callable mapping a Path to a PMCID string.
+                      Defaults to using the file stem.
+
+        Returns:
+            Dict with keys ``processed``, ``failed``, ``skipped``.
+        """
+        self._stats = {"processed": 0, "failed": 0, "skipped": 0}
 
         logger.info(
             "ParallelBatchRunner: %d PDFs, %d workers",
-            len(pdfs), self._max_workers,
+            len(paths), self._max_workers,
         )
 
         work = [
             (pdf, pmcid_fn(pdf) if pmcid_fn else pdf.stem)
-            for pdf in pdfs
+            for pdf in paths
         ]
 
         try:

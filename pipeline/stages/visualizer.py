@@ -39,7 +39,13 @@ _ELEMENT_COLORS = {
     "TEXT":                (0.6,  0.6,  0.9),
     "UNKNOWN":             (0.5,  0.5,  0.5),
 }
-_DETECTION_COLOR = (1, 0, 0)   # red — table detector output
+_DETECTION_COLORS = {
+    "docling": (1,    0,    0   ),   # red
+    "tatr":    (0,    0.6,  1   ),   # blue
+    "hybrid":  (1,    0.5,  0   ),   # orange
+    "vlm":     (0.6,  0,    0.8 ),   # purple
+}
+_DETECTION_COLOR_DEFAULT = (0.5, 0.5, 0.5)   # grey fallback
 
 
 class DetectionVisualizer:
@@ -131,12 +137,13 @@ class DetectionVisualizer:
                 rect = region.bbox.to_fitz_rect(page.rect.height)
                 if rect.is_empty:
                     continue
-                page.draw_rect(rect, color=_DETECTION_COLOR, width=2)
+                color = _DETECTION_COLORS.get(region.source, _DETECTION_COLOR_DEFAULT)
+                page.draw_rect(rect, color=color, width=2)
                 page.insert_text(
                     (rect.x0 + 1, rect.y0 + 8),
                     f"{region.source}:{region.score:.2f}",
                     fontsize=6,
-                    color=_DETECTION_COLOR,
+                    color=color,
                 )
 
         # ── Legend on page 1 ─────────────────────────────────────────────────

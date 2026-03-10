@@ -37,6 +37,7 @@ class PathConfig:
     docling_full_dir: Path = Path("out/docling_full")
     docling_masked_dir: Path = Path("out/docling_masked")
     text_dir: Path = Path("out/text")
+    text_raw_dir: Path = Path("out/text_raw")
     json_dir: Path = Path("out/json")
     vis_dir: Path = Path("out/visualization")
 
@@ -56,6 +57,7 @@ class PathConfig:
             self.docling_full_dir,
             self.docling_masked_dir,
             self.text_dir,
+            self.text_raw_dir,
             self.json_dir,
             self.vis_dir,
             self.figures_dir,
@@ -101,8 +103,8 @@ class MaskingConfig:
 @dataclass(slots=True)
 class FilteringConfig:
     enabled: bool = True
-    apply_ner_filtering: bool = False
-    apply_paragraph_relevance_filtering: bool = False
+    apply_ner_filtering: bool = True
+    apply_paragraph_relevance_filtering: bool = True
     fix_ligatures: bool = True
     remove_reference_markers: bool = False
     min_paragraph_chars: int = 20
@@ -131,6 +133,7 @@ class TextAssemblyConfig:
     use_context_aware_stitching: bool = True
     compare_combinations: bool = False
     save_combination_outputs: bool = False
+    write_raw_text: bool = False  # dump pre-assembly elements to out/text_raw/
 
 
 @dataclass(slots=True)
