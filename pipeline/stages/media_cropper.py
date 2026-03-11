@@ -185,7 +185,7 @@ class PyMuPDFMediaCropper:
                     caption = cap_el.get("text", "") if cap_el else ""
                     parsed_num = parse_caption_num(caption, TAB_NUM_RE)
                     if self._config.merge_tables_by_caption and parsed_num is not None:
-                        num = str(parsed_num)
+                        num = f"{parsed_num}_p{page_no}"
                     else:
                         num = str(len(merged_tables) + 1)
                     if num not in merged_tables:
@@ -214,7 +214,7 @@ class PyMuPDFMediaCropper:
                 caption = cap_el.get("text", "") if cap_el else el.get("caption") or ""
                 parsed_num = parse_caption_num(caption, TAB_NUM_RE)
                 if self._config.merge_tables_by_caption and parsed_num is not None:
-                    num = str(parsed_num)
+                    num = f"{parsed_num}_p{page_no}"
                 else:
                     num = str(len(merged_tables) + 1)
                 if num not in merged_tables:
@@ -276,7 +276,7 @@ class PyMuPDFMediaCropper:
 
         out_dir.mkdir(parents=True, exist_ok=True)
         safe_label = label.replace(" ", "_").replace("/", "-")
-        filename   = f"{stem}_{safe_label}.{self._config.image_format}"
+        filename   = f"{stem}_{safe_label}_p{page_no}.{self._config.image_format}"
         out_path   = out_dir / filename
 
         page = doc[page_no - 1]

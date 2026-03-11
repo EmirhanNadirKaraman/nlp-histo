@@ -219,3 +219,7 @@ relevant_texts/
 langchain-summarization/summarization_results/
 disease_entities/
 named_entity_recognition/entity_linking_cache.json
+
+eval/out/
+eval/pdfs/
+

@@ -69,7 +69,8 @@ class ParallelBatchRunner:
         self._max_workers = max_workers or max(1, cpu // 2)
 
         # Shared across all threads — already thread-safe
-        self._blacklist = BlacklistManager(self._cfg.paths.blacklist_file)
+        self._blacklist  = BlacklistManager(self._cfg.paths.blacklist_file)
+        self._completed  = BlacklistManager(self._cfg.paths.completed_file) if self._cfg.paths.completed_file else None
 
         # Per-thread PipelineRunner instances (Docling is not thread-safe to share)
         self._local = threading.local()
@@ -93,6 +94,7 @@ class ParallelBatchRunner:
             # Share the same blacklist instance across all runners so one thread's
             # failure immediately blocks the same pmcid in other threads.
             runner._blacklist = self._blacklist
+            runner._completed = self._completed
             self._local.runner = runner
         return self._local.runner
 

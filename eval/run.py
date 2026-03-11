@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 from pipeline.batch import ParallelBatchRunner  # noqa: E402
 from pipeline.config import (  # noqa: E402
+    CroppingConfig,
     DatabaseConfig,
     PathConfig,
     PipelineConfig,
@@ -54,7 +55,8 @@ def make_config() -> PipelineConfig:
         vis_dir            = OUT / "visualization",
         figures_dir        = OUT / "figures",
         tables_dir         = OUT / "tables",
-        blacklist_file     = OUT / "blacklist.json",
+        blacklist_file     = HERE / "blacklist.json",
+        completed_file     = HERE / "completed.json",
         run_metadata_dir   = OUT / "run_metadata",
     )
 
@@ -74,11 +76,17 @@ def make_config() -> PipelineConfig:
     # ── No DB for eval runs ───────────────────────────────────────────────────
     cfg.database = DatabaseConfig(enabled=False)
 
+    # ── Cropping: merge same-caption same-page detections from TATR + Docling ──
+    cfg.cropping = CroppingConfig(merge_tables_by_caption=True)
+
     # ── Table detector: hybrid (Docling + TATR) ───────────────────────────────
     cfg.table_detector = TableDetectorType.HYBRID
 
     # ── Runtime: expose seed explicitly ──────────────────────────────────────
-    cfg.runtime = RuntimeConfig(seed=SEED)
+    cfg.runtime = RuntimeConfig(
+        seed=SEED,
+        blacklist_if_rows_exceed=200,
+    )
 
     return cfg
 

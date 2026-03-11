@@ -105,6 +105,16 @@ class DetectionVisualizer:
         max_pages = self._config.max_pages or len(doc)
         type_counts: dict = {}
 
+        # ── Pre-compute detection rects per page for overlap checks ──────────
+        detection_rects_by_page: dict[int, list] = {}
+        if detection:
+            for region in detection.regions:
+                pg = region.bbox.page
+                if 1 <= pg <= len(doc):
+                    detection_rects_by_page.setdefault(pg, []).append(
+                        region.bbox.to_fitz_rect(doc[pg - 1].rect.height)
+                    )
+
         # ── Draw layout elements ──────────────────────────────────────────────
         if layout:
             for el in layout.elements:
@@ -116,14 +126,29 @@ class DetectionVisualizer:
                 rect = el.bbox.to_fitz_rect(page.rect.height)
                 if rect.is_empty:
                     continue
-                color = _ELEMENT_COLORS.get(el.type, _ELEMENT_COLORS["UNKNOWN"])
-                page.draw_rect(rect, color=color, width=1, dashes="[2] 0")
-                page.insert_text(
-                    (rect.x0 + 1, rect.y0 + 8),
-                    el.type[:3].upper(),
-                    fontsize=6,
-                    color=color,
+
+                will_be_masked = any(
+                    rect.intersects(dr)
+                    for dr in detection_rects_by_page.get(el.page, [])
                 )
+
+                if will_be_masked:
+                    page.draw_rect(rect, color=(1, 0.7, 0), fill=(1, 1, 0.6), width=1.5)
+                    page.insert_text(
+                        (rect.x0 + 1, rect.y0 + 8),
+                        f"MASK:{el.type[:3]}",
+                        fontsize=6,
+                        color=(0.7, 0.4, 0),
+                    )
+                else:
+                    color = _ELEMENT_COLORS.get(el.type, _ELEMENT_COLORS["UNKNOWN"])
+                    page.draw_rect(rect, color=color, width=1, dashes="[2] 0")
+                    page.insert_text(
+                        (rect.x0 + 1, rect.y0 + 8),
+                        el.type[:3].upper(),
+                        fontsize=6,
+                        color=color,
+                    )
                 type_counts[el.type] = type_counts.get(el.type, 0) + 1
 
         # ── Draw detection regions ────────────────────────────────────────────

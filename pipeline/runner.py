@@ -59,7 +59,8 @@ class PipelineRunner:
 
     def __init__(self, config: Optional[PipelineConfig] = None) -> None:
         self._cfg = config or PipelineConfig()
-        self._blacklist = BlacklistManager(self._cfg.paths.blacklist_file)
+        self._blacklist  = BlacklistManager(self._cfg.paths.blacklist_file)
+        self._completed  = BlacklistManager(self._cfg.paths.completed_file) if self._cfg.paths.completed_file else None
 
         # Lazy stage instances — created on first use
         self._layout_extractor = None
@@ -208,14 +209,30 @@ class PipelineRunner:
             logger.info("⚡ %s — skipped (blacklisted)", pmcid)
             return False
 
+        if self._completed and self._completed.contains(pmcid):
+            logger.info("⚡ %s — skipped (already completed)", pmcid)
+            return True
+
         if self._cfg.runtime.skip_existing_in_db and self._cfg.database.enabled:
             if self._already_in_db(pmcid):
                 logger.info("⚡ %s — skipped (already in database)", pmcid)
                 return True
 
+        if self._cfg.runtime.skip_existing_media_json:
+            media_json = self._cfg.paths.json_dir / f"{pmcid}_media.json"
+            if media_json.exists():
+                logger.info("⚡ %s — skipped (media JSON exists)", pmcid)
+                return True
+
         try:
             result = self._process(pdf_path, pmcid)
             logger.info("✅ %s — done (%d rows)", pmcid, len(result))
+            if self._completed:
+                self._completed.add(pmcid)
+            limit = self._cfg.runtime.blacklist_if_rows_exceed
+            if limit is not None and len(result) > limit:
+                self._blacklist.add(pmcid, reason=f"too large ({len(result)} rows > {limit})")
+                logger.info("🚫 %s — blacklisted (too large: %d rows)", pmcid, len(result))
             return True
         except Exception as exc:
             logger.error("❌ %s — failed: %s", pmcid, exc)
@@ -267,7 +284,7 @@ class PipelineRunner:
             logger.info("  Patched %d element(s) TEXT → SECTION_HEADER from full layout", patched)
 
     def _process(self, pdf_path: Path, pmcid: str):
-        # ── Step 1: Layout extraction ──────────────────────────────────────────
+        # ── Step 1: Layout extraction (cached by DoclingLayoutExtractor) ───────
         logger.info("[%s] Step 1 — layout extraction", pmcid)
         layout: LayoutResult = self._get_layout_extractor().extract(pdf_path)
 
@@ -299,15 +316,11 @@ class PipelineRunner:
         else:
             masked_path = pdf_path
 
-        # ── Step 4: Re-extract from masked PDF ────────────────────────────────
+        # ── Step 4: Re-extract from masked PDF (cached by DoclingLayoutExtractor)
         logger.info("[%s] Step 4 — re-extraction from masked PDF", pmcid)
         masked_layout: LayoutResult = self._get_masked_extractor().extract(masked_path)
 
         # ── Step 4b: Patch element types from full layout ─────────────────────
-        # Masking changes visual context, causing Docling to misclassify some
-        # SECTION_HEADER elements as TEXT on the second pass.  Restore the
-        # correct type for any element the full layout authoritatively labelled
-        # as SECTION_HEADER.
         self._patch_section_header_types(masked_layout, layout)
 
         # ── Step 5: Artifact filtering ────────────────────────────────────────

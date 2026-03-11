@@ -142,3 +142,4 @@ class CroppedMedia:
     image_path: Optional[Path]
     bbox: BoundingBox
     page: int
+    source: str = "unknown"    # 'tatr' | 'docling' | 'docling_reconstructed' | 'tatr+docling' | etc.

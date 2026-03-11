@@ -47,6 +47,7 @@ class PathConfig:
 
     # Metadata / bookkeeping
     blacklist_file: Path = Path("out/failed_pdfs_blacklist.json")
+    completed_file: Optional[Path] = None  # if set, fully-processed PMCIDs are saved here
     run_metadata_dir: Path = Path("out/run_metadata")
 
     def ensure_dirs(self) -> None:
@@ -161,6 +162,9 @@ class RuntimeConfig:
     skip_blacklisted: bool = True
     skip_existing_in_db: bool = True   # skip documents already in the database
     update_blacklist_on_failure: bool = True
+    blacklist_if_rows_exceed: Optional[int] = None  # blacklist after success if row count exceeds this
+    skip_existing_media_json: bool = False  # skip documents whose media JSON already exists
+    skip_existing_outputs: bool = False     # skip individual stages whose output files already exist
     save_error_traces: bool = True
     seed: int = 42
     num_workers: int = 1
