@@ -165,6 +165,7 @@ class RuntimeConfig:
     blacklist_if_rows_exceed: Optional[int] = None  # blacklist after success if row count exceeds this
     skip_existing_media_json: bool = False  # skip documents whose media JSON already exists
     skip_existing_outputs: bool = False     # skip individual stages whose output files already exist
+    multi_source_crops: bool = False        # produce three media JSONs (docling / docling_recon / full)
     save_error_traces: bool = True
     seed: int = 42
     num_workers: int = 1

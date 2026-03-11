@@ -347,7 +347,43 @@ class PipelineRunner:
 
         # ── Step 7: Media cropping ────────────────────────────────────────────
         logger.info("[%s] Step 7 — media cropping", pmcid)
-        figures, tables = self._get_media_cropper().crop(pdf_path, layout, detection=detection)
+        cropper = self._get_media_cropper()
+        figures, tables = cropper.crop(pdf_path, layout, detection=detection)
+
+        if self._cfg.runtime.multi_source_crops:
+            from pipeline.outputs.media_json_writer import MediaJsonWriter
+            from pipeline.stages.media_cropper import PyMuPDFMediaCropper
+            json_dir    = self._cfg.paths.json_dir
+            tables_root = self._cfg.paths.tables_dir.parent
+
+            # Docling TABLE only
+            cropper_docling = PyMuPDFMediaCropper(
+                config=self._cfg.cropping,
+                figures_dir=self._cfg.paths.figures_dir,
+                tables_dir=tables_root / "docling",
+            )
+            _, tables_docling = cropper_docling.crop(
+                pdf_path, layout, detection=None,
+                docling_table_types=("TABLE",),
+            )
+            MediaJsonWriter(json_dir.parent / "docling").write(
+                pmcid, rows, figures, tables_docling,
+            )
+
+            # Docling TABLE + RECONSTRUCTED_TABLE
+            cropper_docling_recon = PyMuPDFMediaCropper(
+                config=self._cfg.cropping,
+                figures_dir=self._cfg.paths.figures_dir,
+                tables_dir=tables_root / "docling_recon",
+            )
+            _, tables_docling_recon = cropper_docling_recon.crop(
+                pdf_path, layout, detection=None,
+                docling_table_types=("TABLE", "RECONSTRUCTED_TABLE"),
+            )
+            MediaJsonWriter(json_dir.parent / "docling_recon").write(
+                pmcid, rows, figures, tables_docling_recon,
+            )
+            logger.info("[%s] Multi-source crops written (docling / docling_recon / full)", pmcid)
 
         # ── Step 8: Outputs ───────────────────────────────────────────────────
         logger.info("[%s] Step 8 — writing outputs", pmcid)

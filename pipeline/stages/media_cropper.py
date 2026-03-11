@@ -61,6 +61,7 @@ class PyMuPDFMediaCropper:
         pdf_path: Path,
         layout: LayoutResult,
         detection: Optional[TableDetectionResult] = None,
+        docling_table_types: Tuple[str, ...] = ("TABLE", "RECONSTRUCTED_TABLE"),
     ) -> Tuple[List[CroppedMedia], List[CroppedMedia]]:
         """
         Crop and save figure and table regions.
@@ -175,8 +176,24 @@ class PyMuPDFMediaCropper:
         if self._config.save_table_crops:
             merged_tables: dict = {}
 
+            def _overlap_ratio(a: dict, b: dict) -> float:
+                """Intersection / min-area for two Docling bboxes (same page assumed)."""
+                ix1 = max(a["x1"], b["x1"])
+                ix2 = min(a["x2"], b["x2"])
+                iy1 = min(a["y1"], b["y1"])  # Docling: y1 > y2
+                iy2 = max(a["y2"], b["y2"])
+                iw, ih = max(0.0, ix2 - ix1), max(0.0, iy1 - iy2)
+                inter = iw * ih
+                if inter == 0:
+                    return 0.0
+                area_a = (a["x2"] - a["x1"]) * abs(a["y1"] - a["y2"])
+                area_b = (b["x2"] - b["x1"]) * abs(b["y1"] - b["y2"])
+                denom = min(area_a, area_b)
+                return inter / denom if denom > 0 else 0.0
+
             # Primary source: detection regions (TATR / hybrid)
             if detection:
+                tatr_source = detection.source  # 'tatr' | 'hybrid' | …
                 for region in detection.regions:
                     page_no = region.bbox.page
                     b       = region.bbox.to_dict()
@@ -194,6 +211,7 @@ class PyMuPDFMediaCropper:
                             "caption":  caption or f"Table {num}",
                             "page":     page_no,
                             "bbox":     b,
+                            "source":   tatr_source,
                         }
                     elif self._config.merge_tables_by_caption:
                         existing = merged_tables[num]
@@ -204,11 +222,24 @@ class PyMuPDFMediaCropper:
 
             # Supplementary source: Docling TABLE / RECONSTRUCTED_TABLE elements
             for el in element_dicts:
-                if el.get("type") not in ("TABLE", "RECONSTRUCTED_TABLE"):
+                el_type = el.get("type")
+                if el_type not in docling_table_types:
                     continue
                 page_no = el.get("page")
                 b       = el.get("bbox") or {}
                 if page_no is None or not b:
+                    continue
+                docling_source = "docling_reconstructed" if el_type == "RECONSTRUCTED_TABLE" else "docling"
+                # If this element substantially overlaps an existing detection, merge source and skip
+                overlapping = next(
+                    (k for k, t in merged_tables.items()
+                     if t["page"] == page_no and _overlap_ratio(b, t["bbox"]) > 0.5),
+                    None,
+                )
+                if overlapping is not None:
+                    existing = merged_tables[overlapping]
+                    existing["source"] = f"{existing['source']}+{docling_source}"
+                    logger.debug("Merged overlapping %s into existing entry %s", el_type, overlapping)
                     continue
                 cap_el  = nearest_caption(el, all_captions)
                 caption = cap_el.get("text", "") if cap_el else el.get("caption") or ""
@@ -223,6 +254,7 @@ class PyMuPDFMediaCropper:
                         "caption":  caption or f"Table {num}",
                         "page":     page_no,
                         "bbox":     b,
+                        "source":   docling_source,
                     }
                 elif self._config.merge_tables_by_caption:
                     existing = merged_tables[num]
@@ -242,6 +274,7 @@ class PyMuPDFMediaCropper:
                 media   = self._crop_element(
                     doc, bbox, layout.page_dims, mat, label,
                     num_int, tbl["caption"] or None, "table", pdf_path.stem, self._tables_dir,
+                    source=tbl.get("source", "unknown"),
                 )
                 if media:
                     tables.append(media)
@@ -267,6 +300,7 @@ class PyMuPDFMediaCropper:
         media_type: str,
         stem: str,
         out_dir: Path,
+        source: str = "unknown",
     ) -> Optional[CroppedMedia]:
         page_no = bbox.page
         page_h  = page_dims.get(page_no, {}).get("height", 792.0)
@@ -291,4 +325,5 @@ class PyMuPDFMediaCropper:
             image_path=out_path,
             bbox=bbox,
             page=page_no,
+            source=source,
         )

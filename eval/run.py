@@ -51,10 +51,10 @@ def make_config() -> PipelineConfig:
         docling_masked_dir = OUT / "docling_masked",
         text_dir           = OUT / "text",
         text_raw_dir       = OUT / "text_raw",
-        json_dir           = OUT / "json",
+        json_dir           = OUT / "json" / "full",
         vis_dir            = OUT / "visualization",
         figures_dir        = OUT / "figures",
-        tables_dir         = OUT / "tables",
+        tables_dir         = OUT / "tables" / "full",
         blacklist_file     = HERE / "blacklist.json",
         completed_file     = HERE / "completed.json",
         run_metadata_dir   = OUT / "run_metadata",
@@ -86,6 +86,7 @@ def make_config() -> PipelineConfig:
     cfg.runtime = RuntimeConfig(
         seed=SEED,
         blacklist_if_rows_exceed=200,
+        multi_source_crops=True,
     )
 
     return cfg

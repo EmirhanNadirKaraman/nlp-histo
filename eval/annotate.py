@@ -130,9 +130,11 @@ def parse_json(path: Path) -> list[Item]:
 
 def load_items(mode: str, max_per_doc: int = 0) -> list[Item]:
     loaders = {
-        "text":     (OUT_DIR / "text",     "*_text.txt",   parse_text),
-        "text_raw": (OUT_DIR / "text_raw", "*_raw.txt",    parse_text_raw),
-        "json":     (OUT_DIR / "json",     "*_media.json", parse_json),
+        "text":              (OUT_DIR / "text",                  "*_text.txt",   parse_text),
+        "text_raw":          (OUT_DIR / "text_raw",              "*_raw.txt",    parse_text_raw),
+        "json":              (OUT_DIR / "json" / "full",          "*_media.json", parse_json),
+        "json_docling":      (OUT_DIR / "json" / "docling",      "*_media.json", parse_json),
+        "json_docling_recon":(OUT_DIR / "json" / "docling_recon","*_media.json", parse_json),
     }
     folder, glob, parser = loaders[mode]
     all_items: list[Item] = []
@@ -324,8 +326,9 @@ def show_metrics(items: list[Item], ann: dict[str, str], mode: str) -> None:
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
 def main() -> None:
-    if len(sys.argv) < 2 or sys.argv[1] not in ("text", "text_raw", "json"):
-        print("Usage: python eval/annotate.py [text | text_raw | json]")
+    VALID_MODES = ("text", "text_raw", "json", "json_docling", "json_docling_recon")
+    if len(sys.argv) < 2 or sys.argv[1] not in VALID_MODES:
+        print("Usage: python eval/annotate.py [text | text_raw | json | json_docling | json_docling_recon]")
         sys.exit(1)
 
     mode  = sys.argv[1]

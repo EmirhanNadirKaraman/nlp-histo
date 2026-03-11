@@ -45,8 +45,9 @@ class MediaJsonWriter:
         Directory where JSON files are written.  Defaults to ``out/json``.
     """
 
-    def __init__(self, output_dir: Optional[Path] = None) -> None:
+    def __init__(self, output_dir: Optional[Path] = None, suffix: str = "") -> None:
         self._output_dir = output_dir or Path("out/json")
+        self._suffix = suffix
 
     def write(
         self,
@@ -62,7 +63,7 @@ class MediaJsonWriter:
         ``rows`` is accepted for API compatibility but not used here.
         """
         self._output_dir.mkdir(parents=True, exist_ok=True)
-        out_path = self._output_dir / f"{pmcid}_media.json"
+        out_path = self._output_dir / f"{pmcid}_media{self._suffix}.json"
 
         payload = {
             "pmcid": pmcid,
@@ -86,5 +87,6 @@ class MediaJsonWriter:
             "caption":    media.caption,
             "image_path": str(media.image_path) if media.image_path else None,
             "page":       media.page,
+            "source":     media.source,
             "bbox":       media.bbox.to_dict(),
         }
