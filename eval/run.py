@@ -22,6 +22,7 @@ from pipeline.batch import ParallelBatchRunner  # noqa: E402
 from pipeline.config import (  # noqa: E402
     CroppingConfig,
     DatabaseConfig,
+    DoclingConfig,
     PathConfig,
     PipelineConfig,
     RuntimeConfig,
@@ -81,6 +82,9 @@ def make_config() -> PipelineConfig:
 
     # ── Table detector: hybrid (Docling + TATR) ───────────────────────────────
     cfg.table_detector = TableDetectorType.HYBRID
+
+    # ── Reconstruct tables from list elements where Docling misses them ───────
+    cfg.docling = DoclingConfig(reconstruct_tables_from_lists=True)
 
     # ── Runtime: expose seed explicitly ──────────────────────────────────────
     cfg.runtime = RuntimeConfig(

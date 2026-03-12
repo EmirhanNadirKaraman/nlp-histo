@@ -288,6 +288,11 @@ class PipelineRunner:
         logger.info("[%s] Step 1 — layout extraction", pmcid)
         layout: LayoutResult = self._get_layout_extractor().extract(pdf_path)
 
+        # ── Step 1b: Table reconstruction from list elements ─────────────────
+        if self._cfg.docling.reconstruct_tables_from_lists:
+            from pipeline.stages.table_reconstructor import reconstruct_tables_from_lists
+            layout = reconstruct_tables_from_lists(layout)
+
         # ── Step 2: Table detection ────────────────────────────────────────────
         logger.info("[%s] Step 2 — table detection (%s)", pmcid, self._cfg.table_detector)
         detector = self._get_table_detector()

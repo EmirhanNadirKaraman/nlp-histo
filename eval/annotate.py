@@ -17,7 +17,7 @@ Keys:
     r        Show metrics so far
     q        Quit and save
 
-Progress is saved to eval/out/annotations_{mode}.json after every keypress.
+Progress is saved to eval/annotations/annotations_{mode}.json after every keypress.
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ from pathlib import Path
 
 HERE     = Path(__file__).parent
 OUT_DIR  = HERE / "out"
+ANN_DIR  = HERE / "annotations"
 
 MAX_PER_DOC = 200   # skip documents with more than this many items (0 = no limit)
 
@@ -169,7 +170,7 @@ def load_items(mode: str, max_per_doc: int = 0) -> list[Item]:
 
 # ── Annotation persistence ─────────────────────────────────────────────────────
 def ann_path(mode: str) -> Path:
-    return OUT_DIR / f"annotations_{mode}.json"
+    return ANN_DIR / f"annotations_{mode}.json"
 
 
 def load_annotations(mode: str) -> dict[str, str]:
@@ -178,7 +179,7 @@ def load_annotations(mode: str) -> dict[str, str]:
 
 
 def save_annotations(mode: str, ann: dict[str, str]) -> None:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    ANN_DIR.mkdir(parents=True, exist_ok=True)
     ann_path(mode).write_text(json.dumps(ann, indent=2))
 
 
