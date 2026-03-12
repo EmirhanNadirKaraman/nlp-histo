@@ -2,9 +2,12 @@
 eval/annotate.py — Terminal annotator for paragraph and media evaluation.
 
 Usage:
-    python eval/annotate.py text       # eval/out/text/   (processed paragraphs)
-    python eval/annotate.py text_raw   # eval/out/text_raw/ (raw Docling elements)
-    python eval/annotate.py json       # eval/out/json/   (figure/table detections)
+    python eval/annotate.py text                  # eval/out/text/     (processed paragraphs)
+    python eval/annotate.py text_raw              # eval/out/text_raw/  (raw Docling elements)
+    python eval/annotate.py json_figures          # figures only, from full variant (same across all)
+    python eval/annotate.py json_tables_full      # tables from hybrid (Docling + TATR) detector
+    python eval/annotate.py json_tables_docling   # tables from Docling-only detector
+    python eval/annotate.py json_tables_docling_recon  # tables from Docling recon detector
 
 Keys:
     y / →    Correct
@@ -101,13 +104,18 @@ def parse_text_raw(path: Path) -> list[Item]:
     return items
 
 
-def parse_json(path: Path) -> list[Item]:
-    """Parse eval/out/json/*_media.json — figure and table detections."""
-    data   = json.loads(path.read_text(encoding="utf-8"))
-    pmcid  = data["pmcid"]
-    items  = []
+def parse_json(path: Path, only: str | None = None) -> list[Item]:
+    """Parse eval/out/json/*_media.json — figure and table detections.
 
-    for kind in ("figures", "tables"):
+    Args:
+        only: ``"figures"`` or ``"tables"`` to restrict output; ``None`` for both.
+    """
+    data  = json.loads(path.read_text(encoding="utf-8"))
+    pmcid = data["pmcid"]
+    items: list[Item] = []
+
+    kinds = ("figures", "tables") if only is None else (only,)
+    for kind in kinds:
         item_type = kind.rstrip("s")  # "figure" / "table"
         for entry in data.get(kind, []):
             caption = (entry.get("caption") or "").replace("\n", " ")
@@ -129,12 +137,16 @@ def parse_json(path: Path) -> list[Item]:
 
 
 def load_items(mode: str, max_per_doc: int = 0) -> list[Item]:
+    from functools import partial
     loaders = {
-        "text":              (OUT_DIR / "text",                  "*_text.txt",   parse_text),
-        "text_raw":          (OUT_DIR / "text_raw",              "*_raw.txt",    parse_text_raw),
-        "json":              (OUT_DIR / "json" / "full",          "*_media.json", parse_json),
-        "json_docling":      (OUT_DIR / "json" / "docling",      "*_media.json", parse_json),
-        "json_docling_recon":(OUT_DIR / "json" / "docling_recon","*_media.json", parse_json),
+        "text":                       (OUT_DIR / "text",                   "*_text.txt",   parse_text),
+        "text_raw":                   (OUT_DIR / "text_raw",               "*_raw.txt",    parse_text_raw),
+        # figures are identical across variants — annotate once from full
+        "json_figures":               (OUT_DIR / "json" / "full",          "*_media.json", partial(parse_json, only="figures")),
+        # tables differ per detector — annotate each separately
+        "json_tables_full":           (OUT_DIR / "json" / "full",          "*_media.json", partial(parse_json, only="tables")),
+        "json_tables_docling":        (OUT_DIR / "json" / "docling",       "*_media.json", partial(parse_json, only="tables")),
+        "json_tables_docling_recon":  (OUT_DIR / "json" / "docling_recon", "*_media.json", partial(parse_json, only="tables")),
     }
     folder, glob, parser = loaders[mode]
     all_items: list[Item] = []
@@ -171,7 +183,13 @@ def save_annotations(mode: str, ann: dict[str, str]) -> None:
 
 
 def ann_key(item: Item) -> str:
-    return f"{item.doc_id}::{item.index}"
+    image_path = item.meta.get("image_path", "").strip()
+    if image_path:
+        return Path(image_path).name
+    detected = item.meta.get("detected_label", "").strip()
+    if detected:
+        return f"{item.doc_id}::{detected}"
+    return f"{item.doc_id}::{item.label}::{item.index}"
 
 
 # ── Input helpers ──────────────────────────────────────────────────────────────
@@ -270,6 +288,7 @@ def render(item: Item, total: int, ann: dict[str, str], mode: str) -> None:
         f"{c(CYAN, '[l]')} label   "
         f"{c(YELLOW, '[s]')} skip   "
         f"{c(BLUE, '[b]')} back   "
+        f"{c(DIM, '[space]')} next   "
         f"{c(DIM, '[r]')} metrics   "
         f"{c(DIM, '[q]')} quit"
     )
@@ -326,9 +345,13 @@ def show_metrics(items: list[Item], ann: dict[str, str], mode: str) -> None:
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
 def main() -> None:
-    VALID_MODES = ("text", "text_raw", "json", "json_docling", "json_docling_recon")
+    VALID_MODES = (
+        "text", "text_raw",
+        "json_figures",
+        "json_tables_full", "json_tables_docling", "json_tables_docling_recon",
+    )
     if len(sys.argv) < 2 or sys.argv[1] not in VALID_MODES:
-        print("Usage: python eval/annotate.py [text | text_raw | json | json_docling | json_docling_recon]")
+        print("Usage: python eval/annotate.py [text | text_raw | json_figures | json_tables_full | json_tables_docling | json_tables_docling_recon]")
         sys.exit(1)
 
     mode  = sys.argv[1]
@@ -373,6 +396,8 @@ def main() -> None:
             ann[ann_key(item)] = "skipped"
             save_annotations(mode, ann)
             cursor += 1
+        elif key == " ":
+            cursor += 1
         elif key in ("b", "B"):
             cursor = max(0, cursor - 1)
         elif key in ("r", "R"):
@@ -405,6 +430,8 @@ def main() -> None:
                 sk += 1
             elif key in ("s", "S"):
                 sk += 1  # keep as skipped, move on
+            elif key == " ":
+                sk += 1
             elif key in ("b", "B"):
                 sk = max(0, sk - 1)
             elif key in ("r", "R"):
