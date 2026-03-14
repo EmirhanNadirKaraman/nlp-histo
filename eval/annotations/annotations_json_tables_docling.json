@@ -14,7 +14,6 @@
   "PMC11791726_HIS-86-485_Table_2_p7.png": "wrong caption (footnotes matched to captions)",
   "PMC11791726_HIS-86-485_Table_3_p9.png": "incorrect",
   "PMC11791726_HIS-86-485_Table_3_p10.png": "missing footnotes",
-  "PMC11863705_mmc1_Table_1_p1.png": "incorrect",
   "PMC11863984_main_Table_1_p3.png": "correct",
   "PMC11863984_main_Table_2_p3.png": "correct",
   "PMC11863984_main_Table_3_p4.png": "correct",
@@ -31,5 +30,11 @@
   "PMC8352662_main_Table_3_p6.png": "missing footnotes",
   "PMC8416649_main_Table_1_p3.png": "missing footnotes",
   "PMC8420544_CYT-33-93_Table_2_p3.png": "missing footnotes",
-  "PMC8420544_CYT-33-93_Table_3_p4.png": "missing footnotes"
+  "PMC8420544_CYT-33-93_Table_3_p4.png": "missing footnotes",
+  "PMC11863705_main_Table_1_p2.png": "correct table, missing footnotes",
+  "PMC11863705_main_Table_2_p3.png": "correct",
+  "PMC11863705_main_Table_3_p3.png": "correct table, wrong caption",
+  "PMC11863705_main_Table_3_p6.png": "correct",
+  "PMC11863705_main_Table_5_p7.png": "correct table, wrong caption",
+  "PMC11863705_mmc1_Table_1_p1.png": "other"
 }

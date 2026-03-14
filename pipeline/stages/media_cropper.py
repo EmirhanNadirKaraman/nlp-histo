@@ -146,6 +146,9 @@ class PyMuPDFMediaCropper:
                 else:
                     num = str(len(merged_figures) + 1)
 
+                while num in merged_figures:
+                    num = f"{num}b"
+
                 merged_figures[num] = {
                     "figure_id": parsed_num or num,
                     "caption":   caption or None,
@@ -205,6 +208,7 @@ class PyMuPDFMediaCropper:
                         num = f"{parsed_num}_p{page_no}"
                     else:
                         num = str(len(merged_tables) + 1)
+                    is_rotated = region.label.lower() == "table rotated"
                     if num not in merged_tables:
                         merged_tables[num] = {
                             "table_id": parsed_num or num,
@@ -212,12 +216,15 @@ class PyMuPDFMediaCropper:
                             "page":     page_no,
                             "bbox":     b,
                             "source":   tatr_source,
+                            "rotated":  is_rotated,
                         }
                     elif self._config.merge_tables_by_caption:
                         existing = merged_tables[num]
                         existing["bbox"] = union_bbox(existing["bbox"], b)
                         if len(caption) > len(existing["caption"] or ""):
                             existing["caption"] = caption
+                        if is_rotated:
+                            existing["rotated"] = True
                         logger.debug("Merged duplicate TATR Table %s", num)
 
             # Supplementary source: Docling TABLE / RECONSTRUCTED_TABLE elements
@@ -262,6 +269,14 @@ class PyMuPDFMediaCropper:
                     if len(caption) > len(existing["caption"] or ""):
                         existing["caption"] = caption
                     logger.debug("Merged Docling Table %s into existing entry", num)
+
+            if self._config.expand_tables_with_footnotes:
+                from pipeline.stages.table_reconstructor import expand_tables_with_footnotes
+                expand_tables_with_footnotes(
+                    merged_tables, element_dicts,
+                    proximity_pts=self._config.footnote_proximity_pts,
+                    text_proximity_pts=self._config.text_footnote_proximity_pts,
+                )
 
             for tbl in merged_tables.values():
                 page_no = tbl["page"]
@@ -310,8 +325,15 @@ class PyMuPDFMediaCropper:
 
         out_dir.mkdir(parents=True, exist_ok=True)
         safe_label = label.replace(" ", "_").replace("/", "-")
-        filename   = f"{stem}_{safe_label}_p{page_no}.{self._config.image_format}"
+        base       = f"{stem}_{safe_label}_p{page_no}"
+        filename   = f"{base}.{self._config.image_format}"
         out_path   = out_dir / filename
+        if out_path.exists():
+            idx = 2
+            while (out_dir / f"{base}_{idx}.{self._config.image_format}").exists():
+                idx += 1
+            filename = f"{base}_{idx}.{self._config.image_format}"
+            out_path = out_dir / filename
 
         page = doc[page_no - 1]
         pix  = page.get_pixmap(matrix=mat, clip=rect)

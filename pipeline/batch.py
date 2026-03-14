@@ -105,6 +105,10 @@ class ParallelBatchRunner:
         Process a single PDF.  Returns 'processed' | 'skipped' | 'failed'.
         Called from a worker thread.
         """
+        if self._completed and self._completed.contains(pmcid):
+            logger.info("⚡ %s — skipped (already completed)", pmcid)
+            return "skipped"
+
         if self._cfg.runtime.skip_blacklisted and self._blacklist.contains(pmcid):
             logger.info("⚡ %s — skipped (blacklisted)", pmcid)
             return "skipped"

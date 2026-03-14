@@ -4,6 +4,7 @@ eval/annotate.py — Terminal annotator for paragraph and media evaluation.
 Usage:
     python eval/annotate.py text                  # eval/out/text/     (processed paragraphs)
     python eval/annotate.py text_raw              # eval/out/text_raw/  (raw Docling elements)
+    python eval/annotate.py docling_full          # all raw Docling elements before pipeline (recall labeling)
     python eval/annotate.py json_figures          # figures only, from full variant (same across all)
     python eval/annotate.py json_tables_full      # tables from hybrid (Docling + TATR) detector
     python eval/annotate.py json_tables_docling   # tables from Docling-only detector
@@ -105,6 +106,38 @@ def parse_text_raw(path: Path) -> list[Item]:
     return items
 
 
+def parse_docling_full(path: Path) -> list[Item]:
+    """Parse eval/out/docling_full/*_layout.json — all raw Docling elements."""
+    data   = json.loads(path.read_text(encoding="utf-8"))
+    pmcid  = path.stem.replace("_layout", "")
+    items: list[Item] = []
+
+    for el in data.get("elements", []):
+        el_type = el.get("type", "UNKNOWN")
+        text    = (el.get("text") or "").strip()
+        if not text:
+            continue
+        page    = el.get("page", "?")
+        bbox    = el.get("bbox", {})
+        x1      = bbox.get("x1", 0)
+        y1      = bbox.get("y1", 0)
+        key     = f"p{page}_{el_type}_{x1:.1f}_{y1:.1f}"
+        items.append(
+            Item(
+                doc_id=pmcid,
+                label=el_type,
+                index=0,
+                text=text,
+                meta={
+                    "page":           page,
+                    "detected_label": key,
+                },
+            )
+        )
+
+    return items
+
+
 def parse_json(path: Path, only: str | None = None) -> list[Item]:
     """Parse eval/out/json/*_media.json — figure and table detections.
 
@@ -142,6 +175,8 @@ def load_items(mode: str, max_per_doc: int = 0) -> list[Item]:
     loaders = {
         "text":                       (OUT_DIR / "text",                   "*_text.txt",   parse_text),
         "text_raw":                   (OUT_DIR / "text_raw",               "*_raw.txt",    parse_text_raw),
+        # all raw Docling elements before any pipeline processing — use for recall labeling
+        "docling_full":               (OUT_DIR / "docling_full",           "*_layout.json", parse_docling_full),
         # figures are identical across variants — annotate once from full
         "json_figures":               (OUT_DIR / "json" / "full",          "*_media.json", partial(parse_json, only="figures")),
         # tables differ per detector — annotate each separately
@@ -347,12 +382,12 @@ def show_metrics(items: list[Item], ann: dict[str, str], mode: str) -> None:
 # ── Main loop ──────────────────────────────────────────────────────────────────
 def main() -> None:
     VALID_MODES = (
-        "text", "text_raw",
+        "text", "text_raw", "docling_full",
         "json_figures",
         "json_tables_full", "json_tables_docling", "json_tables_docling_recon",
     )
     if len(sys.argv) < 2 or sys.argv[1] not in VALID_MODES:
-        print("Usage: python eval/annotate.py [text | text_raw | json_figures | json_tables_full | json_tables_docling | json_tables_docling_recon]")
+        print("Usage: python eval/annotate.py [text | text_raw | docling_full | json_figures | json_tables_full | json_tables_docling | json_tables_docling_recon]")
         sys.exit(1)
 
     mode  = sys.argv[1]

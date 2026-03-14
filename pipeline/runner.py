@@ -289,6 +289,7 @@ class PipelineRunner:
         layout: LayoutResult = self._get_layout_extractor().extract(pdf_path)
 
         # ── Step 1b: Table reconstruction from list elements ─────────────────
+        layout_pre_recon = layout  # snapshot before reconstruction for docling-only crops
         if self._cfg.docling.reconstruct_tables_from_lists:
             from pipeline.stages.table_reconstructor import reconstruct_tables_from_lists
             layout = reconstruct_tables_from_lists(layout)
@@ -356,28 +357,37 @@ class PipelineRunner:
         figures, tables = cropper.crop(pdf_path, layout, detection=detection)
 
         if self._cfg.runtime.multi_source_crops:
+            from dataclasses import replace
             from pipeline.outputs.media_json_writer import MediaJsonWriter
             from pipeline.stages.media_cropper import PyMuPDFMediaCropper
             json_dir    = self._cfg.paths.json_dir
             tables_root = self._cfg.paths.tables_dir.parent
 
-            # Docling TABLE only
+            # Docling-only variant is a pure detection baseline — no expansion.
+            # Figures are identical across all variants so disable figure cropping
+            # here and reuse the figures already cropped in the main pass.
+            cropping_no_expand = replace(self._cfg.cropping,
+                                         expand_tables_with_footnotes=False,
+                                         save_figure_crops=False)
+            cropping_no_figures = replace(self._cfg.cropping, save_figure_crops=False)
+
+            # Docling TABLE only (no reconstruction, no expansion)
             cropper_docling = PyMuPDFMediaCropper(
-                config=self._cfg.cropping,
+                config=cropping_no_expand,
                 figures_dir=self._cfg.paths.figures_dir,
                 tables_dir=tables_root / "docling",
             )
             _, tables_docling = cropper_docling.crop(
-                pdf_path, layout, detection=None,
+                pdf_path, layout_pre_recon, detection=None,
                 docling_table_types=("TABLE",),
             )
             MediaJsonWriter(json_dir.parent / "docling").write(
                 pmcid, rows, figures, tables_docling,
             )
 
-            # Docling TABLE + RECONSTRUCTED_TABLE
+            # Docling TABLE + RECONSTRUCTED_TABLE (with expansion)
             cropper_docling_recon = PyMuPDFMediaCropper(
-                config=self._cfg.cropping,
+                config=cropping_no_figures,
                 figures_dir=self._cfg.paths.figures_dir,
                 tables_dir=tables_root / "docling_recon",
             )

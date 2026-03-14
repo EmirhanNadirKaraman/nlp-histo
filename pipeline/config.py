@@ -124,6 +124,9 @@ class CroppingConfig:
     merge_figures_by_caption: bool = False  # merge PICTURE elements sharing the same caption number
     merge_tables_by_caption: bool = False   # merge TABLE/detection regions sharing the same caption number
     subfigure_proximity_pts: int = 20       # max edge-to-edge gap to treat adjacent figures as subfigure panels
+    expand_tables_with_footnotes: bool = False   # absorb nearby TEXT/LIST_ITEM/FOOTNOTE elements below each table
+    footnote_proximity_pts: float = 20.0         # max gap for FOOTNOTE / LIST_ITEM elements (adaptive)
+    text_footnote_proximity_pts: float = 8.0     # fixed max gap for TEXT elements (non-adaptive)
 
 
 @dataclass(slots=True)

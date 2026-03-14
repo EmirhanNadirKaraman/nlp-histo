@@ -11,6 +11,7 @@ Usage:
 
 Example:
     python eval/auto_annotate.py json_tables_docling json_tables_docling_recon
+    python eval/auto_annotate.py json_tables_docling_recon json_tables_full
 """
 from __future__ import annotations
 

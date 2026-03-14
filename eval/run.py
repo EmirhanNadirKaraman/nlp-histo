@@ -78,7 +78,10 @@ def make_config() -> PipelineConfig:
     cfg.database = DatabaseConfig(enabled=False)
 
     # ── Cropping: merge same-caption same-page detections from TATR + Docling ──
-    cfg.cropping = CroppingConfig(merge_tables_by_caption=True)
+    cfg.cropping = CroppingConfig(
+        merge_tables_by_caption=True,
+        expand_tables_with_footnotes=True,
+    )
 
     # ── Table detector: hybrid (Docling + TATR) ───────────────────────────────
     cfg.table_detector = TableDetectorType.HYBRID
@@ -119,6 +122,15 @@ def main() -> None:
     logging.getLogger(__name__).info(
         "Eval batch: %d / %d PDFs (seed=%d)", len(sample), len(all_pdfs), cfg.runtime.seed
     )
+
+    # Uncomment to run on a single PDF instead of the full sample:
+    # sample = [HERE / "pdfs" / "PMC7543760_main.pdf"]
+    # sample = [
+    #     HERE / "pdfs" / "PMC11649516_HIS-86-236.pdf",
+    #     HERE / "pdfs" / "PMC11791726_HIS-86-485.pdf",
+    # ]
+    # sample = [HERE / "pdfs" / "PMC7150024_main.pdf"]
+    sample = [HERE / "pdfs" / "PMC11863705_main.pdf"]
 
     ParallelBatchRunner(cfg, max_workers=4).run_paths(sample)
 
