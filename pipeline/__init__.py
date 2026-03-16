@@ -1,62 +1,9 @@
 """
-pipeline — modular PDF-processing pipeline for nlp-histo.
+pipeline — top-level package.
 
-Stages
-------
-1. Layout extraction   — DoclingLayoutExtractor
-2. Table detection     — DoclingTableDetector | TATRTableDetector | HybridTableDetector
-3. Region masking      — PyMuPDFRegionMasker
-4. Re-extraction       — DoclingLayoutExtractor (on masked PDF)
-5. Artifact filtering  — ArtifactFilter
-6. Text assembly       — HierarchicalTextAssembler
-7. Media cropping      — PyMuPDFMediaCropper
-8. Output              — TextFileWriter | PostgresDatabaseIngester | DetectionVisualizer
+The PDF extraction pipeline lives at:
+    pdf_text_extraction
 
-Quick start
------------
-    from pipeline import PipelineRunner, PipelineConfig
-
-    runner = PipelineRunner(PipelineConfig())
-    runner.run_document(pdf_path=Path("files/organized_pdfs/PMC123.pdf"), pmcid="PMC123")
+The summarization pipeline lives at:
+    pipeline.stages.summarization
 """
-from pipeline.config import (
-    PipelineConfig,
-    PathConfig,
-    DoclingConfig,
-    TATRConfig,
-    MaskingConfig,
-    FilteringConfig,
-    CroppingConfig,
-    TextAssemblyConfig,
-    VisualizationConfig,
-    DatabaseConfig,
-    RuntimeConfig,
-    TableDetectorType,
-    BaselineMode,
-)
-from pipeline.runner import PipelineRunner
-from pipeline.batch import ParallelBatchRunner
-from pipeline.blacklist import BlacklistManager
-from pipeline.resources import ModelRegistry
-
-__all__ = [
-    # Config
-    "PipelineConfig",
-    "PathConfig",
-    "DoclingConfig",
-    "TATRConfig",
-    "MaskingConfig",
-    "FilteringConfig",
-    "CroppingConfig",
-    "TextAssemblyConfig",
-    "VisualizationConfig",
-    "DatabaseConfig",
-    "RuntimeConfig",
-    "TableDetectorType",
-    "BaselineMode",
-    # Runtime
-    "PipelineRunner",
-    "ParallelBatchRunner",
-    "BlacklistManager",
-    "ModelRegistry",
-]
