@@ -10,16 +10,11 @@ Features:
 import json
 import re
 import sys
-import time
-import os
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Tuple, Set, Iterator, Dict
+from typing import List, Tuple, Iterator
 
 import spacy
-import scispacy
-from negspacy.negation import Negex
-from scispacy.linking import EntityLinker
 
 # Database imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -65,7 +60,8 @@ class EvaluationResult:
     
     @property
     def score(self) -> float:
-        if not self.citation_results: return 1.0
+        if not self.citation_results:
+            return 1.0
         return sum(1 for r in self.citation_results if r.is_valid) / len(self.citation_results)
 
 # =============================================================================

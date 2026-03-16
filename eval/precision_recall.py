@@ -36,23 +36,23 @@ CYAN   = "\033[36m"
 
 def classify_figure(label: str) -> str:
     """'tp' | 'fp' | 'skip'"""
-    l = label.lower().strip()
-    if l.startswith("correct"):
+    lbl = label.lower().strip()
+    if lbl.startswith("correct"):
         return "tp"
-    if l in ("icon", "incorrect"):
+    if lbl in ("icon", "incorrect"):
         return "fp"
     return "skip"
 
 
 def classify_table(label: str) -> str:
     """'tp' | 'fp' | 'skip'"""
-    l = label.lower().strip()
-    if l == "correct" or l.startswith("missing footnotes"):
+    lbl = label.lower().strip()
+    if lbl == "correct" or lbl.startswith("missing footnotes"):
         return "tp"
-    if (l == "incorrect"
-            or l.startswith("wrong caption")
-            or l.startswith("crop is too big")
-            or l.startswith("weird")):
+    if (lbl == "incorrect"
+            or lbl.startswith("wrong caption")
+            or lbl.startswith("crop is too big")
+            or lbl.startswith("weird")):
         return "fp"
     return "skip"
 

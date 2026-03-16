@@ -17,7 +17,7 @@ import logging
 from collections import Counter
 from functools import cached_property
 
-from .models import AuditableSummary, EvidenceChainItem, ExtractedRules, Finding, Rule, RuleAuditSummary, RuleCounts
+from .models import AuditableSummary, EvidenceChainItem, ExtractedRules, Rule, RuleAuditSummary, RuleCounts
 
 logger = logging.getLogger(__name__)
 

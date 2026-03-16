@@ -134,7 +134,7 @@ class HistopathologyFileSelector:
         except pd.errors.ParserError as e:
             raise ValueError(f"Error parsing CSV file: {e}")
 
-        print(f"\nFiltering complete.")
+        print("\nFiltering complete.")
         print(f"Total rows processed: {total_rows:,}")
         print(f"Relevant histopathology papers found: {len(target_pmcids):,}")
 

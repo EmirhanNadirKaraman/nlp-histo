@@ -8,7 +8,7 @@ Particularly good for equations and complex layouts.
 import sys
 import re
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
 import logging
 
 # Handle both direct execution and module import
@@ -55,8 +55,8 @@ class NougatParser(BasePDFParser):
     def is_available(self) -> bool:
         """Check if Nougat dependencies are installed."""
         try:
-            from transformers import NougatProcessor
-            import torch
+            from transformers import NougatProcessor  # noqa: F401
+            import torch  # noqa: F401
             return True
         except ImportError:
             return False

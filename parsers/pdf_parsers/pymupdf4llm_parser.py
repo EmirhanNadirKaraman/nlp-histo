@@ -43,7 +43,7 @@ class PyMuPDF4LLMParser(BasePDFParser):
             True if available, False otherwise
         """
         try:
-            import pymupdf4llm
+            import pymupdf4llm  # noqa: F401
             return True
         except ImportError:
             return False

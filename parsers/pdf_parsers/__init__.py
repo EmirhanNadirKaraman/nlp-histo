@@ -22,25 +22,25 @@ __all__ = ['BasePDFParser']
 
 # Parsers are imported lazily to avoid dependency issues
 try:
-    from .marker_parser import MarkerParser
+    from .marker_parser import MarkerParser  # noqa: F401
     __all__.append('MarkerParser')
 except ImportError:
     pass
 
 try:
-    from .nougat_parser import NougatParser
+    from .nougat_parser import NougatParser  # noqa: F401
     __all__.append('NougatParser')
 except ImportError:
     pass
 
 try:
-    from .pdffigures_parser import PDFFiguresParser
+    from .pdffigures_parser import PDFFiguresParser  # noqa: F401
     __all__.append('PDFFiguresParser')
 except ImportError:
     pass
 
 try:
-    from .ensemble_parser import EnsemblePDFParser
+    from .ensemble_parser import EnsemblePDFParser  # noqa: F401
     __all__.append('EnsemblePDFParser')
 except ImportError:
     pass

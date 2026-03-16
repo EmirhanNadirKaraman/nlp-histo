@@ -63,8 +63,6 @@ class ReduceStage:
                 current[i : i + self.batch_size]
                 for i in range(0, len(current), self.batch_size)
             ]
-            next_level: list[ConsolidatedSummary] = []
-
             uncached_groups = []
             uncached_indices = []
             placeholders: list[Optional[ConsolidatedSummary]] = []

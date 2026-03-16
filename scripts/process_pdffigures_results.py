@@ -38,7 +38,7 @@ def mask_pdf_from_json(pdf_path: Path, json_path: Path, output_dir: Path):
         figures_data = json.load(f)
 
     if not figures_data:
-        logger.info(f"  No figures/tables detected")
+        logger.info("  No figures/tables detected")
         return None
 
     logger.info(f"  Found {len(figures_data)} figures/tables")
@@ -170,7 +170,7 @@ def main():
         # Check if already processed
         masked_pdf_path = output_base / f"{pdf_path.stem}_masked.pdf"
         if masked_pdf_path.exists():
-            logger.info(f"  ✓ Already processed, skipping")
+            logger.info("  ✓ Already processed, skipping")
             stats['skipped_already_done'] += 1
             continue
 
@@ -184,7 +184,7 @@ def main():
                 # No figures detected - copy original PDF
                 output_pdf = output_base / f"{pdf_path.stem}_masked.pdf"
                 shutil.copy2(pdf_path, output_pdf)
-                logger.info(f"  ℹ No figures detected - copied original PDF")
+                logger.info("  ℹ No figures detected - copied original PDF")
                 logger.info(f"  ✓ Saved: {output_pdf}\n")
                 stats['copied_no_figures'] += 1
 
@@ -195,7 +195,7 @@ def main():
     elapsed = time.time() - start_time
 
     logger.info(f"\n{'='*70}")
-    logger.info(f"✓ Processing complete!")
+    logger.info("✓ Processing complete!")
     logger.info(f"{'='*70}")
     logger.info(f"Total JSON files: {len(json_files)}")
     logger.info(f"Masked (with tables): {stats['processed']}")

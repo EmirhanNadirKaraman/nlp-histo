@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pipeline.models.dto import BoundingBox, DetectedRegion, TableDetectionResult
+from pipeline.models.dto import DetectedRegion, TableDetectionResult
 
 
 class DoclingTableDetector:

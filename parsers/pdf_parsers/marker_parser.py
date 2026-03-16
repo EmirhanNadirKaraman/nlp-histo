@@ -52,8 +52,8 @@ class MarkerParser(BasePDFParser):
     def is_available(self) -> bool:
         """Check if marker-pdf is installed."""
         try:
-            from marker.converters.pdf import PdfConverter
-            from marker.models import create_model_dict
+            from marker.converters.pdf import PdfConverter  # noqa: F401
+            from marker.models import create_model_dict  # noqa: F401
             return True
         except ImportError:
             return False

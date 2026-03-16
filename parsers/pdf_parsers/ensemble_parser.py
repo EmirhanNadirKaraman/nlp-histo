@@ -14,7 +14,7 @@ M1-Optimized: Lazy loads parsers only when needed.
 
 import sys
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 import logging
 
 # Handle both direct execution and module import
@@ -522,8 +522,6 @@ class EnsemblePDFParser:
         if not hierarchy:
             return hierarchy
 
-        total_pages = len(page_routes)
-
         # Build occurrence map
         text_occurrences = {}
         for i, elem in enumerate(hierarchy):
@@ -689,7 +687,7 @@ if __name__ == "__main__":
 
     if Path(pdf_file).exists():
         print(f"\n{'='*60}")
-        print(f"Testing Medical-Grade Ensemble Parser")
+        print("Testing Medical-Grade Ensemble Parser")
         print(f"File: {pdf_file}")
         print(f"{'='*60}\n")
 
@@ -701,7 +699,7 @@ if __name__ == "__main__":
 
         try:
             # Extract content
-            print(f"Extracting with intelligent routing...\n")
+            print("Extracting with intelligent routing...\n")
 
             result = parser.extract_hierarchy(pdf_file)
 
@@ -711,14 +709,14 @@ if __name__ == "__main__":
                 print("Extraction Results")
                 print(f"{'='*60}\n")
 
-                print(f"Mode: routing (page-level)")
+                print("Mode: routing (page-level)")
                 print(f"Text elements: {len(result['text_elements'])}")
                 print(f"Figures: {len(result['figures'])}\n")
 
                 # Show routing info
                 if 'page_routing' in result:
                     routing = result['page_routing']
-                    print(f"Routing Summary:")
+                    print("Routing Summary:")
                     print(f"  Total pages: {routing['total_pages']}")
                     print(f"  {routing['summary']}\n")
 

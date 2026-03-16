@@ -120,7 +120,7 @@ def main():
         pdf_count, xml_count = organize_files(source_dir, pdf_dir, xml_dir)
 
         print(f"\n{'='*50}")
-        print(f"Organization complete!")
+        print("Organization complete!")
         print(f"Total PDFs organized: {pdf_count}")
         print(f"Total XMLs organized: {xml_count}")
         print(f"{'='*50}")

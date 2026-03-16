@@ -12,6 +12,11 @@ import logging
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+
+from pipeline.stages.summarization import SummarizationRunner
+
 # ── paths ──────────────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).parents[3]
 INPUT_FILE = (
@@ -33,7 +38,6 @@ for noisy in ("httpx", "openai", "httpcore", "langchain", "urllib3"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
 # ── load input ─────────────────────────────────────────────────────────────────
-from dotenv import load_dotenv
 load_dotenv(REPO_ROOT / ".env")
 
 raw = json.loads(INPUT_FILE.read_text(encoding="utf-8"))
@@ -64,9 +68,6 @@ for d in (MAP_DIR, REDUCE_DIR, RULES_DIR, CONTRADICTION_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 # ── build runner ───────────────────────────────────────────────────────────────
-from langchain_openai import ChatOpenAI
-from pipeline.stages.summarization import SummarizationRunner
-
 voter_llms = [
     ChatOpenAI(model="gpt-4o-mini", temperature=0.0),
     ChatOpenAI(model="gpt-4o-mini", temperature=0.7),

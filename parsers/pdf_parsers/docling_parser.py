@@ -43,7 +43,7 @@ class DoclingParser(BasePDFParser):
             True if available, False otherwise
         """
         try:
-            from docling.document_converter import DocumentConverter
+            from docling.document_converter import DocumentConverter  # noqa: F401
             return True
         except ImportError:
             return False
@@ -134,7 +134,7 @@ class DoclingParser(BasePDFParser):
                         'depth': 0,
                         'text': text_content
                     })
-            except:
+            except Exception:
                 pass
 
         return hierarchy

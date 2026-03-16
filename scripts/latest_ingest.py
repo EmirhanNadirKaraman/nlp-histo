@@ -59,8 +59,8 @@ except ImportError:
     logger.warning("Database modules not available - running in text-only mode")
 
 # Import text processing utilities
-from parsers.text_processing import remove_citations, ContextAwareStitcher
-from database import Document
+from parsers.text_processing import remove_citations, ContextAwareStitcher  # noqa: E402
+from database import Document  # noqa: E402
 
 # Import mask_tables for table reconstruction
 try:
@@ -74,7 +74,7 @@ except ImportError as e:
 # Import visualization for table reconstruction
 try:
     sys.path.insert(0, str(Path(__file__).parent))
-    from visualize_docling_full import reconstruct_tables_from_lists
+    from visualize_docling_full import reconstruct_tables_from_lists  # noqa: F401
     VISUALIZE_AVAILABLE = True
 except ImportError:
     VISUALIZE_AVAILABLE = False
@@ -399,7 +399,7 @@ class CompletePipelineProcessor:
                 elif in_references and references_depth is not None and level <= references_depth:
                     in_references = False
                     references_depth = None
-                    logger.debug(f"Exiting References section")
+                    logger.debug("Exiting References section")
 
                 # Skip if in references
                 if in_references:
@@ -412,9 +412,9 @@ class CompletePipelineProcessor:
 
                 # Build path from current hierarchy
                 path_parts = [
-                    hierarchy_tracker.get(l, '')
-                    for l in sorted(hierarchy_tracker.keys())
-                    if hierarchy_tracker.get(l)
+                    hierarchy_tracker.get(lvl, '')
+                    for lvl in sorted(hierarchy_tracker.keys())
+                    if hierarchy_tracker.get(lvl)
                 ]
                 path_string = ' > '.join(path_parts) if path_parts else 'Root'
 
@@ -443,7 +443,7 @@ class CompletePipelineProcessor:
 
         logger.info(f"Built hierarchy: {len(text_by_path)} unique paths")
         if skip_references:
-            logger.info(f"Skipped References section")
+            logger.info("Skipped References section")
 
         return text_by_path, db_elements
 
@@ -642,7 +642,7 @@ class CompletePipelineProcessor:
                 # Add section references
                 refs = refs_by_path.get(path_string, {})
                 if refs['figures'] or refs['tables']:
-                    f.write(f"\n  [Section References: ")
+                    f.write("\n  [Section References: ")
                     ref_parts = []
                     if refs['figures']:
                         ref_parts.append(f"Figures {', '.join(refs['figures'])}")

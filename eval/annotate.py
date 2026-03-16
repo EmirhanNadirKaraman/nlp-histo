@@ -50,7 +50,8 @@ YELLOW = "\033[33m"
 CYAN    = "\033[36m"
 BLUE    = "\033[34m"
 MAGENTA = "\033[35m"
-CLEAR  = lambda: os.system("clear")
+def CLEAR() -> None:
+    os.system("clear")
 
 
 def c(color: str, text: str) -> str:
