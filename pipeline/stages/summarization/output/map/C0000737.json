@@ -1,0 +1,459 @@
+[
+  {
+    "chunk_id": "C1",
+    "findings": [
+      {
+        "category": "morphology",
+        "claim": "Placentation in mustelids -> zonary",
+        "evidence": [
+          "S1|PMC7149534|7"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Placentation in mustelids is zonary, similar to dogs and cats."
+      },
+      {
+        "category": "morphology",
+        "claim": "Ectopic adrenocortical tissue -> common finding in abdomen of ferrets",
+        "evidence": [
+          "S1|PMC7149534|7"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Ectopic adrenocortical tissue is a common finding in the abdomen of ferrets and sea otters."
+      },
+      {
+        "category": "morphology",
+        "claim": "Vitamin E deficiency -> associated with steatitis and muscle degeneration",
+        "evidence": [
+          "S2|PMC7149534|9"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Affected mustelids suffer from steatitis, and skeletal and cardiac muscle degeneration."
+      },
+      {
+        "category": "morphology",
+        "claim": "Histologic lesions in vitamin E deficiency -> widespread adipocyte necrosis",
+        "evidence": [
+          "S2|PMC7149534|9"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Histologic lesions include widespread adipocyte necrosis with multifocal saponification."
+      },
+      {
+        "category": "morphology",
+        "claim": "Histologic lesions in vitamin E deficiency -> dystrophic mineralization",
+        "evidence": [
+          "S2|PMC7149534|9"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Histologic lesions include dystrophic mineralization."
+      },
+      {
+        "category": "morphology",
+        "claim": "Histologic lesions in vitamin E deficiency -> mixed suppurative and histiocytic inflammation",
+        "evidence": [
+          "S2|PMC7149534|9"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Histologic lesions include mixed suppurative and histiocytic inflammation."
+      },
+      {
+        "category": "morphology",
+        "claim": "Severe cases of vitamin E deficiency -> entire lobules replaced by inflammatory cells",
+        "evidence": [
+          "S2|PMC7149534|9"
+        ],
+        "confidence": "high",
+        "verbatim_support": "In severe cases, entire lobules may be replaced by inflammatory cells."
+      },
+      {
+        "category": "morphology",
+        "claim": "Inflammatory bowel disease -> common in middle-aged and older ferrets",
+        "evidence": [
+          "S3|PMC7149534|34"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Inflammatory bowel disease is common in middle-aged and older ferrets."
+      },
+      {
+        "category": "morphology",
+        "claim": "Eosinophilic gastroenteritis -> associated with systemic hypereosinophilia",
+        "evidence": [
+          "S3|PMC7149534|34"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Eosinophilic gastroenteritis is associated with systemic hypereosinophilia."
+      },
+      {
+        "category": "morphology",
+        "claim": "AIHA diagnosed in a 76-year-old male -> presenting with abdominal pain",
+        "evidence": [
+          "S4|PMC9355740|198"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Case 1 was a 76-year-old male... presenting with malaise, lethargy and abdominal pain."
+      },
+      {
+        "category": "morphology",
+        "claim": "AIHA -> associated with spherocytosis and reticulocytosis",
+        "evidence": [
+          "S4|PMC9355740|198"
+        ],
+        "confidence": "high",
+        "verbatim_support": "On presentation his haemoglobin had fallen to 59 g/L... with spherocytosis on blood film, and a reticulocytosis of 11.6%."
+      },
+      {
+        "category": "morphology",
+        "claim": "AIHA -> biochemical evidence of haemolysis with elevated bilirubin",
+        "evidence": [
+          "S4|PMC9355740|198"
+        ],
+        "confidence": "high",
+        "verbatim_support": "There was biochemical evidence of haemolysis with bilirubin of 97 mcmol/L."
+      },
+      {
+        "category": "treatment",
+        "claim": "AIHA in a 76-year-old male -> treated with prednisolone 1 mg/kg",
+        "evidence": [
+          "S4|PMC9355740|198"
+        ],
+        "confidence": "high",
+        "verbatim_support": "He was diagnosed with AIHA and commenced on prednisolone 1 mg/kg."
+      },
+      {
+        "category": "morphology",
+        "claim": "AIHA diagnosed in an 83-year-old female -> presenting with fatigue and malaise",
+        "evidence": [
+          "S5|PMC9355740|229"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Case 3 was an 83-year-old female... presenting with progressive fatigue, malaise and anorexia."
+      },
+      {
+        "category": "morphology",
+        "claim": "AIHA -> associated with reticulocytosis and nucleated RBCs",
+        "evidence": [
+          "S5|PMC9355740|229"
+        ],
+        "confidence": "high",
+        "verbatim_support": "She had a reticulocytosis of 243 /C2 10 9 /L, with occasional nucleated RBCs on blood film."
+      },
+      {
+        "category": "morphology",
+        "claim": "AIHA -> positive DAT for IgG and C3d",
+        "evidence": [
+          "S5|PMC9355740|229"
+        ],
+        "confidence": "high",
+        "verbatim_support": "A DAT was positive for IgG and C3d."
+      },
+      {
+        "category": "treatment",
+        "claim": "AIHA in an 83-year-old female -> managed with supportive RBC transfusions",
+        "evidence": [
+          "S5|PMC9355740|229"
+        ],
+        "confidence": "high",
+        "verbatim_support": "She was managed with supportive RBC transfusions."
+      },
+      {
+        "category": "morphology",
+        "claim": "AIHA diagnosed in a 64-year-old male -> presenting with abdominal pain",
+        "evidence": [
+          "S6|PMC9355740|230"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Case 4 was a 64-year-old male who was referred... presenting with abdominal pain."
+      },
+      {
+        "category": "morphology",
+        "claim": "AIHA -> evidenced by low haptoglobin and elevated LDH",
+        "evidence": [
+          "S6|PMC9355740|230"
+        ],
+        "confidence": "high",
+        "verbatim_support": "AIHA was further evidenced by a haptoglobin of < 0.08 g/L, bilirubin of 39 mcmol/L, LDH of 488 U/L."
+      },
+      {
+        "category": "treatment",
+        "claim": "AIHA in a 64-year-old male -> treated with prednisolone 1 mg/kg",
+        "evidence": [
+          "S6|PMC9355740|230"
+        ],
+        "confidence": "high",
+        "verbatim_support": "He was diagnosed with new CLL and AIHA. The patient was commenced on prednisolone 1 mg/kg."
+      },
+      {
+        "category": "staging",
+        "claim": "Presence of tumour cells in abdominal fluid -> insufficient data for staging of WT",
+        "evidence": [
+          "S7|PMC12232243|621"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Sufficient data are not currently available to utilise the presence of tumour cells detected within abdominal or pleural fluid in staging of WT."
+      },
+      {
+        "category": "staging",
+        "claim": "Positive margins for viable tumour -> upstage to stage III",
+        "evidence": [
+          "S8|PMC12232243|643"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Margins positive for viable tumour upstage the tumour to stage III in all staging systems."
+      },
+      {
+        "category": "staging",
+        "claim": "Non-viable tumour at ureteral or renal vein margin -> considered local stage III",
+        "evidence": [
+          "S8|PMC12232243|643"
+        ],
+        "confidence": "high",
+        "verbatim_support": "In SIOP, non-viable tumour at the ureteral or renal vein margin... is considered local stage III."
+      },
+      {
+        "category": "staging",
+        "claim": "Involvement of abdominal or pelvic lymph nodes -> criterion for local stage III",
+        "evidence": [
+          "S9|PMC12232243|648"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Involvement of abdominal or pelvic lymph nodes is a criterion for local stage III."
+      },
+      {
+        "category": "staging",
+        "claim": "Lymph node involvement in thorax -> criterion for stage IV",
+        "evidence": [
+          "S9|PMC12232243|648"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Lymph node involvement in the thorax or other extra-abdominal sites is a criterion for stage IV."
+      }
+    ],
+    "summary_text": "The literature discusses various conditions affecting mustelids and humans, including vitamin E deficiency leading to steatitis and muscle degeneration [S2|PMC7149534|9]. Inflammatory bowel disease is common in middle-aged and older ferrets [S3|PMC7149534|34]. Several cases of autoimmune hemolytic anemia (AIHA) are presented, with symptoms including abdominal pain and fatigue, and treatments involving prednisolone [S4|PMC9355740|198][S5|PMC9355740|229][S6|PMC9355740|230]. Staging criteria for Wilms Tumor (WT) and pediatric renal tumors are also outlined, emphasizing the importance of margin status and lymph node involvement [S7|PMC12232243|621][S8|PMC12232243|643][S9|PMC12232243|648].",
+    "audit_metadata": {
+      "sentences_analyzed": 10,
+      "sentences_cited": [
+        "7",
+        "9",
+        "34",
+        "198",
+        "229",
+        "230",
+        "621",
+        "643",
+        "648"
+      ],
+      "pmcids_referenced": [
+        "PMC7149534",
+        "PMC9355740",
+        "PMC12232243"
+      ],
+      "uncited_sentences": []
+    }
+  },
+  {
+    "chunk_id": "C2",
+    "findings": [
+      {
+        "category": "staging",
+        "claim": "Residual non-haematogenous tumour present after surgery and confined to abdomen -> SIOP local stage III",
+        "evidence": [
+          "S1|PMC12232243|690"
+        ],
+        "confidence": "high",
+        "verbatim_support": "SIOP local stage III : Residual non-haematogenous tumour present after surgery and confined to abdomen."
+      },
+      {
+        "category": "staging",
+        "claim": "Tumour (viable or non-viable) involving abdominal-pelvic lymph nodes -> may occur",
+        "evidence": [
+          "S2|PMC12232243|691"
+        ],
+        "confidence": "high",
+        "verbatim_support": "a Tumour (viable or non-viable) involving abdominal -pelvic lymph nodes."
+      },
+      {
+        "category": "staging",
+        "claim": "Tumour implants (viable or non-viable) found anywhere in the abdomen -> may occur",
+        "evidence": [
+          "S3|PMC12232243|697"
+        ],
+        "confidence": "high",
+        "verbatim_support": "g Tumour implants (viable or non-viable) are found anywhere in the abdomen."
+      },
+      {
+        "category": "morphology",
+        "claim": "Presence of leukocytosis -> 13.1 G/L",
+        "evidence": [
+          "S4|PMC9326618|924"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Lab tests revealed the presence of leukocytosis (13.1 G/L)"
+      },
+      {
+        "category": "morphology",
+        "claim": "Presence of eosinophils -> 0.55 G/L",
+        "evidence": [
+          "S4|PMC9326618|924"
+        ],
+        "confidence": "high",
+        "verbatim_support": "with eosinophils (0.55 G/L)"
+      },
+      {
+        "category": "morphology",
+        "claim": "Bacterial smear, herpes simplex, zoster virus PCR, and enterovirus PCR -> negative",
+        "evidence": [
+          "S4|PMC9326618|924"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Bacterial smear, herpes simplex, zoster virus PCR, and enterovirus PCR were negative"
+      },
+      {
+        "category": "morphology",
+        "claim": "Skin biopsy of flank lesion -> erosion covered by crust containing neutrophils",
+        "evidence": [
+          "S4|PMC9326618|924"
+        ],
+        "confidence": "high",
+        "verbatim_support": "A skin biopsy of a flank lesion showed an erosion covered by a crust containing neutrophils"
+      },
+      {
+        "category": "morphology",
+        "claim": "Dermal inflammatory infiltrate -> neutrophils and numerous eosinophils",
+        "evidence": [
+          "S4|PMC9326618|924"
+        ],
+        "confidence": "high",
+        "verbatim_support": "a dermal inflammatory infiltrate with neutrophils and numerous eosinophils"
+      },
+      {
+        "category": "IHC",
+        "claim": "Direct immunofluorescence -> C3 on a few vessels with granular deposits",
+        "evidence": [
+          "S4|PMC9326618|924"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Direct immunofluorescence, taken on a lesion localized on the abdomen, revealed C3 on a few vessels with granular deposits."
+      },
+      {
+        "category": "IHC",
+        "claim": "Indirect immunofluorescence and ELISA for anti-BP180 and -BP230 -> negative",
+        "evidence": [
+          "S4|PMC9326618|924"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Indirect immunofluorescence and ELISA for anti-BP180 and -BP230 were both negative."
+      },
+      {
+        "category": "prognosis",
+        "claim": "Abdominal pain -> most prominent finding in TRAPS",
+        "evidence": [
+          "S5|PMC8293050|1409"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Abdominal pain is the most prominent finding."
+      },
+      {
+        "category": "prognosis",
+        "claim": "Eighty percent of TRAPS cases -> occur in childhood",
+        "evidence": [
+          "S5|PMC8293050|1409"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Eighty percent of cases occur in childhood."
+      },
+      {
+        "category": "morphology",
+        "claim": "Histopathology of TRAPS -> superficial and deep lymphocytic infiltrate with tight venule cuffing",
+        "evidence": [
+          "S5|PMC8293050|1409"
+        ],
+        "confidence": "high",
+        "verbatim_support": "Histopathology shows a superficial and deep lymphocytic infiltrate with tight venule cuffing."
+      },
+      {
+        "category": "morphology",
+        "claim": "Skin punch biopsy from abdomen -> nonspecific reactive changes with scanty small lymphocytes",
+        "evidence": [
+          "S8|PMC4965535|1435"
+        ],
+        "confidence": "high",
+        "verbatim_support": "The skin punch biopsy from the patient's abdomen revealed only nonspecific reactive changes with scanty small lymphocytes."
+      },
+      {
+        "category": "morphology",
+        "claim": "Absence of clonal T-cell gene rearrangement -> provides evidence of nonneoplastic process",
+        "evidence": [
+          "S8|PMC4965535|1435"
+        ],
+        "confidence": "high",
+        "verbatim_support": "absence of clonal T-cell gene rearrangement, providing evidence that the skin rash was a nonneoplastic process."
+      },
+      {
+        "category": "morphology",
+        "claim": "A 64-year-old male -> presented with a rash on chest, abdomen, and back",
+        "evidence": [
+          "S6|PMC4965535|1431"
+        ],
+        "confidence": "high",
+        "verbatim_support": "A 64-year-old male presented to the hospital with a rash on his chest, abdomen, and back."
+      },
+      {
+        "category": "morphology",
+        "claim": "Symptoms of extreme fatigue, night sweats, weight loss -> reported by a 64-year-old male",
+        "evidence": [
+          "S6|PMC4965535|1431"
+        ],
+        "confidence": "high",
+        "verbatim_support": "In addition, he complained of extreme fatigue, night sweats, and weight loss."
+      },
+      {
+        "category": "morphology",
+        "claim": "5-cm mobile nontender mass in right axilla -> found upon emergency department arrival",
+        "evidence": [
+          "S7|PMC4965535|1432"
+        ],
+        "confidence": "high",
+        "verbatim_support": "he was found to have a 5-cm, mobile, nontender mass in the right axilla."
+      },
+      {
+        "category": "morphology",
+        "claim": "Erythematous macular rash in annular shape -> located under left breast",
+        "evidence": [
+          "S7|PMC4965535|1432"
+        ],
+        "confidence": "high",
+        "verbatim_support": "There was an erythematous macular rash in an annular shape with central clearing located under his left breast."
+      },
+      {
+        "category": "morphology",
+        "claim": "Confluence of rash -> extended to mid-anterior abdomen and back",
+        "evidence": [
+          "S7|PMC4965535|1432"
+        ],
+        "confidence": "high",
+        "verbatim_support": "There was confluence of this rash that extended to the mid-anterior abdomen and to his back."
+      }
+    ],
+    "summary_text": "Residual non-haematogenous tumour can be present after surgery, classified as SIOP local stage III [S1|PMC12232243|690]. Viable or non-viable tumours may involve abdominal-pelvic lymph nodes [S2|PMC12232243|691], and tumour implants may be found anywhere in the abdomen [S3|PMC12232243|697]. Laboratory tests show leukocytosis at 13.1 G/L and eosinophils at 0.55 G/L [S4|PMC9326618|924]. Bacterial smear and viral PCRs were negative [S4|PMC9326618|924]. Skin biopsy indicated inflammatory changes [S4|PMC9326618|924], and direct immunofluorescence revealed C3 deposits [S4|PMC9326618|924]. In TRAPS, abdominal pain is a prominent finding, especially in childhood [S5|PMC8293050|1409]. Histopathology in TRAPS shows lymphocytic infiltrate [S5|PMC8293050|1409]. A 64-year-old male presented with rashes and systemic symptoms [S6|PMC4965535|1431], with a notable 5-cm mass in the axilla and rash extending to the abdomen [S7|PMC4965535|1432].",
+    "audit_metadata": {
+      "sentences_analyzed": 9,
+      "sentences_cited": [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8"
+      ],
+      "pmcids_referenced": [
+        "PMC12232243",
+        "PMC9326618",
+        "PMC8293050",
+        "PMC4965535"
+      ],
+      "uncited_sentences": []
+    }
+  }
+]

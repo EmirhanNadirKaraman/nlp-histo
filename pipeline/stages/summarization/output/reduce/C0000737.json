@@ -1,0 +1,162 @@
+{
+  "concept": "Abdominal Pain",
+  "sections": {
+    "clinical_significance": {
+      "findings": [
+        {
+          "claim": "Abdominal pain is a prominent finding in TRAPS, especially in childhood.",
+          "sources": [
+            {
+              "sentences": [
+                "S5|PMC8293050|1409"
+              ],
+              "verbatim": "Abdominal pain is the most prominent finding."
+            }
+          ],
+          "strength": "strong"
+        },
+        {
+          "claim": "Autoimmune hemolytic anemia (AIHA) can present with abdominal pain.",
+          "sources": [
+            {
+              "sentences": [
+                "S4|PMC9355740|198"
+              ],
+              "verbatim": "Case 1 was a 76-year-old male... presenting with malaise, lethargy and abdominal pain."
+            },
+            {
+              "sentences": [
+                "S6|PMC9355740|230"
+              ],
+              "verbatim": "Case 4 was a 64-year-old male who was referred... presenting with abdominal pain."
+            }
+          ],
+          "strength": "strong"
+        }
+      ]
+    },
+    "histopathological_features": {
+      "findings": [
+        {
+          "claim": "Vitamin E deficiency is associated with steatitis, muscle degeneration, and widespread adipocyte necrosis.",
+          "sources": [
+            {
+              "sentences": [
+                "S2|PMC7149534|9"
+              ],
+              "verbatim": "Affected mustelids suffer from steatitis, and skeletal and cardiac muscle degeneration."
+            },
+            {
+              "sentences": [
+                "S2|PMC7149534|9"
+              ],
+              "verbatim": "Histologic lesions include widespread adipocyte necrosis with multifocal saponification."
+            }
+          ],
+          "strength": "strong"
+        },
+        {
+          "claim": "Histopathology of TRAPS shows a superficial and deep lymphocytic infiltrate with tight venule cuffing.",
+          "sources": [
+            {
+              "sentences": [
+                "S5|PMC8293050|1409"
+              ],
+              "verbatim": "Histopathology shows a superficial and deep lymphocytic infiltrate with tight venule cuffing."
+            }
+          ],
+          "strength": "strong"
+        }
+      ]
+    },
+    "management_outcomes": {
+      "findings": [
+        {
+          "claim": "AIHA in a 76-year-old male was treated with prednisolone 1 mg/kg.",
+          "sources": [
+            {
+              "sentences": [
+                "S4|PMC9355740|198"
+              ],
+              "verbatim": "He was diagnosed with AIHA and commenced on prednisolone 1 mg/kg."
+            }
+          ],
+          "strength": "strong"
+        },
+        {
+          "claim": "AIHA in an 83-year-old female was managed with supportive RBC transfusions.",
+          "sources": [
+            {
+              "sentences": [
+                "S5|PMC9355740|229"
+              ],
+              "verbatim": "She was managed with supportive RBC transfusions."
+            }
+          ],
+          "strength": "strong"
+        }
+      ]
+    },
+    "risk_factors_associations": {
+      "findings": [
+        {
+          "claim": "Inflammatory bowel disease is common in middle-aged and older ferrets.",
+          "sources": [
+            {
+              "sentences": [
+                "S3|PMC7149534|34"
+              ],
+              "verbatim": "Inflammatory bowel disease is common in middle-aged and older ferrets."
+            }
+          ],
+          "strength": "strong"
+        },
+        {
+          "claim": "Eosinophilic gastroenteritis is associated with systemic hypereosinophilia.",
+          "sources": [
+            {
+              "sentences": [
+                "S3|PMC7149534|34"
+              ],
+              "verbatim": "Eosinophilic gastroenteritis is associated with systemic hypereosinophilia."
+            }
+          ],
+          "strength": "strong"
+        }
+      ]
+    }
+  },
+  "narrative_summary": "Abdominal pain is a significant clinical feature in various conditions. In TRAPS, it is the most prominent finding, particularly in childhood [S5|PMC8293050|1409]. Autoimmune hemolytic anemia (AIHA) can also present with abdominal pain, as seen in cases involving a 76-year-old male and a 64-year-old male [S4|PMC9355740|198][S6|PMC9355740|230]. Histopathological features of vitamin E deficiency include steatitis and muscle degeneration, with widespread adipocyte necrosis [S2|PMC7149534|9]. In TRAPS, histopathology reveals a lymphocytic infiltrate with venule cuffing [S5|PMC8293050|1409]. Management of AIHA varies, with treatments including prednisolone and supportive RBC transfusions [S4|PMC9355740|198][S5|PMC9355740|229]. Risk factors such as inflammatory bowel disease and eosinophilic gastroenteritis are noted in specific populations [S3|PMC7149534|34].",
+  "audit_trail": {
+    "chunks_processed": 2,
+    "total_sentences_cited": 19,
+    "unique_pmcids": [
+      "PMC7149534",
+      "PMC9355740",
+      "PMC12232243",
+      "PMC9326618",
+      "PMC8293050",
+      "PMC4965535"
+    ],
+    "unique_text_element_ids": [
+      7,
+      9,
+      34,
+      198,
+      229,
+      230,
+      621,
+      643,
+      648,
+      690,
+      691,
+      697,
+      924,
+      1409,
+      1435,
+      1431,
+      1432
+    ],
+    "evidence_conflicts": []
+  }
+}
