@@ -1,22 +1,31 @@
+"""MapOutputScorer — protocol for MAP-stage voter-agreement scoring."""
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
 from pipeline.stages.summarization.models import AuditableSummary
+from pipeline.stages.summarization.interfaces.scoring import ScoreBundle
 
 
 @runtime_checkable
-class AgreementStrategy(Protocol):
+class MapOutputScorer(Protocol):
     """
-    Contract for voter-agreement scoring in the ABC MAP cascade.
+    Scores agreement between N voter outputs for a single MAP chunk.
 
-    Implementations receive the list of AuditableSummary outputs from all
-    Level-1 voters for a single chunk and return a scalar score in [0, 1].
+    Implementations receive the voter AuditableSummary objects and optionally
+    the original formatted source text, and return a populated ScoreBundle.
 
-    1.0 → all voters fully agree.
-    0.0 → voters share nothing in common.
+    Contract
+    --------
+    - Must populate at least one score field (embedding_agreement,
+      judge_agreement, etc.).
+    - May optionally set ScoreBundle.decision; if not set, AgreementChecker
+      falls back to comparing the primary score against theta.
+    - Must be stateless across calls (safe for concurrent use).
     """
 
-    def compute(self, outputs: list[AuditableSummary]) -> float:
-        """Return agreement score in [0, 1]."""
-        ...
+    def compute(
+        self,
+        outputs: list[AuditableSummary],
+        source_text: str | None = None,
+    ) -> ScoreBundle: ...

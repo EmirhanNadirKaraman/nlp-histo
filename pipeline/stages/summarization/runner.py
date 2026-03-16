@@ -24,9 +24,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
-from .agreement import AgreementStrategy
 from .cache import PipelineCache
 from .contradiction_detector import ContradictionDetector
 from .grounding_filter import GroundingFilter
@@ -34,6 +32,11 @@ from .map_stage import MapStage
 from .models import ConsolidatedSummary, ContradictionReport, ExtractedRules
 from .reduce_stage import ReduceStage
 from .rule_stage import RuleStage
+from pipeline.stages.summarization.interfaces import (
+    ContradictionChecker,
+    GroundingChecker,
+    MapOutputScorer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +58,10 @@ class SummarizationRunner:
         Agreement threshold for the ABC cascade in the MAP stage.
     chunk_size:
         Sentences per MAP chunk.
-    agreement_strategy:
-        Strategy used to score voter agreement in the MAP stage.  Defaults
-        to EmbeddingAgreement.  Pass CategoryJaccardAgreement() for a fast,
-        API-free alternative.
+    scorer:
+        MapOutputScorer used to score voter agreement in the MAP stage.
+        Defaults to EmbeddingScorer.  Pass CascadedCompositeScorer for
+        embedding + LLM judge cascade.
     grounding_threshold:
         Minimum NLI entailment score to consider a claim grounded.  Set to
         None to disable grounding filtering entirely.
@@ -78,11 +81,11 @@ class SummarizationRunner:
         escalation_llm,
         theta: float = 0.7,
         chunk_size: int = 10,
-        agreement_strategy: Optional[AgreementStrategy] = None,
-        grounding_threshold: Optional[float] = 0.5,
-        contradiction_similarity_threshold: Optional[float] = 0.7,
+        scorer: MapOutputScorer | None = None,
+        grounding_threshold: float | None = 0.5,
+        contradiction_similarity_threshold: float | None = 0.7,
         output_dir: Path = Path("langchain-summarization/summarization_results"),
-        cache_path: Optional[Path] = None,
+        cache_path: Path | None = None,
     ) -> None:
         self._output_dir = output_dir
         self._summaries_dir = output_dir / "summaries"
@@ -91,11 +94,13 @@ class SummarizationRunner:
         cache_file = cache_path or (output_dir / "pipeline_cache.json")
         self._cache = PipelineCache(cache_file)
 
-        self._map = MapStage(voter_llms, escalation_llm, theta=theta, chunk_size=chunk_size, agreement_strategy=agreement_strategy)
+        self._map = MapStage(voter_llms, escalation_llm, theta=theta, chunk_size=chunk_size, scorer=scorer)
         self._reduce = ReduceStage(escalation_llm)
         self._rules = RuleStage(escalation_llm)
-        self._grounding = GroundingFilter(grounding_threshold) if grounding_threshold is not None else None
-        self._contradiction = (
+        self._grounding: GroundingChecker | None = (
+            GroundingFilter(grounding_threshold) if grounding_threshold is not None else None
+        )
+        self._contradiction: ContradictionChecker | None = (
             ContradictionDetector(escalation_llm, similarity_threshold=contradiction_similarity_threshold)
             if contradiction_similarity_threshold is not None else None
         )
@@ -159,7 +164,7 @@ class SummarizationRunner:
                 logger.info("[%s] Grounding (RULES): %d rules remaining", cui, len(rules.rules))
 
             # 4. Contradiction detection
-            contradiction_report: Optional[ContradictionReport] = None
+            contradiction_report: ContradictionReport | None = None
             if self._contradiction is not None:
                 logger.info("[%s] CONTRADICTION DETECTION", cui)
                 contradiction_report = self._contradiction.detect(rules)
@@ -210,7 +215,7 @@ class SummarizationRunner:
     def _result_path(self, cui: str) -> Path:
         return self._summaries_dir / f"{cui}.json"
 
-    def _load_result(self, cui: str) -> Optional[dict]:
+    def _load_result(self, cui: str) -> dict | None:
         p = self._result_path(cui)
         if p.exists():
             return json.loads(p.read_text(encoding="utf-8"))

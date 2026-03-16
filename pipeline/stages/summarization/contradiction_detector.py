@@ -16,11 +16,9 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import combinations
-from typing import Optional
-
 import numpy as np
 
-from .agreement import EmbedFn, _openai_embed
+from .agreement.providers import EmbedFn, OpenAIEmbedder
 from .models import ContradictingPair, ContradictionReport, ExtractedRules, Rule
 from .prompts import build_judge_chain
 
@@ -49,11 +47,11 @@ class ContradictionDetector:
         self,
         llm,
         similarity_threshold: float = 0.7,
-        embed_fn: Optional[EmbedFn] = None,
+        embed_fn: EmbedFn | None = None,
     ) -> None:
         self._judge = build_judge_chain(llm)
         self.similarity_threshold = similarity_threshold
-        self._embed = embed_fn or _openai_embed
+        self._embed: EmbedFn = embed_fn or OpenAIEmbedder()
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -119,7 +117,7 @@ class ContradictionDetector:
         if not pairs:
             return []
 
-        results: list[Optional[ContradictingPair]] = [None] * len(pairs)
+        results: list[ContradictingPair | None] = [None] * len(pairs)
 
         def _judge_one(idx: int, rule_a: Rule, rule_b: Rule) -> tuple[int, ContradictingPair | None]:
             judgment = self._judge.invoke({

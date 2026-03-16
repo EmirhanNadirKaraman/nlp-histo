@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from typing import Optional
+from functools import cached_property
 
 from .models import AuditableSummary, EvidenceChainItem, ExtractedRules, Finding, Rule, RuleAuditSummary, RuleCounts
 
@@ -45,7 +45,6 @@ class GroundingFilter:
     ) -> None:
         self.threshold = threshold
         self._model_name = model_name
-        self._pipe: Optional[object] = None  # lazy-loaded
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -117,25 +116,23 @@ class GroundingFilter:
 
     # ── Internals ──────────────────────────────────────────────────────────────
 
-    def _pipe_(self):
-        """Lazy-load the NLI pipeline."""
-        if self._pipe is None:
-            from transformers import pipeline  # optional dep
-            self._pipe = pipeline(
-                "text-classification",
-                model=self._model_name,
-                top_k=None,
-            )
-        return self._pipe
+    @cached_property
+    def _pipe(self):
+        """Lazy-load the NLI pipeline (cached after first access)."""
+        from transformers import pipeline  # optional dep
+        return pipeline(
+            "text-classification",
+            model=self._model_name,
+            top_k=None,
+        )
 
     def _entailment_mask(self, pairs: list[tuple[str, str]]) -> list[bool]:
         """
         Run NLI on all (premise, hypothesis) pairs in one batch.
         Returns a bool list: True if entailment score >= threshold.
         """
-        pipe = self._pipe_()
         inputs = [{"text": premise, "text_pair": hyp} for premise, hyp in pairs]
-        batch_results = pipe(inputs)
+        batch_results = self._pipe(inputs)
 
         mask = []
         for scores in batch_results:

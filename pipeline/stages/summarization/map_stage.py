@@ -16,12 +16,11 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
-
-from .agreement import AgreementChecker, AgreementStrategy
+from .agreement import AgreementChecker, EmbeddingScorer, MapOutputScorer
 from .cache import PipelineCache
 from .models import AuditableSummary
 from .prompts import build_map_chain
+from pipeline.stages.summarization.interfaces.scoring import ChunkDecision
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +54,11 @@ class MapStage:
         Agreement threshold in [0, 1].  Higher = more escalations.
     chunk_size:
         Number of sentences per chunk.
-    agreement_strategy:
-        Strategy used to score voter agreement.  Defaults to
-        EmbeddingAgreement (OpenAI text-embedding-3-small).
-        Pass CategoryJaccardAgreement() for a fast, API-free alternative.
+    scorer:
+        MapOutputScorer used to score voter agreement.  Defaults to
+        EmbeddingScorer.  Pass CascadedCompositeScorer for embedding +
+        LLM judge cascade, or CategoryJaccardScorer for a fast, API-free
+        alternative.
     """
 
     def __init__(
@@ -67,13 +67,13 @@ class MapStage:
         escalation_llm,
         theta: float = 0.7,
         chunk_size: int = 10,
-        agreement_strategy: Optional[AgreementStrategy] = None,
+        scorer: MapOutputScorer | None = None,
     ) -> None:
         if not voter_llms:
             raise ValueError("voter_llms must contain at least one LLM.")
         self._voter_chains = [build_map_chain(llm) for llm in voter_llms]
         self._escalation_chain = build_map_chain(escalation_llm)
-        self._agreement = AgreementChecker(strategy=agreement_strategy, theta=theta)
+        self._agreement = AgreementChecker(scorer=scorer or EmbeddingScorer(), theta=theta)
         self.chunk_size = chunk_size
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -82,7 +82,7 @@ class MapStage:
         self,
         sentences: list[dict],
         concept_name: str,
-        cache: Optional[PipelineCache] = None,
+        cache: PipelineCache | None = None,
     ) -> list[AuditableSummary]:
         """
         Map all sentences for one concept, returning one AuditableSummary per chunk.
@@ -91,7 +91,7 @@ class MapStage:
         run through the ABC cascade.
         """
         chunks = self._make_chunks(sentences)
-        results: list[Optional[AuditableSummary]] = []
+        results: list[AuditableSummary | None] = []
         uncached: list[tuple[int, list[dict]]] = []
 
         for idx, chunk in enumerate(chunks):
@@ -123,25 +123,19 @@ class MapStage:
 
         # Level 1: all voter chains in parallel (one thread per chain)
         voters = self._run_voters(inp)
-        agreement = self._agreement.compute(voters)
+        bundle = self._agreement.compute(voters, source_text=inp["text"])
 
-        if agreement >= self._agreement.theta:
-            logger.debug(
-                "Chunk %s: Level-1 agreement %.2f >= %.2f — voters accepted (%d providers)",
-                chunk_id, agreement, self._agreement.theta, len(voters),
-            )
+        if bundle.decision == ChunkDecision.KEEP:
+            logger.debug("Chunk %s: %s → voters accepted", chunk_id, bundle.decision)
             return self._agreement.best(voters)
 
         # Level 2: single escalation-model call
-        logger.debug(
-            "Chunk %s: Level-1 agreement %.2f < %.2f — escalating",
-            chunk_id, agreement, self._agreement.theta,
-        )
+        logger.debug("Chunk %s: %s → escalating", chunk_id, bundle.decision)
         return self._escalation_chain.invoke(inp)
 
     def _run_voters(self, inp: dict) -> list[AuditableSummary]:
         """Invoke each voter chain concurrently, return results in chain order."""
-        results: list[Optional[AuditableSummary]] = [None] * len(self._voter_chains)
+        results: list[AuditableSummary | None] = [None] * len(self._voter_chains)
         with ThreadPoolExecutor(max_workers=len(self._voter_chains)) as pool:
             future_to_idx = {
                 pool.submit(chain.invoke, inp): i
