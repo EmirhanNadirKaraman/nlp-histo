@@ -128,6 +128,9 @@ class HierarchicalRow:
     path_list: List[str]      # e.g. ["Methods", "2.1 Staining"]
     depth: int
     text: str
+    # Pre-stitch chunks merged into `text`.  len > 1 means stitching occurred;
+    # the rule-extraction pipeline can reference each chunk individually.
+    source_chunks: List[str] = field(default_factory=list)
 
 
 # ── Media ─────────────────────────────────────────────────────────────────────

@@ -69,11 +69,13 @@ class HierarchicalTextAssembler:
             element_dicts,
             nlp=self._nlp,
             table_bboxes=table_bboxes,
+            pre_filter=self._config.pre_filter_relevance,
+            with_sources=True,
         )
         logger.debug("TextAssembler: %d rows assembled, %d skipped", len(rows_raw), n_skipped)
 
         rows: List[HierarchicalRow] = []
-        for path_str, path_list, depth, text in rows_raw:
+        for path_str, path_list, depth, text, source_chunks in rows_raw:
             if self._skip_refs:
                 if path_list and path_list[0].strip().lower() in self._REF_HEADERS:
                     continue
@@ -84,6 +86,7 @@ class HierarchicalTextAssembler:
                 path_list=path_list,
                 depth=depth,
                 text=text,
+                source_chunks=source_chunks,
             ))
 
         return rows

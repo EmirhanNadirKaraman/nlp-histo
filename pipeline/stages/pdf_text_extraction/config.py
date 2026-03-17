@@ -138,6 +138,7 @@ class TextAssemblyConfig:
     compare_combinations: bool = False
     save_combination_outputs: bool = False
     write_raw_text: bool = False  # dump pre-assembly elements to out/text_raw/
+    pre_filter_relevance: bool = True  # False → skip is_relevant_para; use post-stitch boilerplate filter instead
 
 
 @dataclass(slots=True)
