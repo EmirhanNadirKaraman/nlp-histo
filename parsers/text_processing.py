@@ -30,6 +30,18 @@ class ContextAwareStitcher:
         ["The results show that the treatment was effective.", "Table 1: Results"]
     """
 
+    def _build_elements(self, paragraphs: List[Union[str, Dict]]) -> List[dict]:
+        elements = []
+        for para in paragraphs:
+            text = para.get('text', '') if isinstance(para, dict) else para
+            elements.append({
+                'type': self._classify_paragraph(text),
+                'text': text,
+                'consumed': False,
+                'sources': [text],
+            })
+        return elements
+
     def reconstruct_paragraphs(self, paragraphs: List[Union[str, Dict]]) -> List[str]:
         """
         Reconstruct paragraphs by stitching split narratives.
@@ -40,55 +52,46 @@ class ContextAwareStitcher:
         Returns:
             List of reconstructed paragraphs with tables/figures preserved
         """
+        return [text for text, _ in self.reconstruct_with_sources(paragraphs)]
+
+    def reconstruct_with_sources(
+        self, paragraphs: List[Union[str, Dict]]
+    ) -> List[tuple]:
+        """
+        Like reconstruct_paragraphs but also returns the original pre-stitch
+        chunks that were merged into each output paragraph.
+
+        Returns:
+            List of (merged_text, source_chunks) tuples.  len(source_chunks) > 1
+            means stitching occurred and the caller can reference each chunk
+            individually.
+        """
         if not paragraphs:
             return []
 
-        # Convert to uniform format with type tags
-        elements = []
-        for para in paragraphs:
-            if isinstance(para, dict):
-                text = para.get('text', '')
-            else:
-                text = para
+        elements = self._build_elements(paragraphs)
 
-            # Classify paragraph type
-            elem_type = self._classify_paragraph(text)
-
-            elements.append({
-                'type': elem_type,
-                'text': text,
-                'consumed': False
-            })
-
-        final_flow = []
+        final_flow: List[tuple] = []
         i = 0
 
         while i < len(elements):
             curr = elements[i]
 
-            # If current block is a table or figure, preserve it
             if curr['type'] in ['table', 'figure']:
-                final_flow.append(curr['text'])
+                final_flow.append((curr['text'], curr['sources']))
                 i += 1
                 continue
 
-            # If current is narrative, check if it's cut off
             if self._is_cut_off(curr['text']):
-                # Look ahead for the next NARRATIVE block, skipping tables/figs
                 next_text_idx = self._find_next_narrative(elements, i + 1)
-
                 if next_text_idx is not None:
-                    next_text_elem = elements[next_text_idx]
+                    next_elem = elements[next_text_idx]
+                    curr['text'] = self._merge_text(curr['text'], next_elem['text'])
+                    curr['sources'].extend(next_elem['sources'])
+                    next_elem['consumed'] = True
 
-                    # Stitch them together
-                    curr['text'] = self._merge_text(curr['text'], next_text_elem['text'])
-
-                    # Mark the consumed element
-                    elements[next_text_idx]['consumed'] = True
-
-            # Add the (potentially stitched) block if not consumed
             if not curr.get('consumed'):
-                final_flow.append(curr['text'])
+                final_flow.append((curr['text'], curr['sources']))
             i += 1
 
         return final_flow

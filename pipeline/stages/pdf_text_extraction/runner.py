@@ -108,11 +108,17 @@ class PipelineRunner:
         return self._region_masker
 
     def _get_masked_extractor(self):
-        """Second layout extractor for the masked PDF (separate cache dir)."""
+        """Second layout extractor for the masked PDF (separate cache dir).
+
+        Uses ``config.docling_text`` if set, otherwise falls back to ``config.docling``.
+        This lets you run OCR-enabled detection in Step 1 while keeping OCR off for
+        the clean text re-extraction in Step 4.
+        """
         from pipeline.stages.pdf_text_extraction.components.layout_extractor import DoclingLayoutExtractor
+        cfg = self._cfg.docling_text if self._cfg.docling_text is not None else self._cfg.docling
         return DoclingLayoutExtractor(
-            config=self._cfg.docling,
-            cache_dir=self._cfg.paths.docling_masked_dir if self._cfg.docling.export_intermediate_json else None,
+            config=cfg,
+            cache_dir=self._cfg.paths.docling_masked_dir if cfg.export_intermediate_json else None,
         )
 
     def _get_artifact_filter(self):

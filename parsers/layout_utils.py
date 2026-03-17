@@ -427,19 +427,34 @@ def _reference_list_skip_set(elements) -> set:
     return skip
 
 
-def extract_text(elements, nlp=None, table_bboxes=None, use_centroid=False):
+def extract_text(
+    elements,
+    nlp=None,
+    table_bboxes=None,
+    use_centroid=False,
+    pre_filter=True,
+    with_sources=False,
+):
     """
     Walk Docling elements in document order and return
     (rows, n_skipped) where rows is a list of
-    (path_string, path_list, depth, text) tuples.
+    (path_string, path_list, depth, text) tuples, or
+    (path_string, path_list, depth, text, source_chunks) 5-tuples when
+    ``with_sources=True``.
 
     Args:
         elements:      List of element dicts (type, page, level, bbox, text).
-        nlp:           Optional scispaCy model for relevance filtering.
+        nlp:           Optional scispaCy model for relevance filtering
+                       (only used when pre_filter=True).
         table_bboxes:  Optional {page: [bbox, …]} — TEXT elements overlapping
                        these bboxes are skipped (useful for unmasked extraction).
         use_centroid:  If True, use centroid_inside instead of bbox_overlaps for
                        the table overlap check (less aggressive).
+        pre_filter:    If True (default), apply is_relevant_para before stitching
+                       (original behaviour).  If False, all non-empty text reaches
+                       the stitcher; nothing is dropped before merge.
+        with_sources:  If True, rows are 5-tuples that include source_chunks — the
+                       list of pre-stitch texts merged into each output paragraph.
     """
     from parsers.text_processing import remove_citations, ContextAwareStitcher
 
@@ -483,13 +498,18 @@ def extract_text(elements, nlp=None, table_bboxes=None, use_centroid=False):
     stitcher = ContextAwareStitcher()
     rows = []
     for path_str, texts in by_path.items():
-        path_list  = [] if path_str == 'Root' else [p.strip() for p in path_str.split(' > ')]
-        depth      = len(path_list)
-        relevant   = [t for t in texts if is_relevant_para(t, nlp)]
-        paragraphs = stitcher.reconstruct_paragraphs([remove_citations(t) for t in relevant])
-        for para in paragraphs:
-            if para.strip():
-                rows.append((path_str, path_list, depth, para))
+        path_list = [] if path_str == 'Root' else [p.strip() for p in path_str.split(' > ')]
+        depth     = len(path_list)
+        filtered  = [t for t in texts if is_relevant_para(t, nlp)] if pre_filter else texts
+        inputs    = [remove_citations(t) for t in filtered]
+        if with_sources:
+            for para, sources in stitcher.reconstruct_with_sources(inputs):
+                if para.strip():
+                    rows.append((path_str, path_list, depth, para, sources))
+        else:
+            for para in stitcher.reconstruct_paragraphs(inputs):
+                if para.strip():
+                    rows.append((path_str, path_list, depth, para))
     return rows, n_skipped
 
 

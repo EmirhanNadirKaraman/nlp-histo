@@ -26,6 +26,12 @@ class LogLevel(str, Enum):
     ERROR = "ERROR"
 
 
+class OcrEngine(str, Enum):
+    EASYOCR = "easyocr"
+    TESSERACT = "tesseract"
+    RAPIDOCR = "rapidocr"
+
+
 @dataclass(slots=True)
 class PathConfig:
     project_root: Path = Path(".")
@@ -74,9 +80,27 @@ class DoclingConfig:
     enabled: bool = True
     do_table_structure: bool = True
     do_ocr: bool = False
+    force_full_page_ocr: bool = False  # force OCR even on text-native PDFs
+    ocr_engine: OcrEngine = OcrEngine.EASYOCR  # OCR engine when do_ocr=True
+    images_scale: float = 2.0  # image resolution multiplier (higher = better OCR, slower)
+    accelerator_device: str = "cpu"  # "cpu", "cuda", "mps"
     reconstruct_tables_from_lists: bool = False
     export_intermediate_json: bool = True
     timeout_sec: int = 300
+
+    def content_key(self) -> str:
+        """
+        Short string that uniquely identifies the content-affecting settings.
+        Used as a suffix in cache filenames so that changing options does not
+        silently serve stale cached results.
+        """
+        return (
+            f"tbl{int(self.do_table_structure)}"
+            f"_ocr{int(self.do_ocr)}"
+            f"_fp{int(self.force_full_page_ocr)}"
+            f"_eng{self.ocr_engine.value if self.do_ocr else 'na'}"
+            f"_sc{self.images_scale}"
+        )
 
 
 @dataclass(slots=True)
@@ -178,7 +202,11 @@ class RuntimeConfig:
 @dataclass(slots=True)
 class PipelineConfig:
     paths: PathConfig = field(default_factory=PathConfig)
+    # docling is used for Step 1 (full layout extraction / table-figure detection).
+    # docling_text, if set, overrides docling for Step 4 (masked re-extraction / text assembly).
+    # Leave docling_text=None to use the same settings for both steps.
     docling: DoclingConfig = field(default_factory=DoclingConfig)
+    docling_text: Optional[DoclingConfig] = None
     tatr: TATRConfig = field(default_factory=TATRConfig)
     masking: MaskingConfig = field(default_factory=MaskingConfig)
     filtering: FilteringConfig = field(default_factory=FilteringConfig)

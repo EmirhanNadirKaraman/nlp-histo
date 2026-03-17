@@ -48,19 +48,49 @@ class DoclingLayoutExtractor:
         from docling.document_converter import DocumentConverter, PdfFormatOption  # type: ignore
         from docling.datamodel.pipeline_options import PdfPipelineOptions          # type: ignore
         from docling.datamodel.base_models import InputFormat                       # type: ignore
-
         from docling.datamodel.pipeline_options import AcceleratorOptions, AcceleratorDevice  # type: ignore
 
         opts = PdfPipelineOptions()
         opts.do_table_structure = self._config.do_table_structure
         opts.do_ocr = self._config.do_ocr
-        opts.images_scale = 2.0
-        opts.accelerator_options = AcceleratorOptions(device=AcceleratorDevice.CPU)
+        opts.images_scale = self._config.images_scale
+
+        if self._config.do_ocr:
+            if hasattr(opts, "force_full_page_ocr"):
+                opts.force_full_page_ocr = self._config.force_full_page_ocr
+            elif self._config.force_full_page_ocr:
+                logger.warning("This version of Docling does not support force_full_page_ocr — ignored")
+            self._apply_ocr_engine(opts)
+
+        device_map = {
+            "cpu":  AcceleratorDevice.CPU,
+            "cuda": AcceleratorDevice.CUDA,
+            "mps":  AcceleratorDevice.MPS,
+        }
+        device = device_map.get(self._config.accelerator_device.lower(), AcceleratorDevice.CPU)
+        opts.accelerator_options = AcceleratorOptions(device=device)
 
         self._converter = DocumentConverter(
             format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
         )
         return self._converter
+
+    def _apply_ocr_engine(self, opts) -> None:
+        """Configure the OCR engine on ``opts`` based on ``self._config.ocr_engine``."""
+        from pipeline.stages.pdf_text_extraction.config import OcrEngine
+        engine = self._config.ocr_engine
+        try:
+            if engine == OcrEngine.EASYOCR:
+                from docling.datamodel.pipeline_options import EasyOcrOptions  # type: ignore
+                opts.ocr_options = EasyOcrOptions()
+            elif engine == OcrEngine.TESSERACT:
+                from docling.datamodel.pipeline_options import TesseractCliOcrOptions  # type: ignore
+                opts.ocr_options = TesseractCliOcrOptions()
+            elif engine == OcrEngine.RAPIDOCR:
+                from docling.datamodel.pipeline_options import RapidOcrOptions  # type: ignore
+                opts.ocr_options = RapidOcrOptions()
+        except ImportError as exc:
+            logger.warning("OCR engine '%s' not available, falling back to default: %s", engine, exc)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -155,7 +185,8 @@ class DoclingLayoutExtractor:
         if self._cache_dir is None:
             return None
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        return self._cache_dir / f"{pdf_path.stem}_layout.json"
+        key = self._config.content_key()
+        return self._cache_dir / f"{pdf_path.stem}_{key}_layout.json"
 
     def _save_to_cache(self, result: LayoutResult, path: Path) -> None:
         data = {
