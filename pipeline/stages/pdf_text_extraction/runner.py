@@ -63,15 +63,16 @@ class PipelineRunner:
         self._completed  = BlacklistManager(self._cfg.paths.completed_file) if self._cfg.paths.completed_file else None
 
         # Lazy stage instances — created on first use
-        self._layout_extractor = None
-        self._region_masker    = None
-        self._text_assembler   = None
-        self._artifact_filter  = None
-        self._media_cropper    = None
-        self._table_detector   = None
-        self._visualizer       = None
-        self._nlp              = None
-        self._outputs: list    = []
+        self._layout_extractor  = None
+        self._region_masker     = None
+        self._text_assembler    = None
+        self._artifact_filter   = None
+        self._media_cropper     = None
+        self._table_detector    = None
+        self._visualizer        = None
+        self._two_pass_extractor = None
+        self._nlp               = None
+        self._outputs: list     = []
 
     # ── Stage factory helpers ─────────────────────────────────────────────────
 
@@ -106,6 +107,19 @@ class PipelineRunner:
                 output_dir=self._cfg.paths.masked_pdf_dir,
             )
         return self._region_masker
+
+    def _get_two_pass_extractor(self):
+        if self._two_pass_extractor is None:
+            from pipeline.stages.pdf_text_extraction.components.two_pass_extractor import TwoPassTextExtractor
+            docling_text_cfg = self._cfg.docling_text  # None → reuse docling cfg
+            self._two_pass_extractor = TwoPassTextExtractor(
+                config=self._cfg.two_pass,
+                docling_config=self._cfg.docling,
+                docling_text_config=docling_text_cfg,
+                cache_dir=self._cfg.paths.docling_full_dir if self._cfg.docling.export_intermediate_json else None,
+                masked_pdf_dir=self._cfg.paths.masked_pdf_dir,
+            )
+        return self._two_pass_extractor
 
     def _get_masked_extractor(self):
         """Second layout extractor for the masked PDF (separate cache dir).
@@ -289,51 +303,100 @@ class PipelineRunner:
         if patched:
             logger.info("  Patched %d element(s) TEXT → SECTION_HEADER from full layout", patched)
 
-    def _process(self, pdf_path: Path, pmcid: str):
-        # ── Step 1: Layout extraction (cached by DoclingLayoutExtractor) ───────
+    def _run_table_detection(self, layout: LayoutResult, pdf_path: Path):
+        """Run the configured table detector and return a TableDetectionResult."""
+        detector = self._get_table_detector()
+        from pipeline.stages.pdf_text_extraction.table_detectors.hybrid_detector import HybridTableDetector
+        from pipeline.stages.pdf_text_extraction.table_detectors.docling_detector import DoclingTableDetector
+        if isinstance(detector, HybridTableDetector):
+            return detector.detect_with_layout(layout, pdf_path)
+        elif isinstance(detector, DoclingTableDetector):
+            return detector.detect_from_layout(layout)
+        else:
+            return detector.detect(pdf_path)
+
+    def _steps_1_3_4_standard(self, pdf_path: Path, pmcid: str):
+        """
+        Standard Steps 1–4: extract → detect tables → mask → re-extract.
+
+        Returns (layout, layout_pre_recon, masked_layout, detection).
+        Detection runs here (before masking) because the region masker needs it.
+        """
+        from pipeline.stages.pdf_text_extraction.components.table_reconstructor import reconstruct_tables_from_lists
+
         logger.info("[%s] Step 1 — layout extraction", pmcid)
         layout: LayoutResult = self._get_layout_extractor().extract(pdf_path)
+        layout_pre_recon = layout
 
-        # ── Step 1b: Table reconstruction from list elements ─────────────────
-        layout_pre_recon = layout  # snapshot before reconstruction for docling-only crops
         if self._cfg.docling.reconstruct_tables_from_lists:
-            from pipeline.stages.pdf_text_extraction.components.table_reconstructor import reconstruct_tables_from_lists
             layout = reconstruct_tables_from_lists(layout)
 
-        # ── Step 2: Table detection ────────────────────────────────────────────
         logger.info("[%s] Step 2 — table detection (%s)", pmcid, self._cfg.table_detector)
-        detector = self._get_table_detector()
+        detection = self._run_table_detection(layout, pdf_path)
 
-        from pipeline.stages.pdf_text_extraction.table_detectors.hybrid_detector import HybridTableDetector
-        if isinstance(detector, HybridTableDetector):
-            detection = detector.detect_with_layout(layout, pdf_path)
-        else:
-            from pipeline.stages.pdf_text_extraction.table_detectors.docling_detector import DoclingTableDetector
-            if isinstance(detector, DoclingTableDetector):
-                detection = detector.detect_from_layout(layout)
-            else:
-                detection = detector.detect(pdf_path)
-
-        # ── Step 2b: Visualization ────────────────────────────────────────────
-        if vis := self._get_visualizer():
-            vis.visualize_layout(layout, pmcid)
-            vis.visualize_detections(detection, layout, pmcid)
-
-        # ── Step 3: Region masking ─────────────────────────────────────────────
         masker = self._get_region_masker()
-        regions_to_mask = masker.collect_regions(detection, layout, nlp=self._get_nlp()) if self._cfg.masking.enabled else []
+        regions_to_mask = masker.collect_regions(
+            detection, layout, nlp=self._get_nlp()
+        ) if self._cfg.masking.enabled else []
         if regions_to_mask:
             logger.info("[%s] Step 3 — masking %d regions", pmcid, len(regions_to_mask))
             masked_path = masker.mask(pdf_path, regions_to_mask)
         else:
             masked_path = pdf_path
 
-        # ── Step 4: Re-extract from masked PDF (cached by DoclingLayoutExtractor)
         logger.info("[%s] Step 4 — re-extraction from masked PDF", pmcid)
         masked_layout: LayoutResult = self._get_masked_extractor().extract(masked_path)
-
-        # ── Step 4b: Patch element types from full layout ─────────────────────
         self._patch_section_header_types(masked_layout, layout)
+        return layout, layout_pre_recon, masked_layout, detection
+
+    def _steps_1_3_4_two_pass(self, pdf_path: Path, pmcid: str):
+        """
+        Two-pass Steps 1, 3, 4: ghost-text scoring → header masking → re-extract.
+
+        Table detection does NOT run here — it runs in _process() (Step 2) after
+        this returns, using pass1_layout as the canonical layout.
+
+        Returns (layout, layout_pre_recon, masked_layout, detection=None).
+        """
+        from pipeline.stages.pdf_text_extraction.models.dto import LayoutResult as _LR
+        from pipeline.stages.pdf_text_extraction.components.table_reconstructor import reconstruct_tables_from_lists
+
+        logger.info("[%s] Steps 1,3,4 — two-pass extraction", pmcid)
+        tp = self._get_two_pass_extractor().process(pdf_path)
+
+        layout = _LR(
+            elements=tp.pass1_layout,
+            page_dims=tp.page_dims,
+            pdf_path=pdf_path,
+            source="docling",
+        )
+        layout_pre_recon = layout
+
+        if self._cfg.docling.reconstruct_tables_from_lists:
+            layout = reconstruct_tables_from_lists(layout)
+
+        masked_layout = _LR(
+            elements=tp.pass2_layout,
+            page_dims=tp.page_dims,
+            pdf_path=tp.masked_pdf_path or pdf_path,
+            source="docling",
+        )
+        self._patch_section_header_types(masked_layout, layout)
+        return layout, layout_pre_recon, masked_layout, None  # detection deferred
+
+    def _process(self, pdf_path: Path, pmcid: str):
+        if self._cfg.two_pass.enabled:
+            layout, layout_pre_recon, masked_layout, detection = self._steps_1_3_4_two_pass(pdf_path, pmcid)
+            # Step 2: table detection deferred to here in two-pass mode
+            logger.info("[%s] Step 2 — table detection (%s)", pmcid, self._cfg.table_detector)
+            detection = self._run_table_detection(layout, pdf_path)
+        else:
+            layout, layout_pre_recon, masked_layout, detection = self._steps_1_3_4_standard(pdf_path, pmcid)
+
+        # ── Step 2b: Visualization ────────────────────────────────────────────
+        if vis := self._get_visualizer():
+            vis.visualize_layout(layout, pmcid)
+            vis.visualize_detections(detection, layout, pmcid)
 
         # ── Step 5: Artifact filtering ────────────────────────────────────────
         if self._cfg.filtering.enabled:
@@ -470,13 +533,15 @@ def main() -> None:
     cfg = PipelineConfig()
     cfg.database.enabled = True  # set to True to ingest; db_url auto-loaded from .env
     cfg.text.write_raw_text = True
+    cfg.two_pass.enabled = True  # use two-pass ghost-text detection instead of standard masking
+    cfg.runtime.skip_existing_in_db = False
     cfg.prepare()
 
     # ── Single document ────────────────────────────────────────────────────────
-    # PipelineRunner(cfg).run_document(
-    #     pdf_path=Path("files/organized_pdfs/PMC10047158_dermatopathology-10-00017.pdf"),
-    #     pmcid="PMC10047158",
-    # )
+    PipelineRunner(cfg).run_document(
+        pdf_path=Path("files/organized_pdfs/PMC10047158_dermatopathology-10-00017.pdf"),
+        pmcid="PMC10047158",
+    )
 
     # PipelineRunner(cfg).run_document(
     #     pdf_path=Path("files/organized_pdfs/PMC10047213_dermatopathology-10-00018.pdf"),
@@ -487,11 +552,11 @@ def main() -> None:
     # PipelineRunner(cfg).run_batch(pdf_dir=Path("files/organized_pdfs"), max_docs=5)
 
     # ── Parallel batch (use pipeline/stages/pdf_text_extraction/batch.py instead) ────────
-    from pipeline.stages.pdf_text_extraction.batch import ParallelBatchRunner
-    ParallelBatchRunner(cfg, max_workers=4).run(
-        pdf_dir=Path("files/organized_pdfs"),
-        max_docs=5,
-    )
+    # from pipeline.stages.pdf_text_extraction.batch import ParallelBatchRunner
+    # ParallelBatchRunner(cfg, max_workers=4).run(
+    #     pdf_dir=Path("files/organized_pdfs"),
+    #     max_docs=5,
+    # )
 
 
 if __name__ == "__main__":

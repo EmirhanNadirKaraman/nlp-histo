@@ -200,6 +200,108 @@ class RuntimeConfig:
 
 
 @dataclass(slots=True)
+class TwoPassConfig:
+    """
+    Configuration for the two-pass invisible-text detection and header-masking
+    pipeline (TwoPassTextExtractor).
+
+    Set ``enabled=True`` in PipelineConfig.two_pass to activate two-pass mode
+    in PipelineRunner, replacing the standard Steps 1 / 3 / 4 with a single
+    TwoPassTextExtractor call.
+    """
+
+    enabled: bool = False
+    """
+    When True, PipelineRunner uses TwoPassTextExtractor instead of the standard
+    layout-extract → mask → re-extract sequence (Steps 1, 3, 4).
+    Steps 2, 5–8 are unaffected.
+    """
+
+    # ── Rendering ─────────────────────────────────────────────────────────────
+    render_dpi: int = 150
+    """DPI for rendering PDF pages to pixel arrays (higher = slower but more accurate)."""
+
+    # ── Blank-space detection (Rule R1) ───────────────────────────────────────
+    blank_brightness_threshold: float = 245.0
+    """
+    Mean pixel luminance (0–255) above which a region is considered visually
+    blank.  255 = pure white; 245 allows for JPEG compression artefacts.
+    """
+
+    blank_dark_pixel_max_fraction: float = 0.02
+    """
+    Maximum fraction of pixels below the ink-darkness threshold that still
+    counts as a blank region.  0.02 = at most 2% dark pixels → blank.
+    """
+
+    # ── Word-count fallback (Rule R2, render_skipped only) ────────────────────
+    min_char_coverage_threshold: float = 0.05
+    """
+    char_coverage below this value triggers Rule R2 when rendering is skipped.
+    char_coverage = fitz_word_chars / len(docling_text); 0.05 means fewer than
+    5% of Docling's text characters were found by fitz.
+    """
+
+    min_text_chars_for_word_check: int = 8
+    """
+    Minimum length of the Docling text string (after strip) to apply Rule R2.
+    Very short strings (< 8 chars) are ignored to avoid false positives on
+    single-word decorative elements.
+    """
+
+    # ── Header-zone hint (affects rejection message wording only) ────────────
+    max_top_fraction_header: float = 0.15
+    """
+    Top ``max_top_fraction_header`` fraction of page height is considered the
+    "header zone".  Rejected nodes in this zone get a more descriptive reason
+    string (e.g. "in header zone").  Does not change the keep/drop outcome.
+    """
+
+    # ── Pass-1 figure / table masking ────────────────────────────────────────
+    mask_figures: bool = True
+    """
+    When True, PICTURE/FIGURE bboxes detected in Pass 1 are added to the mask
+    before Pass 2 runs.  This prevents figure-interior text (axis labels,
+    callouts) from leaking into Pass-2 text elements — mirroring what the
+    standard pipeline's region masker does in Step 3.
+    """
+
+    mask_tables: bool = True
+    """
+    When True, TABLE/RECONSTRUCTED_TABLE bboxes detected in Pass 1 are masked
+    before Pass 2.  Prevents table cell text from being flattened into body
+    paragraphs by Pass-2 Docling.
+    """
+
+    # ── Dense-text heuristic (Rule R3) ───────────────────────────────────────
+    max_chars_per_bbox_pt: float = 15.0
+    """
+    Maximum ratio of text character count to bbox height in PDF points.
+    Hidden text layers are extremely dense: a 180-char paragraph squeezed into
+    a ~10pt-tall bbox yields ~18 chars/pt, far above any real body text
+    (typically 3–6 chars/pt).  Elements exceeding this threshold are rejected
+    regardless of pixel evidence.
+    Set to 0 to disable.
+    """
+
+    # ── Body-anchor finding ───────────────────────────────────────────────────
+    min_anchor_word_count: int = 5
+    """
+    Minimum word count for an accepted TEXT/LIST_ITEM element to be eligible
+    as the body anchor.  Prevents short running headers that passed scoring
+    (real ink, but ≤ 4 words) from becoming the anchor.
+    """
+
+    # ── Header-mask geometry ──────────────────────────────────────────────────
+    header_mask_margin_pt: float = 3.0
+    """
+    Gap in PDF points left between the bottom edge of the header mask and the
+    top edge of the body anchor.  Prevents the mask from clipping the anchor's
+    own ascenders.
+    """
+
+
+@dataclass(slots=True)
 class PipelineConfig:
     paths: PathConfig = field(default_factory=PathConfig)
     # docling is used for Step 1 (full layout extraction / table-figure detection).
@@ -217,6 +319,7 @@ class PipelineConfig:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
     table_detector: TableDetectorType = TableDetectorType.HYBRID
+    two_pass: TwoPassConfig = field(default_factory=TwoPassConfig)
 
     def validate(self) -> None:
         if self.tatr.threshold < 0.0 or self.tatr.threshold > 1.0:

@@ -126,35 +126,58 @@ class ContextAwareStitcher:
 
     def _is_cut_off(self, text: str) -> bool:
         """
-        Check if text appears to be cut off mid-sentence.
+        Return True only when the text is genuinely incomplete — i.e. it is
+        missing its closing punctuation and the last token suggests the sentence
+        continues on the next element.
 
-        Args:
-            text: Text to check
+        Rules (all other cases return False):
+          1. Ends with a hyphen                   → word split across a line break
+          2. Ends with a comma                    → clause continues
+          3. Last word is a coordinating/prep connector with no terminal punctuation
+             (and, or, but, the, a, an, of, in, on, at, to, for, with, by, …)
+          4. Last word is a known mid-sentence abbreviation that is never
+             sentence-final (e.g., "Fig.", "et al.", "vs.", "approx.")
 
-        Returns:
-            True if text appears incomplete
+        Deliberately excluded from triggering:
+          • Ends with a period, question mark, exclamation mark, closing bracket,
+            or closing quote — those are unambiguously sentence-final.
+          • Ends with ANY lowercase letter — this was the original rule and it is
+            far too broad: it fires on abbreviations, gene names, inline refs,
+            and almost every English sentence that ends with "et al." or similar.
         """
         t = text.strip()
         if not t:
             return False
 
-        # Ends with hyphen (word break)
-        # TODO: uncomment or remove this
-        # if t.endswith('-'):
-        #     return True
+        # Sentence-final punctuation → definitely complete
+        if t[-1] in '.?!)]"\'»':
+            return False
 
-        # Ends with comma (sentence continues)
+        # Ends with a hyphen → word broken across a column/page boundary
+        if t.endswith('-'):
+            return True
+
+        # Ends with a comma → clause continues
         if t.endswith(','):
             return True
 
-        # Ends with lowercase letter or connector words
-        last_word = t.split()[-1] if t.split() else ''
-        connectors = ['and', 'or', 'but', 'the', 'a', 'an', 'of', 'in', 'on', 'at', 'to', 'for']
-        if last_word.lower() in connectors:
+        last_word = t.split()[-1].lower().rstrip('.,;:')
+
+        # Ends on a connector word (no terminal punctuation already caught above)
+        _CONNECTORS = frozenset({
+            'and', 'or', 'but', 'the', 'a', 'an',
+            'of', 'in', 'on', 'at', 'to', 'for', 'with', 'by',
+            'that', 'which', 'who', 'as', 'if', 'than',
+        })
+        if last_word in _CONNECTORS:
             return True
 
-        # Ends with lowercase (likely mid-sentence)
-        if t[-1].islower():
+        # Ends on a mid-sentence abbreviation that is never sentence-final
+        _MID_SENTENCE_ABBREVS = frozenset({
+            'fig', 'figs', 'et al', 'vs', 'approx', 'dept', 'no', 'nos',
+            'e.g', 'i.e', 'cf', 'approx', 'ref', 'refs',
+        })
+        if last_word in _MID_SENTENCE_ABBREVS:
             return True
 
         return False

@@ -35,10 +35,17 @@ class DoclingLayoutExtractor:
         self,
         config: Optional[DoclingConfig] = None,
         cache_dir: Optional[Path] = None,
+        max_caption_chars_per_pt: float = 0.0,
     ) -> None:
         self._config = config or DoclingConfig()
         self._cache_dir = cache_dir
         self._converter = None
+        # When > 0, TEXT elements that match CAPTION_PATTERN but are denser
+        # than this threshold (chars / bbox_height in pts) are NOT reclassified.
+        # Hidden text layers often start with "Figure N." but span a full
+        # paragraph squeezed into a ~10pt bbox — catching them here keeps them
+        # as TEXT so NodeScorer R3 can reject and mask them.
+        self._max_caption_chars_per_pt = max_caption_chars_per_pt
 
     # ── Lazy model loading ────────────────────────────────────────────────────
 
@@ -147,14 +154,35 @@ class DoclingLayoutExtractor:
                 "text":  text.strip() or None,
             })
 
-        # Reclassify TEXT elements that look like captions
+        # Reclassify TEXT elements that look like captions, unless they are
+        # suspiciously dense (likely a hidden text layer that starts with
+        # "Figure N." or "Table N." but contains a full paragraph of content).
         reclassified = 0
+        skipped_dense = 0
         for el in raw_elements:
-            if el["type"] == "TEXT" and CAPTION_PATTERN.match(el.get("text") or ""):
-                el["type"] = "CAPTION"
-                reclassified += 1
-        if reclassified:
-            logger.debug("  Reclassified %d TEXT → CAPTION", reclassified)
+            if el["type"] != "TEXT":
+                continue
+            text = el.get("text") or ""
+            if not CAPTION_PATTERN.match(text):
+                continue
+            if self._max_caption_chars_per_pt > 0:
+                bbox   = el.get("bbox", {})
+                bbox_h = abs(bbox.get("y1", 0.0) - bbox.get("y2", 0.0))
+                if bbox_h > 0 and len(text) / bbox_h > self._max_caption_chars_per_pt:
+                    skipped_dense += 1
+                    logger.debug(
+                        "  Skipped dense TEXT→CAPTION reclassify: "
+                        "%d chars / %.1fpt = %.1f chars/pt  text=%.60r",
+                        len(text), bbox_h, len(text) / bbox_h, text,
+                    )
+                    continue
+            el["type"] = "CAPTION"
+            reclassified += 1
+        if reclassified or skipped_dense:
+            logger.debug(
+                "  Reclassified %d TEXT → CAPTION (%d skipped — too dense)",
+                reclassified, skipped_dense,
+            )
 
         page_dims = {
             no: {"width": p.size.width, "height": p.size.height}

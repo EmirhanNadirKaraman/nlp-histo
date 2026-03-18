@@ -8,6 +8,12 @@ from pipeline.stages.pdf_text_extraction.models.dto import (
     HierarchicalRow,
     CroppedMedia,
 )
+from pipeline.stages.pdf_text_extraction.models.scored_node import (
+    TextNodeEvidence,
+    ScoredNode,
+    HeaderAnchor,
+    TwoPassResult,
+)
 
 __all__ = [
     "BoundingBox",
@@ -17,4 +23,8 @@ __all__ = [
     "LayoutResult",
     "HierarchicalRow",
     "CroppedMedia",
+    "TextNodeEvidence",
+    "ScoredNode",
+    "HeaderAnchor",
+    "TwoPassResult",
 ]

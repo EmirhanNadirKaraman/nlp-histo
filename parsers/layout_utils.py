@@ -462,9 +462,13 @@ def extract_text(
     picture_pages = build_picture_pages(elements)
     ref_list_skip = _reference_list_skip_set(elements)
 
-    hierarchy = {}
-    by_path   = defaultdict(list)
-    n_skipped = 0
+    hierarchy  = {}
+    by_path    = defaultdict(list)
+    # Per-path set of already-seen texts used to drop Docling duplicates and
+    # same-named-section collisions before the stitcher ever sees them.
+    path_seen: dict = defaultdict(set)
+    n_skipped  = 0
+    n_deduped  = 0
 
     for idx, el in enumerate(elements):
         if idx in ref_list_skip:
@@ -493,6 +497,10 @@ def extract_text(
                     continue
             path_parts = [hierarchy[k] for k in sorted(hierarchy) if hierarchy.get(k)]
             path_str   = ' > '.join(path_parts) or 'Root'
+            if text in path_seen[path_str]:
+                n_deduped += 1
+                continue
+            path_seen[path_str].add(text)
             by_path[path_str].append(text)
 
     stitcher = ContextAwareStitcher()
@@ -510,7 +518,7 @@ def extract_text(
             for para in stitcher.reconstruct_paragraphs(inputs):
                 if para.strip():
                     rows.append((path_str, path_list, depth, para))
-    return rows, n_skipped
+    return rows, n_skipped + n_deduped
 
 
 # ── Text saving ───────────────────────────────────────────────────────────────
