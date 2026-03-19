@@ -273,6 +273,15 @@ class TwoPassConfig:
     paragraphs by Pass-2 Docling.
     """
 
+    # ── White-text ghost layer (Rule R-color) ────────────────────────────────
+    max_white_char_fraction: float = 0.5
+    """
+    Fraction of near-white-colored characters in an element's bbox above which
+    the element is classified as a white-text ghost layer and rejected (Rule
+    R-color).  0.5 = more than half the chars must be near-white to trigger.
+    Set to 1.0 to disable.  Near-white means all RGB channels >= 240.
+    """
+
     # ── Dense-text heuristic (Rule R3) ───────────────────────────────────────
     max_chars_per_bbox_pt: float = 15.0
     """

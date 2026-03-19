@@ -85,6 +85,13 @@ _MASKABLE_TYPES = frozenset({"TEXT", "LIST_ITEM", "PARAGRAPH"})
 _FIGURE_TYPES = frozenset({"PICTURE", "FIGURE"})
 _TABLE_TYPES  = frozenset({"TABLE", "RECONSTRUCTED_TABLE"})
 
+# Elements always masked regardless of scoring (structural chrome, not body text).
+# PAGE_HEADER / PAGE_FOOTER: running titles and page numbers — never body text.
+# CAPTION: figure/table captions — already in SKIP_TYPES for the text assembler,
+#   but masking them prevents Pass-2 Docling from reclassifying them as TEXT
+#   once their parent figure/table has been redacted.
+_ALWAYS_MASK = frozenset({"PAGE_HEADER", "PAGE_FOOTER", "CAPTION"})
+
 # MaskingConfig preset: disable built-in table/figure/header masking so the
 # two-pass extractor can apply its own targeted header mask only.
 _NO_BUILTIN_MASK = MaskingConfig(
@@ -432,8 +439,15 @@ class TwoPassTextExtractor:
         # whose bbox is narrow and outside the body column.
         # Rejected nodes are already caught by category 4; we include them
         # here too but _draw_masks merges overlapping rects so there is no cost.
+        #
+        # SECTION_HEADER and TITLE are always excluded: section titles can be
+        # narrow (e.g. "4. Conclusions" = 67 pt wide) yet belong firmly in the
+        # body column.  Masking them would destroy the document's structure.
+        _SIDEBAR_PROTECTED = frozenset({"SECTION_HEADER", "TITLE"})
         for node in scored_nodes:
             el = node.element
+            if el.type in _SIDEBAR_PROTECTED:
+                continue
             if el.page not in body_extents:
                 continue
             ext = body_extents[el.page]
@@ -459,14 +473,21 @@ class TwoPassTextExtractor:
             mask_bboxes.append(node.element.bbox)
             n_nodes += 1
 
-        # ── 5. Figure and table regions from Pass-1 layout ────────────────────
+        # ── 5. Figure, table, and structural-chrome regions ───────────────────
         # Mirrors Step 3 of the standard pipeline: mask figure/table bboxes so
         # that Pass-2 Docling does not return their interior text as body TEXT
         # elements.  Controlled by TwoPassConfig.mask_figures / mask_tables.
-        n_figures = n_tables = 0
+        # PAGE_HEADER, PAGE_FOOTER, and CAPTION are always masked — they are
+        # structural chrome that must never appear in body text, and masking
+        # them here prevents Pass-2 Docling from reclassifying them as TEXT
+        # once surrounding content has been redacted.
+        n_figures = n_tables = n_chrome = 0
         for node in scored_nodes:
             el = node.element
-            if self._cfg.mask_figures and el.type in _FIGURE_TYPES:
+            if el.type in _ALWAYS_MASK:
+                mask_bboxes.append(el.bbox)
+                n_chrome += 1
+            elif self._cfg.mask_figures and el.type in _FIGURE_TYPES:
                 mask_bboxes.append(el.bbox)
                 n_figures += 1
             elif self._cfg.mask_tables and el.type in _TABLE_TYPES:
@@ -475,8 +496,8 @@ class TwoPassTextExtractor:
 
         logger.info(
             "Mask regions: %d header, %d footer, %d sidebar, "
-            "%d rejected node(s), %d figure(s), %d table(s)",
-            n_header, n_footer, n_sidebar, n_nodes, n_figures, n_tables,
+            "%d rejected node(s), %d figure(s), %d table(s), %d chrome",
+            n_header, n_footer, n_sidebar, n_nodes, n_figures, n_tables, n_chrome,
         )
 
         if not mask_bboxes:

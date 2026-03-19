@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from pipeline.stages.pdf_text_extraction.config import TwoPassConfig
 from pipeline.stages.pdf_text_extraction.models.dto import LayoutElement
@@ -50,6 +50,19 @@ _BLOCK_TYPE_TEXT = 0  # block_type == 0 means text (not image)
 
 # Luminance threshold below which a pixel is counted as "ink"
 _INK_LUMINANCE_THRESHOLD = 200  # 0-255
+
+# Per-channel threshold for "near-white" text color (packed RGB int).
+# Characters whose R, G, and B are all >= this value are counted as
+# white-text ghost layer candidates.
+_WHITE_COLOR_THRESHOLD = 240  # per channel, 0-255
+
+
+def _is_near_white(color: int) -> bool:
+    """Return True when the packed-RGB color integer is near-white."""
+    r = (color >> 16) & 0xFF
+    g = (color >> 8) & 0xFF
+    b = color & 0xFF
+    return r >= _WHITE_COLOR_THRESHOLD and g >= _WHITE_COLOR_THRESHOLD and b >= _WHITE_COLOR_THRESHOLD
 
 
 def _rects_overlap(ax0: float, ay0: float, ax1: float, ay1: float,
@@ -77,6 +90,7 @@ class PyMuPDFEvidenceGatherer:
         self._doc: Optional[Any] = None          # fitz.Document
         self._word_cache: Dict[int, list] = {}   # page_no (1-indexed) → list of word tuples
         self._block_cache: Dict[int, list] = {}  # page_no → list of block tuples
+        self._dict_cache: Dict[int, dict] = {}   # page_no → get_text("dict") result
 
     # ── Context manager ───────────────────────────────────────────────────────
 
@@ -93,6 +107,7 @@ class PyMuPDFEvidenceGatherer:
             self._doc = None
         self._word_cache.clear()
         self._block_cache.clear()
+        self._dict_cache.clear()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -133,9 +148,10 @@ class PyMuPDFEvidenceGatherer:
 
         fitz_page = doc[page_no - 1]  # fitz is 0-indexed
 
-        # Gather in two independent passes; errors in one don't abort the other
+        # Gather in independent passes; errors in one don't abort the others
         self._gather_word_overlap(ev, element, fitz_page, fitz_rect, page_no)
         self._gather_pixel_brightness(ev, fitz_page, fitz_rect)
+        self._gather_span_colors(ev, fitz_page, fitz_rect, page_no)
 
         return ev
 
@@ -167,6 +183,11 @@ class PyMuPDFEvidenceGatherer:
         if page_no not in self._block_cache:
             self._block_cache[page_no] = fitz_page.get_text("blocks")
         return self._block_cache[page_no]
+
+    def _dict_for_page(self, fitz_page: Any, page_no: int) -> dict:
+        if page_no not in self._dict_cache:
+            self._dict_cache[page_no] = fitz_page.get_text("dict")
+        return self._dict_cache[page_no]
 
     def _gather_word_overlap(
         self,
@@ -221,6 +242,63 @@ class PyMuPDFEvidenceGatherer:
             logger.debug(
                 "Word overlap check failed for element on page %d: %s",
                 element.page, exc,
+            )
+
+    # ── Internal: span color (white-text ghost layer) ─────────────────────────
+
+    def _gather_span_colors(
+        self,
+        ev: TextNodeEvidence,
+        fitz_page: Any,
+        fitz_rect: Any,
+        page_no: int,
+    ) -> None:
+        """
+        Fill ``invisible_char_fraction`` by inspecting text colors in overlapping
+        spans via ``page.get_text("dict")``.
+
+        Characters whose span color is near-white (all RGB channels >= 240) are
+        counted as invisible.  This catches "white text on white background"
+        ghost layers — a common publisher technique for embedding accessible /
+        searchable text that is not meant to be visible.
+
+        Note: rendering-mode-3 (PDF Tr=3) text is NOT detectable through
+        PyMuPDF's ``get_text`` API regardless of color; it requires content-stream
+        parsing.  This check covers only the color-based variant.
+        """
+        try:
+            page_dict = self._dict_for_page(fitz_page, page_no)
+            fx0, fy0, fx1, fy1 = fitz_rect.x0, fitz_rect.y0, fitz_rect.x1, fitz_rect.y1
+
+            total_chars = 0
+            white_chars = 0
+
+            for block in page_dict.get("blocks", []):
+                if block.get("type") != _BLOCK_TYPE_TEXT:
+                    continue
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        sb = span.get("bbox")
+                        if sb is None:
+                            continue
+                        if not _rects_overlap(fx0, fy0, fx1, fy1, sb[0], sb[1], sb[2], sb[3]):
+                            continue
+                        span_text = span.get("text", "")
+                        n = len(span_text)
+                        if n == 0:
+                            continue
+                        total_chars += n
+                        color = span.get("color", -1)
+                        if color >= 0 and _is_near_white(color):
+                            white_chars += n
+
+            if total_chars > 0:
+                ev.invisible_char_fraction = white_chars / total_chars
+
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Span color check failed for element on page %d: %s",
+                page_no, exc,
             )
 
     # ── Internal: pixel brightness ────────────────────────────────────────────

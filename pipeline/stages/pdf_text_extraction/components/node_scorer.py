@@ -16,21 +16,26 @@ CAPTION / FOOTNOTE          always      KEEP (label context)
 LIST                        always      KEEP (outer container; items scored)
 
 TEXT / LIST_ITEM / PARAGRAPH:
-  R0  text is empty after strip           → REJECT "empty text"
-  R1  visually_blank=True (pixel check)   → REJECT "invisible text layer (blank pixels)"
-  R2  fitz_word_count=0 AND char_coverage
-      below threshold AND len(text)≥N
-      AND render_skipped=True             → REJECT "no fitz words (no pixel data)"
-      (R2 is a fallback when rendering is unavailable; prefer R1 when pixel
-       data exists because fitz word lists also include invisible-layer words)
-  R3  len(text) / bbox_height >
-      max_chars_per_bbox_pt (when > 0)    → REJECT "hidden text layer (bbox too short
-                                            for text length)"
-      Applied before pixel checks so it catches layers where the pixel crop
-      happens to contain nearby dark pixels (e.g. the element sits inside a
-      figure region).
-  R4  in_header_zone AND (R1 OR R2 OR R3) → rejection_reason amended with location hint
-  Otherwise                               → KEEP
+  R0      text is empty after strip         → REJECT "empty text"
+  R-color invisible_char_fraction >
+          max_white_char_fraction           → REJECT "white-text ghost layer"
+          Catches white-on-white text (common publisher accessibility trick).
+          Applied early because color is a direct signal — more reliable than
+          pixel brightness when ghost overlaps real content.
+  R1      visually_blank=True (pixel check) → REJECT "invisible text layer (blank pixels)"
+  R2      fitz_word_count=0 AND char_coverage
+          below threshold AND len(text)≥N
+          AND render_skipped=True           → REJECT "no fitz words (no pixel data)"
+          (R2 is a fallback when rendering is unavailable; prefer R1 when pixel
+           data exists because fitz word lists also include invisible-layer words)
+  R3      len(text) / bbox_height >
+          max_chars_per_bbox_pt (when > 0) → REJECT "hidden text layer (bbox too short
+                                              for text length)"
+          Applied before pixel checks so it catches layers where the pixel crop
+          happens to contain nearby dark pixels (e.g. the element sits inside a
+          figure region).
+  R4      in_header_zone AND (R1 OR R2 OR R3) → rejection_reason amended with location hint
+  Otherwise                                → KEEP
 
 Why R2 is gated on render_skipped
 ----------------------------------
@@ -164,6 +169,30 @@ class NodeScorer:
 
         in_header_zone = self._in_header_zone(element)
         location_hint  = " in header zone" if in_header_zone else ""
+
+        # R-color: white-text ghost layer — direct color signal.
+        #   invisible_char_fraction > 0 only when _gather_span_colors found white
+        #   spans; it stays at 0.0 when no spans were found or the check failed
+        #   (safe default: do not reject).
+        if (
+            self._cfg.max_white_char_fraction < 1.0
+            and evidence.invisible_char_fraction > self._cfg.max_white_char_fraction
+        ):
+            reason = (
+                f"white-text ghost layer — "
+                f"{evidence.invisible_char_fraction:.0%} of characters are near-white"
+                f"{location_hint}"
+            )
+            logger.debug(
+                "  REJECT[R-color] page=%d type=%s text=%.50r  "
+                "white_frac=%.3f",
+                element.page, element.type, text,
+                evidence.invisible_char_fraction,
+            )
+            return ScoredNode(
+                element=element, evidence=evidence,
+                keep=False, rejection_reason=reason,
+            )
 
         # R3: dense-text heuristic — hidden text layers pack many characters
         #     into a suspiciously short bbox (e.g. 180 chars in 10pt height).

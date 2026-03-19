@@ -538,10 +538,10 @@ def main() -> None:
     cfg.prepare()
 
     # ── Single document ────────────────────────────────────────────────────────
-    PipelineRunner(cfg).run_document(
-        pdf_path=Path("files/organized_pdfs/PMC10047158_dermatopathology-10-00017.pdf"),
-        pmcid="PMC10047158",
-    )
+    # PipelineRunner(cfg).run_document(
+    #     pdf_path=Path("files/organized_pdfs/PMC10047158_dermatopathology-10-00017.pdf"),
+    #     pmcid="PMC10047158",
+    # )
 
     # PipelineRunner(cfg).run_document(
     #     pdf_path=Path("files/organized_pdfs/PMC10047213_dermatopathology-10-00018.pdf"),
@@ -552,11 +552,11 @@ def main() -> None:
     # PipelineRunner(cfg).run_batch(pdf_dir=Path("files/organized_pdfs"), max_docs=5)
 
     # ── Parallel batch (use pipeline/stages/pdf_text_extraction/batch.py instead) ────────
-    # from pipeline.stages.pdf_text_extraction.batch import ParallelBatchRunner
-    # ParallelBatchRunner(cfg, max_workers=4).run(
-    #     pdf_dir=Path("files/organized_pdfs"),
-    #     max_docs=5,
-    # )
+    from pipeline.stages.pdf_text_extraction.batch import ParallelBatchRunner
+    ParallelBatchRunner(cfg, max_workers=4).run(
+        pdf_dir=Path("files/organized_pdfs"),
+        max_docs=5,
+    )
 
 
 if __name__ == "__main__":

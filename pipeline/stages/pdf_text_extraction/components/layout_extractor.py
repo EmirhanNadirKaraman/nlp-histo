@@ -13,9 +13,22 @@ from typing import Optional
 
 from pipeline.stages.pdf_text_extraction.config import DoclingConfig
 from pipeline.stages.pdf_text_extraction.models.dto import BoundingBox, LayoutElement, LayoutResult
-from parsers.layout_utils import CAPTION_PATTERN
+from parsers.layout_utils import CAPTION_PATTERN, _deduplicate_caption
 
 logger = logging.getLogger(__name__)
+
+
+def _deduplicate_text(text: str) -> str:
+    """Remove exact repetitions produced by ghost text layers.
+
+    Delegates to ``_deduplicate_caption`` from layout_utils, which handles
+    2–5× repetitions with or without a space separator (character-level).
+    Logs when a change is made.
+    """
+    deduped = _deduplicate_caption(text)
+    if deduped != text:
+        logger.debug("Deduplicated repeated text: %.60r → %.60r", text, deduped)
+    return deduped
 
 
 class DoclingLayoutExtractor:
@@ -145,13 +158,14 @@ class DoclingLayoutExtractor:
                 text = element.text or ""
             elif hasattr(element, "caption") and element.caption:
                 text = element.caption.text or ""
+            text = _deduplicate_text(text.strip())
             raw_elements.append({
                 "type":  label,
                 "page":  prov.page_no,
                 "level": level,
                 "bbox":  {"x1": bbox_raw.l, "y1": bbox_raw.t,
                           "x2": bbox_raw.r, "y2": bbox_raw.b},
-                "text":  text.strip() or None,
+                "text":  text or None,
             })
 
         # Reclassify TEXT elements that look like captions, unless they are

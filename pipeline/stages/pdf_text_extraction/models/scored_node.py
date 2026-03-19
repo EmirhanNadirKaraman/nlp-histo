@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from pipeline.stages.pdf_text_extraction.models.dto import BoundingBox, LayoutElement
+from pipeline.stages.pdf_text_extraction.models.dto import LayoutElement
 
 
 # ── Evidence ──────────────────────────────────────────────────────────────────
@@ -74,6 +74,16 @@ class TextNodeEvidence:
     Composite flag: True when pixel_brightness_mean exceeds
     ``blank_brightness_threshold`` AND dark_pixel_fraction is below
     ``blank_dark_pixel_max_fraction``.  Computed by the evidence gatherer.
+    """
+
+    # ── Span-color check (white-text ghost layer) ─────────────────────────────
+    invisible_char_fraction: float = 0.0
+    """
+    Fraction of characters in overlapping spans whose text color is near-white
+    (all RGB channels >= 240), indicating a white-text ghost / accessibility
+    layer.  0.0 = all chars have visible (dark) color.  1.0 = all chars are
+    white / invisible.  Stays at 0.0 when the check could not run (no spans
+    found in bbox, or extraction failed).
     """
 
     # ── Metadata ──────────────────────────────────────────────────────────────
