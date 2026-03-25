@@ -12,7 +12,7 @@ PolicyEvaluationStore  — static JSONL I/O for PolicyEvaluationResult, same pat
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 

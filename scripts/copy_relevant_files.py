@@ -1,11 +1,6 @@
 import os
-import sys
 import shutil
-from pathlib import Path
 import argparse
-
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from database import get_db_connection, Entity
 from sqlalchemy.dialects.postgresql import array 

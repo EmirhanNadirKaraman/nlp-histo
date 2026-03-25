@@ -32,19 +32,17 @@ import argparse
 import csv
 import json
 import math
-import sys
 from collections import Counter
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parents[1] / ".env")
-sys.path.insert(0, str(Path(__file__).parents[1]))
-
-from pipeline.stages.summarization.routing.routing_dataset import (  # noqa: E402
+from pipeline.stages.summarization.routing.routing_dataset import (
     RoutingDataset,
     RoutingRecord,
 )
+
+load_dotenv()
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────

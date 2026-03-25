@@ -47,14 +47,12 @@ If no policy satisfies both constraints:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parents[1] / ".env")
-sys.path.insert(0, str(Path(__file__).parents[1]))
+load_dotenv()
 
 from pipeline.stages.summarization.routing.policy import (  # noqa: E402
     PolicyEvaluationResult,
@@ -203,7 +201,7 @@ def select_with_pulp(
         selected_id = max(x2, key=lambda pid: pulp.value(x2[pid]) or 0)
         selected = next(r for r in eligible if r.policy_id == selected_id)
         infeasibility_reason += (
-            f"  Relaxed min_recall; selected under false_accept_rate constraint only."
+            "  Relaxed min_recall; selected under false_accept_rate constraint only."
         )
         return selected, False, infeasibility_reason, None
 
@@ -274,7 +272,7 @@ def main() -> None:
         **winner_fields,
     )
 
-    print(f"\n=== Result ===")
+    print("\n=== Result ===")
     print(f"  selected          : {result.selected_policy_id}")
     print(f"  feasible          : {result.feasible}")
     print(f"  scorer            : {result.selected_scorer_name}")

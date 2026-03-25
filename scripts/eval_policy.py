@@ -37,13 +37,11 @@ from __future__ import annotations
 
 import argparse
 import math
-import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parents[1] / ".env")
-sys.path.insert(0, str(Path(__file__).parents[1]))
+load_dotenv()
 
 from pipeline.stages.summarization.routing.policy import (  # noqa: E402
     PolicyEvaluationResult,
@@ -165,7 +163,7 @@ def main() -> None:
     labeled = [r for r in ag_records if r.keep_ok is not None]
     acceptable = [r for r in labeled if r.keep_ok is True]
 
-    print(f"\n=== Dataset ===")
+    print("\n=== Dataset ===")
     print(f"  total records   : {len(all_records)}")
     print(f"  agreement_gate  : {len(ag_records)}")
     print(f"  labeled         : {len(labeled)}")

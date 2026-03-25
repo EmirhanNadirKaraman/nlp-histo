@@ -4,7 +4,6 @@ Tests for RoutingRecord / RoutingDataset serialization and MapStage collector ho
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,7 +11,6 @@ import pytest
 from pipeline.stages.summarization.agreement.checker import AgreementChecker
 from pipeline.stages.summarization.interfaces.scoring import ChunkDecision, ScoreBundle
 from pipeline.stages.summarization.models import AuditMetadata, AuditableSummary, Finding
-from pipeline.stages.summarization.routing.models import GateOrigin, ReasonCode
 from pipeline.stages.summarization.routing.routing_dataset import (
     RoutingDataset,
     RoutingRecord,
@@ -145,7 +143,7 @@ class TestRoutingDataset:
         ds.append(_make_record(chunk_id="C1"))
         ds.append(_make_record(chunk_id="C2"))
 
-        lines = [l for l in path.read_text().splitlines() if l.strip()]
+        lines = [line for line in path.read_text().splitlines() if line.strip()]
         assert len(lines) == 2
         # Each line is valid JSON
         for line in lines:
@@ -224,7 +222,7 @@ class TestMapStageRoutingCollector:
         stage = self._make_map_stage(routing_collector=ds, agreement_decision=ChunkDecision.KEEP)
 
         chunk = [{"pmcid": PMCID, "text_element_id": 1, "sentence": "CD31 was positive."}]
-        result = stage._cascade(chunk, PMCID, "C1")
+        stage._cascade(chunk, PMCID, "C1")
 
         records = RoutingDataset.load(path)
         assert len(records) == 1

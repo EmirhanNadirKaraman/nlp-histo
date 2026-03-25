@@ -30,13 +30,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parents[1] / ".env")
-sys.path.insert(0, str(Path(__file__).parents[1]))
+load_dotenv()
 
 from pipeline.stages.summarization.routing.routing_dataset import (  # noqa: E402
     RoutingDataset,
@@ -271,7 +269,7 @@ def main() -> None:
     records_a = _load_indexed(args.policy_a)
     records_b = _load_indexed(args.policy_b)
 
-    print(f"\n=== Input ===")
+    print("\n=== Input ===")
     print(f"  {args.id_a}  : {len(records_a)} records  ({args.policy_a})")
     print(f"  {args.id_b}  : {len(records_b)} records  ({args.policy_b})")
 

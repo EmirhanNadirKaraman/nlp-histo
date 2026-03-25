@@ -23,9 +23,6 @@ import sys
 from pathlib import Path
 from typing import List
 
-# ── Path setup ────────────────────────────────────────────────────────────────
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from pipeline.stages.pdf_text_extraction.components.two_pass_extractor import (
     TwoPassTextExtractor,
 )
@@ -229,7 +226,6 @@ def inline_example() -> None:
         from scripts.two_pass_extract import inline_example
         inline_example()
     """
-    from dataclasses import replace
 
     pdf = Path("files/organized_pdfs/PMC1234567.pdf")
     if not pdf.exists():
@@ -260,7 +256,7 @@ def inline_example() -> None:
 
     print(f"\nBody anchors found on pages: {sorted(result.header_anchors)}")
 
-    print(f"\nPass-2 (masked re-extraction):")
+    print("\nPass-2 (masked re-extraction):")
     print(f"  text elements  : {len(result.text_elements)}")
     print(f"  figure elements: {len(result.figure_elements)}")
     print(f"  table elements : {len(result.table_elements)}")

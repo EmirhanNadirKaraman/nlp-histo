@@ -29,9 +29,6 @@ from datetime import datetime
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,

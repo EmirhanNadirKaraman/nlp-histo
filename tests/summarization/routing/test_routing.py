@@ -12,9 +12,8 @@ Covered cases:
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 
 from pipeline.stages.summarization.agreement.checker import AgreementChecker
 from pipeline.stages.summarization.interfaces.scoring import ChunkDecision, ScoreBundle

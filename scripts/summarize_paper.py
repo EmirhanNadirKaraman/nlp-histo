@@ -13,9 +13,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
-load_dotenv(Path(__file__).parents[1] / ".env")
-
-sys.path.insert(0, str(Path(__file__).parents[1]))
+load_dotenv()
 
 from pipeline.stages.summarization import SummarizationRunner  # noqa: E402
 

@@ -28,8 +28,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from pipeline.stages.pdf_text_extraction.components.layout_extractor import DoclingLayoutExtractor
 from pipeline.stages.pdf_text_extraction.components.text_assembler import HierarchicalTextAssembler
 from pipeline.stages.pdf_text_extraction.config import DoclingConfig, OcrEngine, TextAssemblyConfig

@@ -17,6 +17,13 @@ from pathlib import Path
 
 import pytest
 
+from pipeline.stages.summarization.routing.policy import (
+    PolicyEvaluationResult,
+    PolicyEvaluationStore,
+    PolicySelectionResult,
+    RoutingPolicySpec,
+)
+
 _SCRIPTS_DIR = Path(__file__).parents[3] / "scripts"
 
 
@@ -29,13 +36,6 @@ def _import_select_with_pulp():
     sys.modules.setdefault("select_policy", mod)
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
     return mod.select_with_pulp
-
-from pipeline.stages.summarization.routing.policy import (
-    PolicyEvaluationResult,
-    PolicyEvaluationStore,
-    PolicySelectionResult,
-    RoutingPolicySpec,
-)
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────────────
@@ -216,7 +216,7 @@ class TestPolicyEvaluationStore:
     def test_one_json_per_line(self, tmp_path):
         path = tmp_path / "results.jsonl"
         PolicyEvaluationStore.save([_make_result(policy_id=f"p{i}") for i in range(3)], path)
-        lines = [l for l in path.read_text().splitlines() if l.strip()]
+        lines = [line for line in path.read_text().splitlines() if line.strip()]
         assert len(lines) == 3
         for line in lines:
             obj = json.loads(line)

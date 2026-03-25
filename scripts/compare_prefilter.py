@@ -22,9 +22,6 @@ import argparse
 import sys
 from pathlib import Path
 
-# Allow running from the repo root
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from pipeline.stages.pdf_text_extraction.components.layout_extractor import DoclingLayoutExtractor
 from pipeline.stages.pdf_text_extraction.components.text_assembler import HierarchicalTextAssembler
 from pipeline.stages.pdf_text_extraction.config import TextAssemblyConfig

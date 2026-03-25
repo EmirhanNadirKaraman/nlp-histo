@@ -15,14 +15,11 @@ Usage:
     python scripts/combined_pipeline.py --pdf-dir files/organized_pdfs --workers 4
 """
 
-import sys
 import json
 import logging
 from pathlib import Path
 from collections import defaultdict, Counter
 from datetime import datetime
-
-sys.path.insert(0, str(Path(__file__).parent.parent))  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)

@@ -12,8 +12,6 @@ import logging
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parents[1]))
-
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
@@ -32,8 +30,7 @@ for noisy in ("httpx", "openai", "httpcore", "langchain", "urllib3"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
 # ── load input from DB ─────────────────────────────────────────────────────────
-REPO_ROOT = Path(__file__).parents[1]
-load_dotenv(REPO_ROOT / ".env")
+load_dotenv()
 
 file_data = SummarizationRunner.load_paper_from_db(PMCID)
 

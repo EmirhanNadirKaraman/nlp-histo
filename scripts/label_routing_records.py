@@ -31,18 +31,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
+from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
-load_dotenv(Path(__file__).parents[1] / ".env")
-sys.path.insert(0, str(Path(__file__).parents[1]))
-
-from langchain_core.prompts import ChatPromptTemplate  # noqa: E402
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -313,9 +310,9 @@ def main() -> None:
 
     # Load input records
     raw_lines = [
-        l for l in Path(args.records).read_text(encoding="utf-8").splitlines() if l.strip()
+        line for line in Path(args.records).read_text(encoding="utf-8").splitlines() if line.strip()
     ]
-    all_records = [json.loads(l) for l in raw_lines]
+    all_records = [json.loads(line) for line in raw_lines]
 
     # Filter to records that need processing
     to_process: list[dict] = []
@@ -334,7 +331,7 @@ def main() -> None:
     for rec in to_process:
         type_counts[_record_type(rec)] += 1
 
-    print(f"\n=== Input ===")
+    print("\n=== Input ===")
     print(f"  total          : {len(all_records)}")
     print(f"  skipped        : {n_skipped}")
     print(f"  to label       : {len(to_process)}")
@@ -388,7 +385,7 @@ def main() -> None:
                 n_failed += 1
 
     if not args.dry_run:
-        print(f"\n=== Done ===")
+        print("\n=== Done ===")
         print(f"  labeled  : {n_ok}")
         print(f"  failed   : {n_failed}")
         print(f"  output   : {out_path}")
