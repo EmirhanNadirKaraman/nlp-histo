@@ -32,22 +32,22 @@ class RuleStage:
     def extract(
         self,
         summary: ConsolidatedSummary,
-        concept_name: str,
+        pmcid: str,
         cache: Optional[PipelineCache] = None,
     ) -> ExtractedRules:
         if cache:
-            hit = cache.get_rule(summary, concept_name)
+            hit = cache.get_rule(summary, pmcid)
             if hit:
                 return hit
 
         result: ExtractedRules = self._chain.invoke(
             {
-                "concept_name": concept_name,
+                "pmcid": pmcid,
                 "summary": json.dumps(summary.model_dump(exclude_none=True), separators=(",", ":")),
             }
         )
 
         if cache:
-            cache.set_rule(summary, concept_name, result)
+            cache.set_rule(summary, pmcid, result)
 
         return result

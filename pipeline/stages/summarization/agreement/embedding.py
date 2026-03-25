@@ -5,7 +5,7 @@ from itertools import combinations
 
 import numpy as np
 
-from pipeline.stages.summarization.interfaces.scoring import ScoreBundle
+from pipeline.stages.summarization.interfaces.scoring import AgreementContext, ScoreBundle
 from pipeline.stages.summarization.models import AuditableSummary
 from .providers import EmbedFn, OpenAIEmbedder
 
@@ -32,6 +32,7 @@ class EmbeddingScorer:
         self,
         outputs: list[AuditableSummary],
         source_text: str | None = None,  # noqa: ARG002
+        context: AgreementContext | None = None,  # noqa: ARG002
     ) -> ScoreBundle:
         claim_lists = [_claims(o) for o in outputs]
         scores = [_align(self._embed, a, b) for a, b in combinations(claim_lists, 2)]

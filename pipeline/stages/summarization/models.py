@@ -72,7 +72,7 @@ class ReduceAuditTrail(BaseModel):
 
 class ConsolidatedSummary(BaseModel):
     """Output of the REDUCE stage."""
-    concept: str
+    pmcid: str
     sections: SectionsContainer
     narrative_summary: str
     audit_trail: ReduceAuditTrail

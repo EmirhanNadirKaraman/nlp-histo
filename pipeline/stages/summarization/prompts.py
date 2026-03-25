@@ -56,7 +56,7 @@ Return your analysis in this EXACT structure:
 }}"""
 
 _MAP_USER = """<Context>
-Concept: {concept_name}
+Paper (PMCID): {pmcid}
 Chunk ID: {chunk_id}
 Source Sentences (each tagged with [SentenceID|PMCID|TextElementID]):
 {text}
@@ -82,7 +82,7 @@ CRITICAL AUDIT REQUIREMENTS:
 <OutputFormat>
 ```json
 {{
-  "concept": "{concept_name}",
+  "pmcid": "{pmcid}",
   "sections": {{
     "clinical_significance": {{
       "findings": [
@@ -116,7 +116,7 @@ CRITICAL AUDIT REQUIREMENTS:
 Master Auditable Summary:"""
 
 _REDUCE_USER = """<Context>
-Concept: {concept_name}
+Paper (PMCID): {pmcid}
 Total Chunks: {num_chunks}
 
 Chunk Analyses (JSON format with provenance):
@@ -172,7 +172,7 @@ AUDIT REQUIREMENTS:
 Extracted Rules with Provenance:"""
 
 _RULE_USER = """<Input>
-Concept: {concept_name}
+Paper (PMCID): {pmcid}
 Auditable Summary (JSON with full provenance):
 {summary}
 </Input>"""

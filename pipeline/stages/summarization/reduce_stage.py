@@ -47,7 +47,7 @@ class ReduceStage:
     def reduce(
         self,
         summaries: list[Union[AuditableSummary, ConsolidatedSummary]],
-        concept_name: str,
+        pmcid: str,
         cache: Optional[PipelineCache] = None,
     ) -> ConsolidatedSummary:
         """
@@ -69,7 +69,7 @@ class ReduceStage:
 
             for group in groups:
                 if cache:
-                    hit = cache.get_reduce(group, concept_name)
+                    hit = cache.get_reduce(group, pmcid)
                     if hit:
                         placeholders.append(hit)
                         continue
@@ -80,7 +80,7 @@ class ReduceStage:
             if uncached_groups:
                 inputs = [
                     {
-                        "concept_name": concept_name,
+                        "pmcid": pmcid,
                         "num_chunks": len(g),
                         "summaries": _minify(g),
                     }
@@ -90,7 +90,7 @@ class ReduceStage:
                 for i, (group, result) in enumerate(zip(uncached_groups, new_results)):
                     placeholders[uncached_indices[i]] = result
                     if cache:
-                        cache.set_reduce(group, concept_name, result)
+                        cache.set_reduce(group, pmcid, result)
 
             current = placeholders  # type: ignore[assignment]
 
@@ -98,7 +98,7 @@ class ReduceStage:
         # if the input had only one chunk.
         final = current[0]
         if isinstance(final, AuditableSummary):
-            final = self._reduce_single(final, concept_name, cache)
+            final = self._reduce_single(final, pmcid, cache)
         return final
 
     # ── Internals ──────────────────────────────────────────────────────────────
@@ -106,21 +106,21 @@ class ReduceStage:
     def _reduce_single(
         self,
         summary: AuditableSummary,
-        concept_name: str,
+        pmcid: str,
         cache: Optional[PipelineCache],
     ) -> ConsolidatedSummary:
         group = [summary]
         if cache:
-            hit = cache.get_reduce(group, concept_name)
+            hit = cache.get_reduce(group, pmcid)
             if hit:
                 return hit
         result: ConsolidatedSummary = self._chain.invoke(
             {
-                "concept_name": concept_name,
+                "pmcid": pmcid,
                 "num_chunks": 1,
                 "summaries": _minify(group),
             }
         )
         if cache:
-            cache.set_reduce(group, concept_name, result)
+            cache.set_reduce(group, pmcid, result)
         return result

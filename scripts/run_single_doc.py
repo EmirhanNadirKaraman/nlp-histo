@@ -1,9 +1,9 @@
 """
-Quick smoke-test for SummarizationRunner on a single concept file.
+Quick smoke-test for SummarizationRunner on a single paper from the database.
 
 Usage:
     cd /Users/emir/Documents/GitHub/nlp-histo
-    python -m pipeline.stages.summarization.test_single_doc
+    python scripts/run_single_doc.py
 """
 from __future__ import annotations
 
@@ -12,20 +12,14 @@ import logging
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parents[1]))
+
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
 from pipeline.stages.summarization import SummarizationRunner
 
-# ── paths ──────────────────────────────────────────────────────────────────────
-REPO_ROOT = Path(__file__).parents[3]
-INPUT_FILE = (
-    REPO_ROOT
-    / "langchain-summarization"
-    / "test_results_50_docs"
-    / "relevant_texts"
-    / "C0000737_Abdominal_Pain.json"
-)
+PMCID = "PMC10047158"
 
 # ── logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -37,25 +31,13 @@ logging.basicConfig(
 for noisy in ("httpx", "openai", "httpcore", "langchain", "urllib3"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
-# ── load input ─────────────────────────────────────────────────────────────────
+# ── load input from DB ─────────────────────────────────────────────────────────
+REPO_ROOT = Path(__file__).parents[1]
 load_dotenv(REPO_ROOT / ".env")
 
-raw = json.loads(INPUT_FILE.read_text(encoding="utf-8"))
+file_data = SummarizationRunner.load_paper_from_db(PMCID)
 
-file_data = {
-    "cui": raw["umls_cui"],
-    "concept_name": raw["canonical_name"],
-    "sentences_with_provenance": [
-        {
-            "pmcid": s.get("pmcid"),
-            "text_element_id": s.get("text_element_id"),
-            "sentence": s.get("sentence"),
-        }
-        for s in raw.get("sentences", [])
-    ],
-}
-
-print(f"\nConcept : {file_data['concept_name']}  ({file_data['cui']})")
+print(f"\nPaper    : {file_data['pmcid']}")
 print(f"Sentences: {len(file_data['sentences_with_provenance'])}\n")
 
 # ── output dirs ────────────────────────────────────────────────────────────────
@@ -86,22 +68,22 @@ runner = SummarizationRunner(
 result = runner.process(file_data)
 
 # ── save per-stage outputs ─────────────────────────────────────────────────────
-cui = file_data["cui"]
+pmcid = file_data["pmcid"]
 if result["status"] == "success":
-    (MAP_DIR / f"{cui}.json").write_text(
+    (MAP_DIR / f"{pmcid}.json").write_text(
         json.dumps(result["audit_trail"]["map_chunks"], indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    (REDUCE_DIR / f"{cui}.json").write_text(
+    (REDUCE_DIR / f"{pmcid}.json").write_text(
         json.dumps(result["audit_trail"]["master_summary"], indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    (RULES_DIR / f"{cui}.json").write_text(
+    (RULES_DIR / f"{pmcid}.json").write_text(
         json.dumps(result["audit_trail"]["rules_provenance"], indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     if result["contradiction_report"]:
-        (CONTRADICTION_DIR / f"{cui}.json").write_text(
+        (CONTRADICTION_DIR / f"{pmcid}.json").write_text(
             json.dumps(result["contradiction_report"], indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
@@ -110,6 +92,7 @@ if result["status"] == "success":
 print("\n" + "=" * 70)
 if result["status"] == "success":
     print("STATUS : success")
+    print(f"PAPER  : {result['pmcid']}")
     print(f"SUMMARY:\n{result['summary']}\n")
     print(f"RULES  : {len(result['rules'])}")
     for r in result["rules"]:

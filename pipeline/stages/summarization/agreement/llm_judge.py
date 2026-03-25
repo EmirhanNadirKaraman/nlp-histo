@@ -7,7 +7,7 @@ import logging
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
-from pipeline.stages.summarization.interfaces.scoring import ScoreBundle
+from pipeline.stages.summarization.interfaces.scoring import AgreementContext, ScoreBundle
 from pipeline.stages.summarization.models import AuditableSummary
 
 logger = logging.getLogger(__name__)
@@ -73,6 +73,7 @@ class LLMJudgeScorer:
         self,
         outputs: list[AuditableSummary],
         source_text: str | None = None,
+        context: AgreementContext | None = None,  # noqa: ARG002
     ) -> ScoreBundle:
         result: _JudgeScore = self._chain.invoke({
             "source_text": source_text or "(not provided)",

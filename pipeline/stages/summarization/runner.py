@@ -14,10 +14,16 @@ runner = SummarizationRunner(
     ],
     escalation_llm=ChatOpenAI(model="gpt-4o", temperature=0),
     theta=0.7,
-    output_dir=Path("langchain-summarization/summarization_results"),
+    output_dir=Path("out/summaries"),
 )
 
-result = runner.process(file_data)   # file_data = dict from load_json_files_with_provenance
+# Single paper
+file_data = SummarizationRunner.load_paper_from_db("PMC10047158")
+result = runner.process(file_data)
+
+# Batch
+pmcids = ["PMC10047158", "PMC10047213", "PMC10047408"]
+results = runner.process_batch([SummarizationRunner.load_paper_from_db(p) for p in pmcids])
 """
 from __future__ import annotations
 
@@ -109,32 +115,30 @@ class SummarizationRunner:
 
     def process(self, file_data: dict) -> dict:
         """
-        Run the full pipeline for one concept file.
+        Run the full pipeline for one paper.
 
-        ``file_data`` must have the shape produced by
-        ``load_json_files_with_provenance`` in the notebook:
-        keys: cui, concept_name, sentences_with_provenance (list of dicts).
+        ``file_data`` must have the shape produced by ``load_paper_from_db``:
+        keys: pmcid, sentences_with_provenance (list of dicts).
 
         Returns a result dict with keys:
-            status, cui, concept_name, summary, rules, audit_trail
+            status, pmcid, summary, rules, audit_trail
         or on failure:
-            status='error', cui, concept_name, error
+            status='error', pmcid, error
         """
-        cui = file_data["cui"]
-        concept_name = file_data["concept_name"]
+        pmcid = file_data["pmcid"]
 
         # Skip if already fully processed
-        existing = self._load_result(cui)
+        existing = self._load_result(pmcid)
         if existing is not None:
-            logger.info("[%s] %s — skipped (cached result on disk)", cui, concept_name)
+            logger.info("[%s] skipped (cached result on disk)", pmcid)
             return existing
 
         try:
             sentences = file_data["sentences_with_provenance"]
 
             # 1. MAP (ABC cascade per chunk)
-            logger.info("[%s] MAP — %d sentences", cui, len(sentences))
-            chunk_summaries = self._map.process(sentences, concept_name, cache=self._cache)
+            logger.info("[%s] MAP — %d sentences", pmcid, len(sentences))
+            chunk_summaries = self._map.process(sentences, pmcid, cache=self._cache)
 
             # 1a. Grounding filter — drop ungrounded findings before REDUCE
             if self._grounding is not None:
@@ -143,36 +147,35 @@ class SummarizationRunner:
                 ]
                 logger.info(
                     "[%s] Grounding (MAP): %d findings remaining across %d chunks",
-                    cui,
+                    pmcid,
                     sum(len(cs.findings) for cs in chunk_summaries),
                     len(chunk_summaries),
                 )
 
             # 2. REDUCE (recursive tree collapse)
-            logger.info("[%s] REDUCE — %d chunks", cui, len(chunk_summaries))
+            logger.info("[%s] REDUCE — %d chunks", pmcid, len(chunk_summaries))
             master: ConsolidatedSummary = self._reduce.reduce(
-                chunk_summaries, concept_name, cache=self._cache
+                chunk_summaries, pmcid, cache=self._cache
             )
 
             # 3. RULE EXTRACTION
-            logger.info("[%s] RULES", cui)
-            rules: ExtractedRules = self._rules.extract(master, concept_name, cache=self._cache)
+            logger.info("[%s] RULES", pmcid)
+            rules: ExtractedRules = self._rules.extract(master, pmcid, cache=self._cache)
 
             # 3a. Grounding filter — drop ungrounded rules
             if self._grounding is not None:
                 rules = self._grounding.filter_rules(rules)
-                logger.info("[%s] Grounding (RULES): %d rules remaining", cui, len(rules.rules))
+                logger.info("[%s] Grounding (RULES): %d rules remaining", pmcid, len(rules.rules))
 
             # 4. Contradiction detection
             contradiction_report: ContradictionReport | None = None
             if self._contradiction is not None:
-                logger.info("[%s] CONTRADICTION DETECTION", cui)
+                logger.info("[%s] CONTRADICTION DETECTION", pmcid)
                 contradiction_report = self._contradiction.detect(rules)
 
             result = {
                 "status": "success",
-                "cui": cui,
-                "concept_name": concept_name,
+                "pmcid": pmcid,
                 "summary": master.narrative_summary,
                 "rules": [r.model_dump() for r in rules.rules],
                 "contradiction_report": contradiction_report.model_dump() if contradiction_report else None,
@@ -187,17 +190,17 @@ class SummarizationRunner:
             return result
 
         except Exception as exc:
-            logger.exception("[%s] Pipeline failed: %s", cui, exc)
-            return {"status": "error", "cui": cui, "concept_name": concept_name, "error": str(exc)}
+            logger.exception("[%s] Pipeline failed: %s", pmcid, exc)
+            return {"status": "error", "pmcid": pmcid, "error": str(exc)}
 
     def process_batch(self, file_data_list: list[dict]) -> list[dict]:
         """
-        Run the pipeline over a list of concept files and return all results.
+        Run the pipeline over a list of papers and return all results.
         Logs a summary at the end.
         """
         results = []
         for i, fd in enumerate(file_data_list, 1):
-            logger.info("--- [%d/%d] %s ---", i, len(file_data_list), fd.get("concept_name", "?"))
+            logger.info("--- [%d/%d] %s ---", i, len(file_data_list), fd.get("pmcid", "?"))
             results.append(self.process(fd))
 
         n_ok = sum(1 for r in results if r["status"] == "success")
@@ -212,15 +215,58 @@ class SummarizationRunner:
 
     # ── Disk I/O ───────────────────────────────────────────────────────────────
 
-    def _result_path(self, cui: str) -> Path:
-        return self._summaries_dir / f"{cui}.json"
+    @staticmethod
+    def load_paper_from_db(pmcid: str, db_url: str | None = None) -> dict:
+        """
+        Load all text elements for ``pmcid`` from the database and split them
+        into sentence-level provenance dicts ready for ``process()``.
 
-    def _load_result(self, cui: str) -> dict | None:
-        p = self._result_path(cui)
+        Args:
+            pmcid:   PubMed Central ID (e.g. "PMC10047158").
+            db_url:  Optional SQLAlchemy database URL.  Defaults to the value
+                     in the project .env file.
+
+        Returns:
+            dict with keys ``pmcid`` and ``sentences_with_provenance``.
+        """
+        import spacy  # type: ignore
+        from database import get_db_connection, Document, TextElement  # type: ignore
+
+        nlp = spacy.load("en_core_sci_sm")
+        db = get_db_connection(database_url=db_url)
+
+        with db.session_scope() as session:
+            doc = session.query(Document).filter_by(pmcid=pmcid).first()
+            if doc is None:
+                raise ValueError(f"PMCID {pmcid!r} not found in database")
+            rows = (
+                session.query(TextElement)
+                .filter_by(document_id=doc.id)
+                .order_by(TextElement.position_in_section)
+                .all()
+            )
+            sentences = []
+            for te in rows:
+                for sent in nlp(te.text_content).sents:
+                    text = sent.text.strip()
+                    if text:
+                        sentences.append({
+                            "pmcid": pmcid,
+                            "text_element_id": te.id,
+                            "sentence": text,
+                        })
+
+        return {"pmcid": pmcid, "sentences_with_provenance": sentences}
+
+    def _result_path(self, pmcid: str) -> Path:
+        return self._summaries_dir / f"{pmcid}.json"
+
+    def _load_result(self, pmcid: str) -> dict | None:
+        p = self._result_path(pmcid)
         if p.exists():
             return json.loads(p.read_text(encoding="utf-8"))
         return None
 
     def _save_result(self, result: dict) -> None:
-        p = self._result_path(result["cui"])
+        p = self._result_path(result["pmcid"])
         p.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")

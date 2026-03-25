@@ -1,10 +1,11 @@
-"""CascadedCompositeScorer — embedding first, LLM judge only in uncertain band."""
+"""CascadedCompositeScorer — hybrid NER+embedding scorer with LP-optimized thresholds."""
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from pipeline.stages.summarization.interfaces.agreement import MapOutputScorer
-from pipeline.stages.summarization.interfaces.scoring import ChunkDecision, ScoreBundle
+from pipeline.stages.summarization.interfaces.scoring import AgreementContext, ChunkDecision, ScoreBundle
 from pipeline.stages.summarization.models import AuditableSummary
 
 logger = logging.getLogger(__name__)
@@ -12,72 +13,110 @@ logger = logging.getLogger(__name__)
 
 class CascadedCompositeScorer:
     """
-    Two-stage cascade that calls the LLM judge only when the embedding score
-    falls in an uncertain middle band, saving LLM calls on easy chunks.
+    Applies LP-optimized thresholds to hybrid (embedding + NER) features.
 
-    Decision logic
-    --------------
-    embedding >= high_threshold  → KEEP   (confident without LLM judge)
-    embedding <= low_threshold   → ESCALATE (clearly uncertain, skip judge)
-    otherwise                    → call judge, combine:
-                                   confidence = 0.6 * embedding + 0.4 * judge
-                                   confidence >= 0.75 → KEEP else ESCALATE
+    Decision rule
+    -------------
+    KEEP    : emb >= keep_emb_threshold  AND  ner >= keep_ner_threshold
+    REJECT  : emb <= reject_threshold    (and not KEEP)
+    ESCALATE: everything else
+
+    Thresholds are typically obtained from ThresholdOptimizer.fit() and
+    persisted as JSON.  Use the ``from_file`` class method to load them.
 
     Parameters
     ----------
-    embedding_scorer:
-        Scorer that populates ScoreBundle.embedding_agreement.
-    judge_scorer:
-        Scorer that populates ScoreBundle.judge_agreement.  Only called when
-        the embedding score falls in (low_threshold, high_threshold).
-    high_threshold:
-        Embedding score above which voters are accepted without the judge.
-    low_threshold:
-        Embedding score at or below which the chunk is immediately escalated.
+    hybrid_scorer:
+        Scorer that populates both ScoreBundle.embedding_agreement and
+        ScoreBundle.entity_overlap.  HybridScorer is the recommended choice.
+    keep_emb_threshold:
+        Minimum embedding score required to accept a chunk.
+    keep_ner_threshold:
+        Minimum NER entity-overlap score required to accept a chunk.
+    reject_threshold:
+        Maximum embedding score below which a chunk is rejected outright.
     """
 
     def __init__(
         self,
-        embedding_scorer: MapOutputScorer,
-        judge_scorer: MapOutputScorer,
-        high_threshold: float = 0.88,
-        low_threshold: float = 0.45,
+        hybrid_scorer: MapOutputScorer,
+        keep_emb_threshold: float = 0.80,
+        keep_ner_threshold: float = 0.50,
+        reject_threshold: float = 0.20,
     ) -> None:
-        self._embedding = embedding_scorer
-        self._judge = judge_scorer
-        self.high_threshold = high_threshold
-        self.low_threshold = low_threshold
+        self._hybrid = hybrid_scorer
+        self.keep_emb_threshold = keep_emb_threshold
+        self.keep_ner_threshold = keep_ner_threshold
+        self.reject_threshold = reject_threshold
+
+    @classmethod
+    def from_file(
+        cls,
+        hybrid_scorer: MapOutputScorer,
+        thresholds_path: str | Path,
+    ) -> "CascadedCompositeScorer":
+        """
+        Build a scorer with thresholds loaded from an OptimizedThresholds JSON file.
+
+        Parameters
+        ----------
+        hybrid_scorer:
+            HybridScorer (or any MapOutputScorer) for feature computation.
+        thresholds_path:
+            Path to JSON file produced by OptimizedThresholds.save().
+        """
+        # Import here to avoid circular dependency at module level
+        from pipeline.stages.summarization.agreement.calibration.threshold_optimizer import (
+            OptimizedThresholds,
+        )
+
+        t = OptimizedThresholds.load(thresholds_path)
+        logger.info(
+            "Loaded thresholds from %s: keep_emb=%.3f keep_ner=%.3f reject_emb=%.3f",
+            thresholds_path,
+            t.keep_emb,
+            t.keep_ner,
+            t.reject_emb,
+        )
+        return cls(
+            hybrid_scorer=hybrid_scorer,
+            keep_emb_threshold=t.keep_emb,
+            keep_ner_threshold=t.keep_ner,
+            reject_threshold=t.reject_emb,
+        )
 
     def compute(
         self,
         outputs: list[AuditableSummary],
         source_text: str | None = None,
+        context: AgreementContext | None = None,  # noqa: ARG002
     ) -> ScoreBundle:
-        bundle = self._embedding.compute(outputs, source_text)
+        bundle = self._hybrid.compute(outputs, source_text)
         emb = bundle.embedding_agreement or 0.0
+        ner = bundle.entity_overlap or 0.0
 
-        if emb >= self.high_threshold:
-            bundle.confidence = emb
+        if emb >= self.keep_emb_threshold and ner >= self.keep_ner_threshold:
+            bundle.confidence = (emb + ner) / 2.0
             bundle.decision = ChunkDecision.KEEP
-            logger.debug("Cascade KEEP (emb=%.2f >= %.2f)", emb, self.high_threshold)
+            logger.debug(
+                "Cascade KEEP (emb=%.3f >= %.3f, ner=%.3f >= %.3f)",
+                emb, self.keep_emb_threshold, ner, self.keep_ner_threshold,
+            )
             return bundle
 
-        if emb <= self.low_threshold:
+        if emb <= self.reject_threshold:
             bundle.confidence = emb
-            bundle.decision = ChunkDecision.ESCALATE
-            logger.debug("Cascade ESCALATE (emb=%.2f <= %.2f)", emb, self.low_threshold)
+            bundle.decision = ChunkDecision.REJECT
+            logger.debug(
+                "Cascade REJECT (emb=%.3f <= %.3f)",
+                emb, self.reject_threshold,
+            )
             return bundle
 
-        judge_bundle = self._judge.compute(outputs, source_text)
-        bundle.judge_agreement = judge_bundle.judge_agreement
-        judge = bundle.judge_agreement or 0.0
-
-        bundle.confidence = 0.6 * emb + 0.4 * judge
-        bundle.decision = (
-            ChunkDecision.KEEP if bundle.confidence >= 0.75 else ChunkDecision.ESCALATE
-        )
+        bundle.confidence = (emb + ner) / 2.0
+        bundle.decision = ChunkDecision.ESCALATE
         logger.debug(
-            "Cascade %s (emb=%.2f judge=%.2f conf=%.2f)",
-            bundle.decision, emb, judge, bundle.confidence,
+            "Cascade ESCALATE (emb=%.3f ner=%.3f)",
+            emb, ner,
         )
         return bundle

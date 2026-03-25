@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from itertools import combinations
 
-from pipeline.stages.summarization.interfaces.scoring import ScoreBundle
+from pipeline.stages.summarization.interfaces.scoring import AgreementContext, ScoreBundle
 from pipeline.stages.summarization.models import AuditableSummary
 
 
@@ -24,6 +24,7 @@ class CategoryJaccardScorer:
         self,
         outputs: list[AuditableSummary],
         source_text: str | None = None,  # noqa: ARG002
+        context: AgreementContext | None = None,  # noqa: ARG002
     ) -> ScoreBundle:
         cat_sets = [_category_set(o) for o in outputs]
         scores = [_jaccard(a, b) for a, b in combinations(cat_sets, 2)]

@@ -24,8 +24,8 @@ class PipelineCache:
     Cache key design
     ----------------
     MAP   → sorted text_element_ids of the chunk (unique by DB constraint)
-    REDUCE → concept_name + sorted chunk_ids of inputs
-    RULE   → concept_name + sorted text_element_ids from the consolidated summary
+    REDUCE → pmcid + sorted chunk_ids of inputs
+    RULE   → pmcid + sorted text_element_ids from the consolidated summary
     """
 
     def __init__(self, path: Path) -> None:
@@ -69,21 +69,21 @@ class PipelineCache:
         return ",".join(map(str, ids))
 
     @staticmethod
-    def _reduce_key(summaries: list, concept_name: str) -> str:
+    def _reduce_key(summaries: list, pmcid: str) -> str:
         ids = []
         for s in summaries:
             if hasattr(s, "chunk_id"):
                 ids.append(s.chunk_id)
-            elif hasattr(s, "concept"):
+            elif hasattr(s, "pmcid"):
                 ids.append(f"reduced:{s.audit_trail.chunks_processed}")
             elif isinstance(s, dict):
                 ids.append(s.get("chunk_id", s.get("concept", "?")))
-        return f"{concept_name}|" + ";".join(sorted(ids))
+        return f"{pmcid}|" + ";".join(sorted(ids))
 
     @staticmethod
-    def _rule_key(summary: ConsolidatedSummary, concept_name: str) -> str:
+    def _rule_key(summary: ConsolidatedSummary, pmcid: str) -> str:
         te_ids = sorted(summary.audit_trail.unique_text_element_ids)
-        return f"{concept_name}|rule|" + ",".join(map(str, te_ids))
+        return f"{pmcid}|rule|" + ",".join(map(str, te_ids))
 
     # ── MAP ────────────────────────────────────────────────────────────────────
 
@@ -100,29 +100,29 @@ class PipelineCache:
 
     # ── REDUCE ─────────────────────────────────────────────────────────────────
 
-    def get_reduce(self, summaries: list, concept_name: str) -> Optional[ConsolidatedSummary]:
-        key = self._reduce_key(summaries, concept_name)
+    def get_reduce(self, summaries: list, pmcid: str) -> Optional[ConsolidatedSummary]:
+        key = self._reduce_key(summaries, pmcid)
         if key in self._reduce:
             self._hits["reduce"] += 1
             return ConsolidatedSummary(**self._reduce[key])
         self._misses["reduce"] += 1
         return None
 
-    def set_reduce(self, summaries: list, concept_name: str, result: ConsolidatedSummary) -> None:
-        self._reduce[self._reduce_key(summaries, concept_name)] = result.model_dump()
+    def set_reduce(self, summaries: list, pmcid: str, result: ConsolidatedSummary) -> None:
+        self._reduce[self._reduce_key(summaries, pmcid)] = result.model_dump()
 
     # ── RULE ───────────────────────────────────────────────────────────────────
 
-    def get_rule(self, summary: ConsolidatedSummary, concept_name: str) -> Optional[ExtractedRules]:
-        key = self._rule_key(summary, concept_name)
+    def get_rule(self, summary: ConsolidatedSummary, pmcid: str) -> Optional[ExtractedRules]:
+        key = self._rule_key(summary, pmcid)
         if key in self._rule:
             self._hits["rule"] += 1
             return ExtractedRules(**self._rule[key])
         self._misses["rule"] += 1
         return None
 
-    def set_rule(self, summary: ConsolidatedSummary, concept_name: str, result: ExtractedRules) -> None:
-        self._rule[self._rule_key(summary, concept_name)] = result.model_dump()
+    def set_rule(self, summary: ConsolidatedSummary, pmcid: str, result: ExtractedRules) -> None:
+        self._rule[self._rule_key(summary, pmcid)] = result.model_dump()
 
     # ── Stats ──────────────────────────────────────────────────────────────────
 

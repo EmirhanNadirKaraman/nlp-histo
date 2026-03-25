@@ -4,7 +4,11 @@ from __future__ import annotations
 import logging
 
 from pipeline.stages.summarization.interfaces.agreement import MapOutputScorer
-from pipeline.stages.summarization.interfaces.scoring import ChunkDecision, ScoreBundle
+from pipeline.stages.summarization.interfaces.scoring import (
+    AgreementContext,
+    ChunkDecision,
+    ScoreBundle,
+)
 from pipeline.stages.summarization.models import AuditableSummary
 
 logger = logging.getLogger(__name__)
@@ -28,28 +32,43 @@ class AgreementChecker:
         Any object satisfying the MapOutputScorer protocol.
     theta:
         Fallback threshold.  Only used when scorer does not set a decision.
+        ``theta=0.7`` is calibrated for ``EmbeddingScorer`` (embedding cosine
+        scores).  When using ``SemanticAgreementScorer`` with a different
+        strategy, either pass a recalibrated ``theta`` here or set ``theta``
+        on ``SemanticAgreementScorer`` directly so the scorer controls its
+        own decision boundary.
     """
 
-    def __init__(self, scorer: MapOutputScorer, theta: float = 0.7) -> None:
+    def __init__(
+        self,
+        scorer: MapOutputScorer,
+        theta: float = 0.7,
+        reject_theta: float = 0.2,
+    ) -> None:
         self._scorer = scorer
         self.theta = theta
+        self.reject_theta = reject_theta
 
     def compute(
         self,
         outputs: list[AuditableSummary],
         source_text: str | None = None,
+        context: AgreementContext | None = None,
     ) -> ScoreBundle:
         """Run the scorer and guarantee ScoreBundle.decision is populated."""
         if len(outputs) < 2:
             return ScoreBundle(confidence=1.0, decision=ChunkDecision.KEEP)
 
-        bundle = self._scorer.compute(outputs, source_text)
+        bundle = self._scorer.compute(outputs, source_text, context)
 
         if bundle.decision is None:
             primary = bundle.confidence or bundle.embedding_agreement or 0.0
-            bundle.decision = (
-                ChunkDecision.KEEP if primary >= self.theta else ChunkDecision.ESCALATE
-            )
+            if primary >= self.theta:
+                bundle.decision = ChunkDecision.KEEP
+            elif primary <= self.reject_theta:
+                bundle.decision = ChunkDecision.REJECT
+            else:
+                bundle.decision = ChunkDecision.ESCALATE
 
         logger.debug(
             "AgreementChecker [%s] emb=%s judge=%s conf=%s → %s",
@@ -61,9 +80,37 @@ class AgreementChecker:
         )
         return bundle
 
-    def best(self, outputs: list[AuditableSummary]) -> AuditableSummary:
-        """Return the voter output with the most findings."""
-        return max(outputs, key=lambda o: len(o.findings))
+    def best(
+        self,
+        outputs: list[AuditableSummary],
+        bundle: ScoreBundle | None = None,
+    ) -> AuditableSummary:
+        """
+        Return the best voter output.
+
+        If ``bundle.best_index`` is set (e.g. from SemanticAgreementScorer),
+        return that candidate directly.  Otherwise fall back to a quality key
+        based on mean evidence chain length and finding count — both externally
+        validated signals that are more reliable than self-reported confidence.
+        """
+        if bundle is not None and bundle.best_index is not None:
+            if bundle.best_index < len(outputs):
+                return outputs[bundle.best_index]
+            logger.error(
+                "best_index=%d out of bounds for outputs list of length %d — falling back",
+                bundle.best_index,
+                len(outputs),
+            )
+        return max(outputs, key=_quality_key)
+
+
+def _quality_key(o: AuditableSummary) -> tuple:
+    """Fallback quality signal for best() when no bundle.best_index is available."""
+    mean_ev = (
+        sum(len(f.evidence) for f in o.findings) / len(o.findings)
+        if o.findings else 0.0
+    )
+    return (mean_ev, len(o.findings))
 
 
 def _fmt(v: float | None) -> str:
