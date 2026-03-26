@@ -15,6 +15,7 @@ runner = SummarizationRunner(
     escalation_llm=ChatOpenAI(model="gpt-4o", temperature=0),
     theta=0.7,
     output_dir=Path("out/summaries"),
+    trace_enabled=True,   # ← enable structured JSONL traces
 )
 
 # Single paper
@@ -24,11 +25,16 @@ result = runner.process(file_data)
 # Batch
 pmcids = ["PMC10047158", "PMC10047213", "PMC10047408"]
 results = runner.process_batch([SummarizationRunner.load_paper_from_db(p) for p in pmcids])
+
+# After a batch, export CSV summaries from the JSONL traces:
+from pipeline.stages.summarization.observability import export_all_csv
+counts = export_all_csv(runner.trace_dir)
 """
 from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .cache import PipelineCache
@@ -36,6 +42,7 @@ from .contradiction_detector import ContradictionDetector
 from .grounding_filter import GroundingFilter
 from .map_stage import MapStage
 from .models import ConsolidatedSummary, ContradictionReport, ExtractedRules
+from .observability import TraceCollector, flush_collector
 from .reduce_stage import ReduceStage
 from .rule_stage import RuleStage
 from pipeline.stages.summarization.interfaces import (
@@ -79,6 +86,13 @@ class SummarizationRunner:
     cache_path:
         Override for the cache file location.  Defaults to
         ``output_dir/pipeline_cache.json``.
+    trace_enabled:
+        When True, structured JSONL traces are written to ``trace_dir`` for
+        every processed paper.  Traces answer "why was this chunk escalated?",
+        "which pairwise score was low?", etc.
+    trace_dir:
+        Directory for JSONL trace files.  Defaults to ``output_dir/traces``.
+        Files: ``runs.jsonl``, ``chunks.jsonl``.
     """
 
     def __init__(
@@ -92,6 +106,8 @@ class SummarizationRunner:
         contradiction_similarity_threshold: float | None = 0.7,
         output_dir: Path = Path("langchain-summarization/summarization_results"),
         cache_path: Path | None = None,
+        trace_enabled: bool = False,
+        trace_dir: Path | None = None,
     ) -> None:
         self._output_dir = output_dir
         self._summaries_dir = output_dir / "summaries"
@@ -110,6 +126,21 @@ class SummarizationRunner:
             ContradictionDetector(escalation_llm, similarity_threshold=contradiction_similarity_threshold)
             if contradiction_similarity_threshold is not None else None
         )
+
+        self._trace_enabled = trace_enabled
+        self.trace_dir: Path = trace_dir or (output_dir / "traces")
+
+        # Snapshot of config for traces (model introspection is best-effort)
+        self._config_snapshot = {
+            "theta": theta,
+            "chunk_size": chunk_size,
+            "scorer": type(scorer).__name__ if scorer else "EmbeddingScorer",
+            "grounding_threshold": grounding_threshold,
+            "contradiction_similarity_threshold": contradiction_similarity_threshold,
+            "voter_model_count": len(voter_llms),
+            "voter_models": [_model_name(m) for m in voter_llms],
+            "escalation_model": _model_name(escalation_llm),
+        }
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -131,41 +162,83 @@ class SummarizationRunner:
         existing = self._load_result(pmcid)
         if existing is not None:
             logger.info("[%s] skipped (cached result on disk)", pmcid)
+            if self._trace_enabled:
+                collector = self._make_collector(pmcid)
+                flush_collector(collector, self.trace_dir, status="skipped")
             return existing
+
+        collector: TraceCollector | None = (
+            self._make_collector(pmcid) if self._trace_enabled else None
+        )
 
         try:
             sentences = file_data["sentences_with_provenance"]
 
+            # Record ingestion
+            if collector is not None:
+                te_ids = {s.get("text_element_id", 0) for s in sentences}
+                collector.record_ingestion(
+                    sentence_count=len(sentences),
+                    te_count=len(te_ids),
+                )
+
             # 1. MAP (ABC cascade per chunk)
             logger.info("[%s] MAP — %d sentences", pmcid, len(sentences))
-            chunk_summaries = self._map.process(sentences, pmcid, cache=self._cache)
+            chunk_summaries = self._map.process(
+                sentences, pmcid, cache=self._cache, collector=collector
+            )
+
+            # Record chunking info (chunk_size is on MapStage)
+            if collector is not None:
+                collector.record_chunking(
+                    total_chunks=len(chunk_summaries),
+                    chunk_size=self._map.chunk_size,
+                )
 
             # 1a. Grounding filter — drop ungrounded findings before REDUCE
             if self._grounding is not None:
+                findings_before = sum(len(cs.findings) for cs in chunk_summaries)
                 chunk_summaries = [
                     self._grounding.filter_findings(cs) for cs in chunk_summaries
                 ]
+                findings_after = sum(len(cs.findings) for cs in chunk_summaries)
                 logger.info(
                     "[%s] Grounding (MAP): %d findings remaining across %d chunks",
                     pmcid,
-                    sum(len(cs.findings) for cs in chunk_summaries),
+                    findings_after,
                     len(chunk_summaries),
                 )
+                if collector is not None:
+                    collector.record_grounding(
+                        stage="map_findings",
+                        items_before=findings_before,
+                        items_after=findings_after,
+                    )
 
             # 2. REDUCE (recursive tree collapse)
             logger.info("[%s] REDUCE — %d chunks", pmcid, len(chunk_summaries))
             master: ConsolidatedSummary = self._reduce.reduce(
-                chunk_summaries, pmcid, cache=self._cache
+                chunk_summaries, pmcid, cache=self._cache, collector=collector
             )
 
             # 3. RULE EXTRACTION
             logger.info("[%s] RULES", pmcid)
-            rules: ExtractedRules = self._rules.extract(master, pmcid, cache=self._cache)
+            rules: ExtractedRules = self._rules.extract(
+                master, pmcid, cache=self._cache, collector=collector
+            )
 
             # 3a. Grounding filter — drop ungrounded rules
             if self._grounding is not None:
+                rules_before = len(rules.rules)
                 rules = self._grounding.filter_rules(rules)
-                logger.info("[%s] Grounding (RULES): %d rules remaining", pmcid, len(rules.rules))
+                rules_after = len(rules.rules)
+                logger.info("[%s] Grounding (RULES): %d rules remaining", pmcid, rules_after)
+                if collector is not None:
+                    collector.record_grounding(
+                        stage="rules",
+                        items_before=rules_before,
+                        items_after=rules_after,
+                    )
 
             # 4. Contradiction detection
             contradiction_report: ContradictionReport | None = None
@@ -187,10 +260,18 @@ class SummarizationRunner:
             }
             self._save_result(result)
             self._cache.save()
+
+            if collector is not None:
+                result_path = str(self._result_path(pmcid))
+                collector.add_artifact(result_path, "result_json")
+                flush_collector(collector, self.trace_dir, status="success")
+
             return result
 
         except Exception as exc:
             logger.exception("[%s] Pipeline failed: %s", pmcid, exc)
+            if collector is not None:
+                flush_collector(collector, self.trace_dir, status="error", error=str(exc))
             return {"status": "error", "pmcid": pmcid, "error": str(exc)}
 
     def process_batch(self, file_data_list: list[dict]) -> list[dict]:
@@ -258,6 +339,15 @@ class SummarizationRunner:
 
         return {"pmcid": pmcid, "sentences_with_provenance": sentences}
 
+    def _make_collector(self, pmcid: str) -> TraceCollector:
+        ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
+        run_id = f"{pmcid}_{ts}"
+        return TraceCollector(
+            run_id=run_id,
+            pmcid=pmcid,
+            config_snapshot=self._config_snapshot,
+        )
+
     def _result_path(self, pmcid: str) -> Path:
         return self._summaries_dir / f"{pmcid}.json"
 
@@ -270,3 +360,12 @@ class SummarizationRunner:
     def _save_result(self, result: dict) -> None:
         p = self._result_path(result["pmcid"])
         p.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _model_name(llm) -> str:
+    """Best-effort extraction of model name for config snapshots."""
+    for attr in ("model_name", "model", "model_id"):
+        val = getattr(llm, attr, None)
+        if val:
+            return str(val)
+    return type(llm).__name__

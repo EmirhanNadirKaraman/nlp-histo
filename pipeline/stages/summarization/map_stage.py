@@ -15,6 +15,7 @@ For each chunk of sentences:
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .agreement import AgreementChecker, EmbeddingScorer, MapOutputScorer
 from .cache import PipelineCache
@@ -36,6 +37,15 @@ def _format_sentences(chunk: list[dict]) -> str:
         text = item.get("sentence", "").strip()
         lines.append(f"[S{i}|{pmcid}|{te_id}] {text}")
     return "\n".join(lines)
+
+
+def _voter_grounding(v: AuditableSummary) -> tuple[float, float]:
+    """Fallback grounding signals when no AgreementContext is available."""
+    if not v.findings:
+        return 1.0, 0.0
+    pf = sum(1 for f in v.findings if f.evidence) / len(v.findings)
+    me = sum(len(f.evidence) for f in v.findings) / len(v.findings)
+    return pf, me
 
 
 class MapStage:
@@ -89,6 +99,7 @@ class MapStage:
         sentences: list[dict],
         pmcid: str,
         cache: PipelineCache | None = None,
+        collector=None,  # TraceCollector | None
     ) -> list[AuditableSummary]:
         """
         Map all sentences for one paper, returning one AuditableSummary per chunk.
@@ -96,27 +107,76 @@ class MapStage:
         Chunks that hit the cache are returned immediately.  Remaining chunks
         run through the ABC cascade.
         """
+        from .observability.models import ChunkTrace
+
         chunks = self._make_chunks(sentences)
         results: list[AuditableSummary | None] = []
         uncached: list[tuple[int, list[dict]]] = []
+        cache_hit_indices: list[int] = []
 
         for idx, chunk in enumerate(chunks):
             if cache:
                 hit = cache.get_map(chunk)
                 if hit:
                     results.append(hit)
+                    cache_hit_indices.append(idx)
                     continue
             results.append(None)
             uncached.append((idx, chunk))
 
+        # Record cache-hit chunk traces (lightweight — no voter/agreement data)
+        if collector is not None:
+            for idx in cache_hit_indices:
+                chunk = chunks[idx]
+                te_ids = sorted({item.get("text_element_id", 0) for item in chunk})
+                text = _format_sentences(chunk)
+                collector.add_chunk_trace(ChunkTrace(
+                    chunk_id=f"C{idx + 1}",
+                    run_id=collector.run_id,
+                    pmcid=pmcid,
+                    te_ids=te_ids,
+                    sentence_count=len(chunk),
+                    text_preview=text[:200],
+                    cache_hit=True,
+                    voters=[],
+                    agreement=None,
+                    selected_voter_index=None,
+                    escalated=False,
+                ))
+
         for idx, chunk in uncached:
             chunk_id = f"C{idx + 1}"
-            result = self._cascade(chunk, pmcid, chunk_id)
+            result = self._cascade(chunk, pmcid, chunk_id, collector=collector)
             results[idx] = result
             if cache and result is not None:
                 cache.set_map(chunk, result)
 
-        return [r for r in results if r is not None]  # type: ignore[return-value]
+        live_results = [r for r in results if r is not None]
+
+        # Record MAP-stage summary
+        if collector is not None:
+            n_cache = len(cache_hit_indices)
+            n_miss = len(uncached)
+            chunk_traces = collector.chunk_traces
+            escalations = sum(1 for ct in chunk_traces if ct.escalated and not ct.cache_hit)
+            keeps = sum(
+                1 for ct in chunk_traces
+                if not ct.cache_hit and not ct.escalated
+            )
+            # rejects = cache-missed chunks that aren't keeps or escalations
+            # (edge case: all non-cache chunks are either kept or escalated in practice)
+            rejects = n_miss - escalations - keeps
+            collector.record_map_stage(
+                total_chunks=len(chunks),
+                cache_hits=n_cache,
+                cache_misses=n_miss,
+                escalations=escalations,
+                keeps=keeps,
+                rejects=max(rejects, 0),
+                total_findings_out=sum(len(r.findings) for r in live_results),
+            )
+
+        return live_results  # type: ignore[return-value]
 
     # ── ABC cascade ────────────────────────────────────────────────────────────
 
@@ -125,6 +185,7 @@ class MapStage:
         chunk: list[dict],
         pmcid: str,
         chunk_id: str,
+        collector=None,  # TraceCollector | None
     ) -> AuditableSummary | None:
         inp = {
             "pmcid": pmcid,
@@ -133,7 +194,11 @@ class MapStage:
         }
 
         # Level 1: all voter chains in parallel (one thread per chain)
-        voters = self._run_voters(inp)
+        voters, voter_timings = self._run_voters(inp)
+
+        # Slot to hold the agreement bundle for trace building
+        _trace_bundle = None
+        _escalated = False
 
         # ── Grounding-first router path ─────────────────────────────────────
         if self._router is not None:
@@ -150,6 +215,8 @@ class MapStage:
                 decision.gate_origin.value,
                 [r.value for r in decision.reason_codes],
             )
+            _trace_bundle = decision.agreement_details
+
             if decision.decision == ChunkDecision.KEEP:
                 valid = (
                     [voters[i] for i in decision.valid_voter_indices]
@@ -168,6 +235,7 @@ class MapStage:
                     else None
                 )
             else:
+                _escalated = True
                 if decision.decision == ChunkDecision.REJECT:
                     logger.info(
                         "Chunk %s rejected by router — escalating to strong model.",
@@ -224,31 +292,159 @@ class MapStage:
                         best_eligible_voter_index=best_eligible_idx,
                     )
                 )
-            return result
 
         # ── Legacy path (no router) ─────────────────────────────────────────
-        bundle = self._agreement.compute(voters, source_text=inp["text"])
+        else:
+            bundle = self._agreement.compute(voters, source_text=inp["text"])
+            _trace_bundle = bundle
 
-        if bundle.decision == ChunkDecision.KEEP:
-            logger.debug("Chunk %s: %s → voters accepted", chunk_id, bundle.decision)
-            return self._agreement.best(voters)
+            if bundle.decision == ChunkDecision.KEEP:
+                logger.debug("Chunk %s: %s → voters accepted", chunk_id, bundle.decision)
+                result = self._agreement.best(voters, bundle=bundle)
+            else:
+                _escalated = True
+                logger.debug("Chunk %s: %s → escalating", chunk_id, bundle.decision)
+                result = self._escalation_chain.invoke(inp)
 
-        # Fix: REJECT was dead code in the legacy path — both REJECT and
-        # ESCALATE send to the escalation model.
-        logger.debug("Chunk %s: %s → escalating", chunk_id, bundle.decision)
-        return self._escalation_chain.invoke(inp)
+        # ── Build chunk trace ───────────────────────────────────────────────
+        if collector is not None:
+            self._record_chunk_trace(
+                collector=collector,
+                chunk=chunk,
+                chunk_id=chunk_id,
+                pmcid=pmcid,
+                text=inp["text"],
+                voters=voters,
+                voter_timings=voter_timings,
+                bundle=_trace_bundle,
+                escalated=_escalated,
+            )
 
-    def _run_voters(self, inp: dict) -> list[AuditableSummary]:
-        """Invoke each voter chain concurrently, return results in chain order.
+        return result
+
+    def _record_chunk_trace(
+        self,
+        collector,
+        chunk: list[dict],
+        chunk_id: str,
+        pmcid: str,
+        text: str,
+        voters: list[AuditableSummary],
+        voter_timings: dict[int, float | None],
+        bundle,  # ScoreBundle | None
+        escalated: bool,
+    ) -> None:
+        from .observability.models import (
+            AgreementTrace,
+            ChunkTrace,
+            PairwiseScore,
+            VoterTrace,
+        )
+
+        # Voter traces
+        voter_traces = []
+        for i, v in enumerate(voters):
+            pf, me = _voter_grounding(v)
+            voter_traces.append(VoterTrace(
+                voter_index=i,
+                finding_count=len(v.findings),
+                grounding_pass_fraction=round(pf, 4),
+                mean_evidence_length=round(me, 4),
+                latency_ms=round(voter_timings.get(i), 1) if voter_timings.get(i) is not None else None,
+            ))
+
+        # Agreement trace — built from ScoreBundle.score_details when available
+        agreement_trace = None
+        selected_voter_index: int | None = None
+
+        if bundle is not None:
+            sd = bundle.score_details or {}
+            eligible = sd.get("eligible_voter_indices", list(range(len(voters))))
+            avg_sim_raw = sd.get("avg_sim", [])
+            pairwise = [
+                PairwiseScore(
+                    voter_i=p["voter_i"],
+                    voter_j=p["voter_j"],
+                    score=round(p["score"], 4),
+                )
+                for p in sd.get("pairwise_upper", [])
+            ]
+
+            score = bundle.confidence if bundle.confidence is not None else (
+                bundle.embedding_agreement or 0.0
+            )
+            decision_val = bundle.decision.value if bundle.decision else "unknown"
+
+            # Human-readable reason
+            theta = self._agreement.theta
+            reject_theta = self._agreement.reject_theta
+            if not escalated:
+                reason = (
+                    f"Deferral score {score:.3f} ≥ theta {theta:.2f}; "
+                    f"voter {bundle.best_index} selected"
+                )
+                selected_voter_index = bundle.best_index
+            elif score <= reject_theta and score > 0.0:
+                reason = (
+                    f"Deferral score {score:.3f} ≤ reject_theta {reject_theta:.2f} — hard reject"
+                )
+            elif len(eligible) < 2:
+                reason = (
+                    f"Only {len(eligible)} non-empty voter(s) eligible — too few for agreement"
+                )
+            else:
+                reason = (
+                    f"Deferral score {score:.3f} in ({reject_theta:.2f}, {theta:.2f}) — escalated"
+                )
+
+            agreement_trace = AgreementTrace(
+                eligible_voter_indices=eligible,
+                avg_sim=[round(s, 4) for s in avg_sim_raw],
+                pairwise_scores=pairwise,
+                deferral_score=round(score, 4),
+                theta=theta,
+                reject_theta=reject_theta,
+                decision=decision_val,
+                reason=reason,
+                selected_voter_index=selected_voter_index,
+            )
+
+        te_ids = sorted({item.get("text_element_id", 0) for item in chunk})
+        collector.add_chunk_trace(ChunkTrace(
+            chunk_id=chunk_id,
+            run_id=collector.run_id,
+            pmcid=pmcid,
+            te_ids=te_ids,
+            sentence_count=len(chunk),
+            text_preview=text[:200],
+            cache_hit=False,
+            voters=voter_traces,
+            agreement=agreement_trace,
+            selected_voter_index=selected_voter_index,
+            escalated=escalated,
+        ))
+
+    def _run_voters(
+        self, inp: dict
+    ) -> tuple[list[AuditableSummary], dict[int, float | None]]:
+        """Invoke each voter chain concurrently; return results and per-voter latency.
 
         A single voter chain exception is logged and that voter is excluded
         from the result list.  The router handles the reduced count correctly
         (N_eligible < 2 → ESCALATE or REJECT as appropriate).
         """
         results: list[AuditableSummary | None] = [None] * len(self._voter_chains)
+        timings: dict[int, float | None] = {}
+
+        def _timed_invoke(chain, i: int):
+            t0 = time.monotonic()
+            out = chain.invoke(inp)
+            timings[i] = (time.monotonic() - t0) * 1000.0
+            return out
+
         with ThreadPoolExecutor(max_workers=len(self._voter_chains)) as pool:
             future_to_idx = {
-                pool.submit(chain.invoke, inp): i
+                pool.submit(_timed_invoke, chain, i): i
                 for i, chain in enumerate(self._voter_chains)
             }
             for future in as_completed(future_to_idx):
@@ -262,7 +458,8 @@ class MapStage:
                         inp.get("chunk_id", "?"),
                         exc,
                     )
-        return [r for r in results if r is not None]  # type: ignore[return-value]
+                    timings[idx] = None
+        return [r for r in results if r is not None], timings  # type: ignore[return-value]
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 

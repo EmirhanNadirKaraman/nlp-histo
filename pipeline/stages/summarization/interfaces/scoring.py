@@ -77,3 +77,7 @@ class ScoreBundle:
     confidence: float | None = None
     decision: ChunkDecision | None = None
     best_index: int | None = None  # index into the voter list of the selected candidate
+    # Populated by SemanticAgreementScorer for the observability layer.
+    # Keys: "eligible_voter_indices", "avg_sim", "pairwise_upper"
+    # (list of {"voter_i", "voter_j", "score"} for the upper triangle).
+    score_details: dict | None = field(default=None)

@@ -23,6 +23,17 @@ def _minify(summaries: list) -> str:
     )
 
 
+def _count_section_findings(master: ConsolidatedSummary) -> int:
+    """Total SectionFindings across all four sections of a ConsolidatedSummary."""
+    s = master.sections
+    return (
+        len(s.clinical_significance.findings)
+        + len(s.histopathological_features.findings)
+        + len(s.management_outcomes.findings)
+        + len(s.risk_factors_associations.findings)
+    )
+
+
 class ReduceStage:
     """
     Recursive tree-reduce over chunk summaries.
@@ -49,6 +60,7 @@ class ReduceStage:
         summaries: list[Union[AuditableSummary, ConsolidatedSummary]],
         pmcid: str,
         cache: Optional[PipelineCache] = None,
+        collector=None,  # TraceCollector | None
     ) -> ConsolidatedSummary:
         """
         Recursively reduce `summaries` to a single ConsolidatedSummary.
@@ -57,8 +69,14 @@ class ReduceStage:
         survives restarts.
         """
         current = list(summaries)
+        input_chunks = len(current)
+        iterations = 0
+        total_batches = 0
+        cache_hits = 0
+        cache_misses = 0
 
         while len(current) > 1:
+            iterations += 1
             groups = [
                 current[i : i + self.batch_size]
                 for i in range(0, len(current), self.batch_size)
@@ -72,12 +90,15 @@ class ReduceStage:
                     hit = cache.get_reduce(group, pmcid)
                     if hit:
                         placeholders.append(hit)
+                        cache_hits += 1
                         continue
                 placeholders.append(None)
                 uncached_groups.append(group)
                 uncached_indices.append(len(placeholders) - 1)
 
             if uncached_groups:
+                cache_misses += len(uncached_groups)
+                total_batches += len(uncached_groups)
                 inputs = [
                     {
                         "pmcid": pmcid,
@@ -99,6 +120,20 @@ class ReduceStage:
         final = current[0]
         if isinstance(final, AuditableSummary):
             final = self._reduce_single(final, pmcid, cache)
+            total_batches += 1
+            # cache hit/miss handled inside _reduce_single; approximate as miss
+            cache_misses += 1
+
+        if collector is not None:
+            collector.record_reduce(
+                input_chunks=input_chunks,
+                iterations=iterations,
+                total_batches=total_batches,
+                cache_hits=cache_hits,
+                cache_misses=cache_misses,
+                output_finding_count=_count_section_findings(final),
+            )
+
         return final
 
     # ── Internals ──────────────────────────────────────────────────────────────

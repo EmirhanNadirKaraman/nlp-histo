@@ -183,6 +183,19 @@ class SemanticAgreementScorer:
             confidence=deferral_score,
             embedding_agreement=deferral_score,
             best_index=best_index,
+            score_details={
+                "eligible_voter_indices": non_empty_idx,
+                "avg_sim": avg_sim.tolist(),
+                "pairwise_upper": [
+                    {
+                        "voter_i": non_empty_idx[i],
+                        "voter_j": non_empty_idx[j],
+                        "score": float(matrix[i, j]),
+                    }
+                    for i in range(m)
+                    for j in range(i + 1, m)
+                ],
+            },
         )
 
         if self._theta is not None:
