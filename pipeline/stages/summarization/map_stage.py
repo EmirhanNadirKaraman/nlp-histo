@@ -196,9 +196,10 @@ class MapStage:
         # Level 1: all voter chains in parallel (one thread per chain)
         voters, voter_timings = self._run_voters(inp)
 
-        # Slot to hold the agreement bundle for trace building
+        # Slot to hold the agreement bundle and grounding contexts for trace building
         _trace_bundle = None
         _escalated = False
+        _voter_contexts = None  # list[VoterContext] | None — from router
 
         # ── Grounding-first router path ─────────────────────────────────────
         if self._router is not None:
@@ -216,6 +217,7 @@ class MapStage:
                 [r.value for r in decision.reason_codes],
             )
             _trace_bundle = decision.agreement_details
+            _voter_contexts = decision.voter_grounding_contexts
 
             if decision.decision == ChunkDecision.KEEP:
                 valid = (
@@ -318,6 +320,7 @@ class MapStage:
                 voter_timings=voter_timings,
                 bundle=_trace_bundle,
                 escalated=_escalated,
+                voter_contexts=_voter_contexts,
             )
 
         return result
@@ -333,6 +336,7 @@ class MapStage:
         voter_timings: dict[int, float | None],
         bundle,  # ScoreBundle | None
         escalated: bool,
+        voter_contexts=None,  # list[VoterContext] | None — from router
     ) -> None:
         from .observability.models import (
             AgreementTrace,
@@ -341,16 +345,23 @@ class MapStage:
             VoterTrace,
         )
 
-        # Voter traces
+        # Voter traces — use validated router grounding when available, else fallback.
         voter_traces = []
+        grounding_source = "validated" if voter_contexts is not None else "fallback"
         for i, v in enumerate(voters):
-            pf, me = _voter_grounding(v)
+            if voter_contexts is not None and i < len(voter_contexts):
+                vc = voter_contexts[i]
+                pf = vc.grounding_pass_fraction
+                me = vc.mean_evidence_length
+            else:
+                pf, me = _voter_grounding(v)
             voter_traces.append(VoterTrace(
                 voter_index=i,
                 finding_count=len(v.findings),
                 grounding_pass_fraction=round(pf, 4),
                 mean_evidence_length=round(me, 4),
                 latency_ms=round(voter_timings.get(i), 1) if voter_timings.get(i) is not None else None,
+                grounding_source=grounding_source,
             ))
 
         # Agreement trace — built from ScoreBundle.score_details when available
@@ -361,11 +372,21 @@ class MapStage:
             sd = bundle.score_details or {}
             eligible = sd.get("eligible_voter_indices", list(range(len(voters))))
             avg_sim_raw = sd.get("avg_sim", [])
+            # Build PairwiseScore with breakdown fields when present in score_details.
+            _BREAKDOWN_KEYS = (
+                "claim_count_a", "claim_count_b",
+                "coverage_a_to_b", "coverage_b_to_a", "base",
+                "count_factor", "reuse_factor",
+                "polarity_contradiction_ratio", "numeric_contradiction_ratio",
+                "contradiction_ratio", "contradiction_factor",
+                "pre_grounding_score", "grounding_factor",
+            )
             pairwise = [
                 PairwiseScore(
                     voter_i=p["voter_i"],
                     voter_j=p["voter_j"],
-                    score=round(p["score"], 4),
+                    score=round(p["score"], 6),
+                    **{k: p[k] for k in _BREAKDOWN_KEYS if k in p},
                 )
                 for p in sd.get("pairwise_upper", [])
             ]

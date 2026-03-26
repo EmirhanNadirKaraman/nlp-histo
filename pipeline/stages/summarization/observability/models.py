@@ -26,15 +26,38 @@ class VoterTrace:
     mean_evidence_length: float     # mean len(Finding.evidence) across findings
     latency_ms: float | None = None
     validation_warnings: list[str] = field(default_factory=list)
+    # "validated" = from router ProvenanceValidator; "fallback" = structural proxy
+    grounding_source: str = "fallback"
 
 
 @dataclass
 class PairwiseScore:
-    """Raw pairwise similarity between two voters (upper triangle of N×N matrix)."""
+    """
+    Pairwise similarity between two voters (upper triangle of N×N matrix).
+
+    The core fields (voter_i, voter_j, score) are always present.
+    The breakdown fields are populated when EmbeddingSimilarityStrategy is used
+    via compute_matrix_with_breakdown(); they are None / absent otherwise.
+    """
 
     voter_i: int
     voter_j: int
     score: float
+    # Alignment component breakdown (present when SemanticAgreementScorer
+    # is used with EmbeddingSimilarityStrategy):
+    claim_count_a: int | None = None
+    claim_count_b: int | None = None
+    coverage_a_to_b: float | None = None
+    coverage_b_to_a: float | None = None
+    base: float | None = None
+    count_factor: float | None = None
+    reuse_factor: float | None = None
+    polarity_contradiction_ratio: float | None = None
+    numeric_contradiction_ratio: float | None = None
+    contradiction_ratio: float | None = None
+    contradiction_factor: float | None = None
+    pre_grounding_score: float | None = None
+    grounding_factor: float | None = None
 
 
 @dataclass

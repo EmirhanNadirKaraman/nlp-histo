@@ -28,6 +28,7 @@ from pipeline.stages.summarization.agreement.embedding import (
     EmbeddingScorer,
     _align,
     _align_precomputed,
+    _align_precomputed_with_breakdown,
     _contradiction_ratio,
     _numeric_contradiction_ratio,
     _polarity,
@@ -646,3 +647,234 @@ class TestComputeMatrixGrounding:
         mat = strategy.compute_matrix(outputs, context=ctx)
         for i in range(3):
             assert mat[i, i] == pytest.approx(1.0)
+
+
+# ── Part A: _align_precomputed_with_breakdown ─────────────────────────────────────
+
+class TestAlignPrecomputedWithBreakdown:
+    _BREAKDOWN_KEYS = {
+        "claim_count_a", "claim_count_b",
+        "coverage_a_to_b", "coverage_b_to_a", "base",
+        "count_factor", "reuse_factor",
+        "polarity_contradiction_ratio", "numeric_contradiction_ratio",
+        "contradiction_ratio", "contradiction_factor",
+        "pre_grounding_score",
+    }
+
+    def _run(self, a_claims, b_claims, emb_a=None, emb_b=None):
+        if emb_a is None:
+            d = len(a_claims) + len(b_claims)
+            emb_a = np.eye(len(a_claims), d)
+            emb_b = np.eye(len(b_claims), d)
+        return _align_precomputed_with_breakdown(
+            emb_a, emb_b, a_claims, b_claims,
+            tau=0.15, count_alpha=0.25, reuse_weight=0.15, contradiction_weight=0.20,
+        )
+
+    def test_returns_tuple(self):
+        v = np.array([[1.0, 0.0, 0.0]])
+        result = _align_precomputed_with_breakdown(
+            v, v, ["A"], ["A"], 0.15, 0.25, 0.15, 0.20,
+        )
+        assert isinstance(result, tuple) and len(result) == 2
+
+    def test_score_matches_plain_function(self):
+        v = np.array([[1.0, 0.0, 0.0]])
+        score_plain = _align_precomputed(v, v, ["CD31 positive"], ["CD31 positive"], 0.15, 0.25, 0.15, 0.20)
+        score_bd, _ = _align_precomputed_with_breakdown(v, v, ["CD31 positive"], ["CD31 positive"], 0.15, 0.25, 0.15, 0.20)
+        assert score_plain == pytest.approx(score_bd)
+
+    def test_breakdown_contains_all_keys(self):
+        v = np.array([[1.0, 0.0, 0.0]])
+        _, bd = _align_precomputed_with_breakdown(v, v, ["A"], ["A"], 0.15, 0.25, 0.15, 0.20)
+        assert self._BREAKDOWN_KEYS <= set(bd)
+
+    def test_breakdown_empty_a(self):
+        emb_a = np.zeros((0, 3))
+        emb_b = np.array([[1.0, 0.0, 0.0]])
+        score, bd = _align_precomputed_with_breakdown(emb_a, emb_b, [], ["B"], 0.15, 0.25, 0.15, 0.20)
+        assert score == pytest.approx(0.0)
+        assert bd["pre_grounding_score"] == pytest.approx(0.0)
+        assert self._BREAKDOWN_KEYS <= set(bd)
+
+    def test_breakdown_perfect_match(self):
+        v = np.array([[1.0, 0.0, 0.0]])
+        score, bd = _align_precomputed_with_breakdown(v, v, ["CD31 positive"], ["CD31 positive"], 0.15, 0.25, 0.15, 0.20)
+        assert score == pytest.approx(1.0)
+        assert bd["base"] == pytest.approx(1.0)
+        assert bd["count_factor"] == pytest.approx(1.0)   # equal counts
+        assert bd["pre_grounding_score"] == pytest.approx(score)
+
+    def test_pre_grounding_score_equals_score(self):
+        # score == pre_grounding_score because no grounding penalty is applied here.
+        v = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        w = np.array([[1.0, 0.0, 0.0]])
+        score, bd = _align_precomputed_with_breakdown(
+            v, w, ["A", "B"], ["A"], 0.15, 0.25, 0.15, 0.20,
+        )
+        assert bd["pre_grounding_score"] == pytest.approx(score)
+
+    def test_count_a_and_b_recorded(self):
+        v = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        w = np.array([[1.0, 0.0, 0.0]])
+        _, bd = _align_precomputed_with_breakdown(v, w, ["A", "B"], ["A"], 0.15, 0.25, 0.15, 0.20)
+        assert bd["claim_count_a"] == 2
+        assert bd["claim_count_b"] == 1
+
+
+# ── Part A: compute_matrix_with_breakdown ─────────────────────────────────────────
+
+class TestComputeMatrixWithBreakdown:
+    _BREAKDOWN_KEYS = {
+        "voter_i", "voter_j", "score",
+        "claim_count_a", "claim_count_b",
+        "coverage_a_to_b", "coverage_b_to_a", "base",
+        "count_factor", "reuse_factor",
+        "polarity_contradiction_ratio", "numeric_contradiction_ratio",
+        "contradiction_ratio", "contradiction_factor",
+        "pre_grounding_score", "grounding_factor",
+    }
+
+    def test_returns_matrix_and_breakdowns(self):
+        v = [1.0, 0.0, 0.0, 0.0]
+        embed = _make_embed({"A": v})
+        strategy = EmbeddingSimilarityStrategy(embed_fn=embed)
+        outputs = [_summary(["A"]), _summary(["A"])]
+        mat, bds = strategy.compute_matrix_with_breakdown(outputs)
+        assert mat.shape == (2, 2)
+        assert len(bds) == 1  # one upper-triangle pair for N=2
+
+    def test_breakdown_keys_present(self):
+        v = [1.0, 0.0, 0.0, 0.0]
+        embed = _make_embed({"A": v})
+        strategy = EmbeddingSimilarityStrategy(embed_fn=embed)
+        outputs = [_summary(["A"]), _summary(["A"])]
+        _, bds = strategy.compute_matrix_with_breakdown(outputs)
+        assert self._BREAKDOWN_KEYS <= set(bds[0])
+
+    def test_voter_indices_in_breakdown(self):
+        v = [1.0, 0.0, 0.0, 0.0]
+        embed = _make_embed({"A": v})
+        strategy = EmbeddingSimilarityStrategy(embed_fn=embed)
+        outputs = [_summary(["A"]), _summary(["A"]), _summary(["A"])]
+        _, bds = strategy.compute_matrix_with_breakdown(outputs)
+        # N=3 → 3 upper-triangle pairs: (0,1), (0,2), (1,2)
+        assert len(bds) == 3
+        pairs = {(bd["voter_i"], bd["voter_j"]) for bd in bds}
+        assert pairs == {(0, 1), (0, 2), (1, 2)}
+
+    def test_score_matches_matrix(self):
+        v = [1.0, 0.0, 0.0, 0.0]
+        embed = _make_embed({"A": v})
+        strategy = EmbeddingSimilarityStrategy(embed_fn=embed)
+        outputs = [_summary(["A"]), _summary(["A"])]
+        mat, bds = strategy.compute_matrix_with_breakdown(outputs)
+        assert bds[0]["score"] == pytest.approx(mat[0, 1])
+
+    def test_grounding_factor_no_context(self):
+        v = [1.0, 0.0, 0.0, 0.0]
+        embed = _make_embed({"A": v})
+        strategy = EmbeddingSimilarityStrategy(embed_fn=embed)
+        outputs = [_summary(["A"]), _summary(["A"])]
+        _, bds = strategy.compute_matrix_with_breakdown(outputs)
+        assert bds[0]["grounding_factor"] == pytest.approx(1.0)
+
+    def test_grounding_factor_with_low_context(self):
+        v = [1.0, 0.0, 0.0, 0.0]
+        embed = _make_embed({"A": v})
+        strategy = EmbeddingSimilarityStrategy(embed_fn=embed, grounding_floor=0.5)
+        outputs = [_summary(["A"]), _summary(["A"])]
+        ctx = _ctx(*outputs, pass_fracs=[0.0, 0.0])
+        _, bds = strategy.compute_matrix_with_breakdown(outputs, context=ctx)
+        # min(0.0, 0.0) = 0.0 → factor = 0.5 + 0.5*0 = 0.5
+        assert bds[0]["grounding_factor"] == pytest.approx(0.5)
+        assert bds[0]["score"] == pytest.approx(0.5)   # pre_grounding=1.0 * 0.5
+
+    def test_matrix_matches_compute_matrix(self):
+        v = [1.0, 0.0, 0.0, 0.0]
+        embed = _make_embed({"A": v})
+        strategy = EmbeddingSimilarityStrategy(embed_fn=embed, grounding_floor=0.5)
+        outputs = [_summary(["A"]), _summary(["A"])]
+        ctx = _ctx(*outputs, pass_fracs=[0.5, 0.8])
+        mat_plain = strategy.compute_matrix(outputs, context=ctx)
+        mat_bd, _ = strategy.compute_matrix_with_breakdown(outputs, context=ctx)
+        assert mat_plain == pytest.approx(mat_bd)
+
+    def test_empty_no_claims_returns_eye_and_empty_breakdowns(self):
+        embed = _make_embed({})
+        strategy = EmbeddingSimilarityStrategy(embed_fn=embed)
+        outputs = [_summary([]), _summary([])]
+        mat, bds = strategy.compute_matrix_with_breakdown(outputs)
+        assert (mat == pytest.approx(np.eye(2)))
+        assert len(bds) == 1  # still one entry for the pair, with trivial values
+
+
+# ── Part A: PairwiseScore breakdown fields ────────────────────────────────────────
+
+class TestPairwiseScoreBreakdownFields:
+    def test_default_breakdown_fields_are_none(self):
+        from pipeline.stages.summarization.observability.models import PairwiseScore
+        ps = PairwiseScore(voter_i=0, voter_j=1, score=0.9)
+        assert ps.claim_count_a is None
+        assert ps.claim_count_b is None
+        assert ps.coverage_a_to_b is None
+        assert ps.pre_grounding_score is None
+        assert ps.grounding_factor is None
+
+    def test_breakdown_fields_can_be_set(self):
+        from pipeline.stages.summarization.observability.models import PairwiseScore
+        ps = PairwiseScore(
+            voter_i=0, voter_j=1, score=0.7,
+            claim_count_a=3, claim_count_b=2,
+            coverage_a_to_b=0.8, coverage_b_to_a=0.9, base=0.85,
+            count_factor=0.93, reuse_factor=0.97,
+            polarity_contradiction_ratio=0.0, numeric_contradiction_ratio=0.0,
+            contradiction_ratio=0.0, contradiction_factor=1.0,
+            pre_grounding_score=0.79, grounding_factor=0.89,
+        )
+        assert ps.claim_count_a == 3
+        assert ps.grounding_factor == pytest.approx(0.89)
+
+
+# ── Part B: VoterTrace grounding_source field ─────────────────────────────────────
+
+class TestVoterTraceGroundingSource:
+    def test_default_grounding_source_is_fallback(self):
+        from pipeline.stages.summarization.observability.models import VoterTrace
+        vt = VoterTrace(voter_index=0, finding_count=3, grounding_pass_fraction=1.0, mean_evidence_length=1.0)
+        assert vt.grounding_source == "fallback"
+
+    def test_grounding_source_validated(self):
+        from pipeline.stages.summarization.observability.models import VoterTrace
+        vt = VoterTrace(voter_index=0, finding_count=3, grounding_pass_fraction=0.8,
+                        mean_evidence_length=2.0, grounding_source="validated")
+        assert vt.grounding_source == "validated"
+
+
+# ── Part B: RoutingDecision voter_grounding_contexts ─────────────────────────────
+
+class TestRoutingDecisionGroundingContexts:
+    def test_field_exists_and_defaults_none(self):
+        from pipeline.stages.summarization.routing.models import RoutingDecision, GateOrigin, ReasonCode
+        from pipeline.stages.summarization.interfaces.scoring import ChunkDecision
+        decision = RoutingDecision(
+            decision=ChunkDecision.KEEP,
+            gate_origin=GateOrigin.AGREEMENT_GATE,
+            reason_codes=[ReasonCode.HIGH_AGREEMENT],
+            explanation="ok",
+        )
+        assert decision.voter_grounding_contexts is None
+
+    def test_field_can_be_set(self):
+        from pipeline.stages.summarization.routing.models import RoutingDecision, GateOrigin, ReasonCode
+        from pipeline.stages.summarization.interfaces.scoring import ChunkDecision, VoterContext
+        vcs = [VoterContext(grounding_pass_fraction=0.9, mean_evidence_length=2.0)]
+        decision = RoutingDecision(
+            decision=ChunkDecision.KEEP,
+            gate_origin=GateOrigin.AGREEMENT_GATE,
+            reason_codes=[ReasonCode.HIGH_AGREEMENT],
+            explanation="ok",
+            voter_grounding_contexts=vcs,
+        )
+        assert len(decision.voter_grounding_contexts) == 1
+        assert decision.voter_grounding_contexts[0].grounding_pass_fraction == pytest.approx(0.9)

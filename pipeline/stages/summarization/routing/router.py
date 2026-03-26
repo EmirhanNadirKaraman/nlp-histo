@@ -212,6 +212,16 @@ class MapOutputRouter:
 
         classifications = self._classify_voters(outputs, provenance_validator)
 
+        # Build per-voter grounding contexts (all voters, in original index order)
+        # for trace enrichment in _cascade().  Indexed by voter_index.
+        all_voter_contexts = [
+            VoterContext(
+                grounding_pass_fraction=c.grounding_pass_fraction,
+                mean_evidence_length=c.mean_evidence_chain_length,
+            )
+            for c in sorted(classifications, key=lambda c: c.voter_index)
+        ]
+
         early = self._chunk_decision_from_classifications(classifications)
         if early is not None:
             logger.debug(
@@ -220,6 +230,7 @@ class MapOutputRouter:
                 early.gate_origin.value,
                 [r.value for r in early.reason_codes],
             )
+            early.voter_grounding_contexts = all_voter_contexts
             return early
 
         # N_eligible >= 2 — pass ELIGIBLE voters to the agreement gate.
@@ -239,6 +250,7 @@ class MapOutputRouter:
         decision = self._agreement_gate(
             valid_outputs, source_text, valid_voter_indices, context
         )
+        decision.voter_grounding_contexts = all_voter_contexts
         logger.debug(
             "Router agreement gate: %s (gate=%s reasons=%s)",
             decision.decision.value,

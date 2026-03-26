@@ -5,7 +5,7 @@ import numpy as np
 
 from pipeline.stages.summarization.interfaces.scoring import AgreementContext
 from pipeline.stages.summarization.models import AuditableSummary
-from .embedding import _align, _align_precomputed, _claims
+from .embedding import _align, _align_precomputed_with_breakdown, _claims
 from .providers import EmbedFn, OpenAIEmbedder
 
 
@@ -122,10 +122,90 @@ class EmbeddingSimilarityStrategy:
             start += count
 
         # Build symmetric matrix using the shared alignment core.
+        matrix, _ = self._build_matrix_and_breakdowns(
+            n, voter_embs, claim_lists, context
+        )
+        return matrix
+
+    def compute_matrix_with_breakdown(
+        self,
+        outputs: list[AuditableSummary],
+        context: AgreementContext | None = None,
+    ) -> tuple[np.ndarray, list[dict]]:
+        """
+        Same as ``compute_matrix`` but also returns per-pair component breakdowns.
+
+        Returns
+        -------
+        matrix:
+            N×N float matrix (same as ``compute_matrix``).
+        breakdowns:
+            Upper-triangle list of dicts, one per (i, j) pair with i < j,
+            in row-major order.  Each dict contains:
+
+            ``voter_i``, ``voter_j``,
+            ``claim_count_a``, ``claim_count_b``,
+            ``coverage_a_to_b``, ``coverage_b_to_a``, ``base``,
+            ``count_factor``, ``reuse_factor``,
+            ``polarity_contradiction_ratio``, ``numeric_contradiction_ratio``,
+            ``contradiction_ratio``, ``contradiction_factor``,
+            ``pre_grounding_score``,
+            ``grounding_factor``,   (1.0 when no context provided)
+            ``score``               (final value stored in matrix[i,j])
+        """
+        n = len(outputs)
+        claim_lists = [_claims(o) for o in outputs]
+        all_claims = [c for claims in claim_lists for c in claims]
+
+        if not all_claims:
+            empty_bd = [
+                {"voter_i": i, "voter_j": j, "score": 1.0, "grounding_factor": 1.0,
+                 "pre_grounding_score": 1.0}
+                for i in range(n) for j in range(i + 1, n)
+            ]
+            return np.eye(n), empty_bd
+
+        if len(all_claims) <= self._max_batch:
+            raw_embs = np.array(self._embed(all_claims), dtype=float)
+        else:
+            chunks = [
+                all_claims[i : i + self._max_batch]
+                for i in range(0, len(all_claims), self._max_batch)
+            ]
+            raw_embs = np.concatenate(
+                [np.array(self._embed(c), dtype=float) for c in chunks]
+            )
+        norms = np.linalg.norm(raw_embs, axis=1, keepdims=True)
+        norms = np.where(norms == 0.0, 1.0, norms)
+        all_embs = raw_embs / norms
+
+        voter_embs: list[np.ndarray] = []
+        start = 0
+        for claims in claim_lists:
+            voter_embs.append(all_embs[start : start + len(claims)])
+            start += len(claims)
+
+        matrix, breakdowns = self._build_matrix_and_breakdowns(
+            n, voter_embs, claim_lists, context
+        )
+        return matrix, breakdowns
+
+    # ── Shared internals ───────────────────────────────────────────────────────
+
+    def _build_matrix_and_breakdowns(
+        self,
+        n: int,
+        voter_embs: list[np.ndarray],
+        claim_lists: list[list[str]],
+        context: AgreementContext | None,
+    ) -> tuple[np.ndarray, list[dict]]:
+        """Build N×N matrix and upper-triangle breakdown list in one pass."""
         matrix = np.eye(n)
+        breakdowns: list[dict] = []
+
         for i in range(n):
             for j in range(i + 1, n):
-                score = _align_precomputed(
+                score, bd = _align_precomputed_with_breakdown(
                     voter_embs[i], voter_embs[j],
                     claim_lists[i], claim_lists[j],
                     tau=self._tau,
@@ -133,19 +213,23 @@ class EmbeddingSimilarityStrategy:
                     reuse_weight=self._reuse_weight,
                     contradiction_weight=self._contradiction_weight,
                 )
-                matrix[i, j] = score
-                matrix[j, i] = score
 
-        # Per-pair grounding penalty: min(pf_i, pf_j) for each off-diagonal entry.
-        if context is not None and len(context.voter_contexts) == n:
-            for i in range(n):
-                for j in range(i + 1, n):
+                grounding_factor = 1.0
+                if context is not None and len(context.voter_contexts) == n:
                     g = min(
                         context.voter_contexts[i].grounding_pass_fraction,
                         context.voter_contexts[j].grounding_pass_fraction,
                     )
-                    factor = self._grounding_floor + (1.0 - self._grounding_floor) * g
-                    matrix[i, j] *= factor
-                    matrix[j, i] *= factor
+                    grounding_factor = self._grounding_floor + (1.0 - self._grounding_floor) * g
+                    score *= grounding_factor
 
-        return matrix
+                matrix[i, j] = score
+                matrix[j, i] = score
+
+                bd["voter_i"] = i
+                bd["voter_j"] = j
+                bd["grounding_factor"] = round(grounding_factor, 6)
+                bd["score"] = round(score, 6)
+                breakdowns.append(bd)
+
+        return matrix, breakdowns

@@ -204,8 +204,55 @@ def _align_precomputed(
 
     Grounding penalty is NOT applied here — it is caller-level (EmbeddingScorer).
     """
+    score, _ = _align_precomputed_with_breakdown(
+        emb_a, emb_b, a_claims, b_claims,
+        tau, count_alpha, reuse_weight, contradiction_weight,
+    )
+    return score
+
+
+def _align_precomputed_with_breakdown(
+    emb_a: np.ndarray,
+    emb_b: np.ndarray,
+    a_claims: list[str],
+    b_claims: list[str],
+    tau: float,
+    count_alpha: float,
+    reuse_weight: float,
+    contradiction_weight: float,
+) -> tuple[float, dict]:
+    """
+    Same computation as ``_align_precomputed`` but returns ``(score, breakdown)``.
+
+    The breakdown dict contains every intermediate component so callers can
+    store or display the derivation without re-running the computation:
+
+    ``claim_count_a``, ``claim_count_b``,
+    ``coverage_a_to_b``, ``coverage_b_to_a``, ``base``,
+    ``count_factor``, ``reuse_factor``,
+    ``polarity_contradiction_ratio``, ``numeric_contradiction_ratio``,
+    ``contradiction_ratio``, ``contradiction_factor``,
+    ``pre_grounding_score``  (= base × count_factor × reuse_factor × contradiction_factor)
+
+    Grounding penalty is applied by the caller; ``pre_grounding_score`` equals
+    the final score when no grounding penalty is applied.
+    """
     if emb_a.shape[0] == 0 or emb_b.shape[0] == 0:
-        return 0.0
+        bd: dict = {
+            "claim_count_a": len(a_claims),
+            "claim_count_b": len(b_claims),
+            "coverage_a_to_b": 0.0,
+            "coverage_b_to_a": 0.0,
+            "base": 0.0,
+            "count_factor": 0.0,
+            "reuse_factor": 0.0,
+            "polarity_contradiction_ratio": 0.0,
+            "numeric_contradiction_ratio": 0.0,
+            "contradiction_ratio": 0.0,
+            "contradiction_factor": 0.0,
+            "pre_grounding_score": 0.0,
+        }
+        return 0.0, bd
 
     sim = np.clip(emb_a @ emb_b.T, 0.0, 1.0)      # (na, nb), clipped to [0, 1]
     sim_t = np.where(sim < tau, 0.0, sim)            # zero out weak matches
@@ -226,10 +273,28 @@ def _align_precomputed(
     reuse = (rf_a2b + rf_b2a) / 2.0
 
     # 3. Contradiction — polarity + numeric heuristics
-    contra_ratio = _contradiction_ratio(a_claims, b_claims, sim_t, tau)
+    polarity_cr = _polarity_contradiction_ratio(a_claims, b_claims, sim_t, tau)
+    numeric_cr = _numeric_contradiction_ratio(a_claims, b_claims, sim_t, tau)
+    contra_ratio = max(polarity_cr, numeric_cr)
     contra_factor = 1.0 - contradiction_weight * contra_ratio
 
-    return base * count_factor * reuse * contra_factor
+    score = base * count_factor * reuse * contra_factor
+
+    breakdown: dict = {
+        "claim_count_a": len_a,
+        "claim_count_b": len_b,
+        "coverage_a_to_b": round(a_to_b, 6),
+        "coverage_b_to_a": round(b_to_a, 6),
+        "base": round(base, 6),
+        "count_factor": round(count_factor, 6),
+        "reuse_factor": round(reuse, 6),
+        "polarity_contradiction_ratio": round(polarity_cr, 6),
+        "numeric_contradiction_ratio": round(numeric_cr, 6),
+        "contradiction_ratio": round(contra_ratio, 6),
+        "contradiction_factor": round(contra_factor, 6),
+        "pre_grounding_score": round(score, 6),
+    }
+    return score, breakdown
 
 
 def _align(

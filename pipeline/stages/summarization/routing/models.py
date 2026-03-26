@@ -109,3 +109,8 @@ class RoutingDecision:
     # Indices into the original voter list that were classified ELIGIBLE.
     # Populated on KEEP decisions so _cascade() knows which voters to pass to best().
     valid_voter_indices: list[int] | None = None
+    # Per-voter grounding contexts from ProvenanceValidator — one entry per voter,
+    # indexed by original voter position.  Populated by the router for all voters
+    # (eligible, weakly-grounded, and unusable) so traces can show real grounding
+    # quality instead of the structural fallback proxy.
+    voter_grounding_contexts: list | None = None  # list[VoterContext] | None

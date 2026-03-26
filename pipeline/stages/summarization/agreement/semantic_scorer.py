@@ -150,13 +150,19 @@ class SemanticAgreementScorer:
         # Build similarity matrix over non-empty voters only (batched if supported).
         # Forward a filtered AgreementContext so EmbeddingSimilarityStrategy can
         # apply per-pair grounding penalties aligned with outputs_sub.
-        if hasattr(self._strategy, "compute_matrix"):
-            ctx_sub: AgreementContext | None = None
-            if context is not None:
-                ctx_sub = AgreementContext(voter_contexts=[
-                    VoterContext(grounding_pass_fraction=pf, mean_evidence_length=me)
-                    for pf, me in quality_sub
-                ])
+        pair_breakdowns: list[dict] = []
+        ctx_sub: AgreementContext | None = None
+        if context is not None:
+            ctx_sub = AgreementContext(voter_contexts=[
+                VoterContext(grounding_pass_fraction=pf, mean_evidence_length=me)
+                for pf, me in quality_sub
+            ])
+
+        if hasattr(self._strategy, "compute_matrix_with_breakdown"):
+            matrix, pair_breakdowns = self._strategy.compute_matrix_with_breakdown(
+                outputs_sub, context=ctx_sub
+            )
+        elif hasattr(self._strategy, "compute_matrix"):
             matrix = self._strategy.compute_matrix(outputs_sub, context=ctx_sub)
         else:
             matrix = self._build_matrix_pairwise(outputs_sub)
@@ -179,6 +185,33 @@ class SemanticAgreementScorer:
             best_index,
         )
 
+        # Build pairwise_upper: merge breakdown data when available.
+        # pair_breakdowns uses sub-indices (0..m-1); remap to global voter indices.
+        bd_by_subpair: dict[tuple[int, int], dict] = {
+            (bd["voter_i"], bd["voter_j"]): bd for bd in pair_breakdowns
+        }
+        pairwise_upper = []
+        for i in range(m):
+            for j in range(i + 1, m):
+                entry: dict = {
+                    "voter_i": non_empty_idx[i],
+                    "voter_j": non_empty_idx[j],
+                    "score": round(float(matrix[i, j]), 6),
+                }
+                sub_bd = bd_by_subpair.get((i, j))
+                if sub_bd is not None:
+                    entry.update({
+                        k: sub_bd[k] for k in (
+                            "claim_count_a", "claim_count_b",
+                            "coverage_a_to_b", "coverage_b_to_a", "base",
+                            "count_factor", "reuse_factor",
+                            "polarity_contradiction_ratio", "numeric_contradiction_ratio",
+                            "contradiction_ratio", "contradiction_factor",
+                            "pre_grounding_score", "grounding_factor",
+                        ) if k in sub_bd
+                    })
+                pairwise_upper.append(entry)
+
         bundle = ScoreBundle(
             confidence=deferral_score,
             embedding_agreement=deferral_score,
@@ -186,15 +219,7 @@ class SemanticAgreementScorer:
             score_details={
                 "eligible_voter_indices": non_empty_idx,
                 "avg_sim": avg_sim.tolist(),
-                "pairwise_upper": [
-                    {
-                        "voter_i": non_empty_idx[i],
-                        "voter_j": non_empty_idx[j],
-                        "score": float(matrix[i, j]),
-                    }
-                    for i in range(m)
-                    for j in range(i + 1, m)
-                ],
+                "pairwise_upper": pairwise_upper,
             },
         )
 

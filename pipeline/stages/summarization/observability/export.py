@@ -148,6 +148,13 @@ def export_pairwise_scores_csv(chunks_jsonl: Path, out_csv: Path) -> int:
         "run_id", "pmcid", "chunk_id",
         "voter_i", "voter_j", "score",
         "decision", "deferral_score",
+        # Alignment component breakdown (present when EmbeddingSimilarityStrategy is used)
+        "claim_count_a", "claim_count_b",
+        "coverage_a_to_b", "coverage_b_to_a", "base",
+        "count_factor", "reuse_factor",
+        "polarity_contradiction_ratio", "numeric_contradiction_ratio",
+        "contradiction_ratio", "contradiction_factor",
+        "pre_grounding_score", "grounding_factor",
     ]
     written = 0
 
@@ -160,7 +167,7 @@ def export_pairwise_scores_csv(chunks_jsonl: Path, out_csv: Path) -> int:
             decision = agreement.get("decision")
             deferral = agreement.get("deferral_score")
             for ps in agreement.get("pairwise_scores", []):
-                writer.writerow({
+                row: dict = {
                     "run_id": r.get("run_id"),
                     "pmcid": r.get("pmcid"),
                     "chunk_id": r.get("chunk_id"),
@@ -169,7 +176,18 @@ def export_pairwise_scores_csv(chunks_jsonl: Path, out_csv: Path) -> int:
                     "score": ps.get("score"),
                     "decision": decision,
                     "deferral_score": deferral,
-                })
+                }
+                # Merge breakdown fields if present in the pairwise_score record.
+                for k in (
+                    "claim_count_a", "claim_count_b",
+                    "coverage_a_to_b", "coverage_b_to_a", "base",
+                    "count_factor", "reuse_factor",
+                    "polarity_contradiction_ratio", "numeric_contradiction_ratio",
+                    "contradiction_ratio", "contradiction_factor",
+                    "pre_grounding_score", "grounding_factor",
+                ):
+                    row[k] = ps.get(k)
+                writer.writerow(row)
                 written += 1
     return written
 
