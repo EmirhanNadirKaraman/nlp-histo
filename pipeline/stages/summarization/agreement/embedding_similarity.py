@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from pipeline.stages.summarization.interfaces.scoring import AgreementContext
 from pipeline.stages.summarization.models import AuditableSummary
-from .embedding import _align, _claims
+from .embedding import _align, _align_precomputed, _claims
 from .providers import EmbedFn, OpenAIEmbedder
 
 
@@ -12,42 +13,83 @@ class EmbeddingSimilarityStrategy:
     """
     Pairwise soft-alignment cosine similarity on claim embeddings.
 
-    Wraps the ``_align()`` helper from ``embedding.py`` for single-pair use,
-    and adds ``compute_matrix()`` for batched N-voter evaluation that issues a
-    single embedding API call regardless of N.
+    Wraps ``_align()`` for single-pair use and adds ``compute_matrix()`` for
+    batched N-voter evaluation that issues a single embedding API call regardless
+    of N.  Both paths apply the same penalty set as EmbeddingScorer: weak-match
+    threshold, count mismatch, reuse concentration, and contradiction.
+    When an ``AgreementContext`` is passed to ``compute_matrix()``, a per-pair
+    grounding factor is applied using ``min(pf_i, pf_j)`` for each matrix entry.
 
     Parameters
     ----------
     embed_fn:
         Callable that maps a list of strings to embedding vectors.
         Defaults to OpenAIEmbedder (text-embedding-3-small).
+    max_claims_per_batch:
+        Chunk size for the single-batch embedding call.
+    tau:
+        Weak-match threshold.  Default 0.15.
+    count_alpha:
+        Count-mismatch penalty exponent.  Default 0.25.
+    reuse_weight:
+        Reuse-concentration penalty weight.  Default 0.15.
+    contradiction_weight:
+        Contradiction penalty weight.  Default 0.20.
+    grounding_floor:
+        Minimum per-pair grounding factor when AgreementContext is provided.
+        Default 0.50.
     """
 
     def __init__(
         self,
         embed_fn: EmbedFn | None = None,
         max_claims_per_batch: int = 2048,
+        tau: float = 0.15,
+        count_alpha: float = 0.25,
+        reuse_weight: float = 0.15,
+        contradiction_weight: float = 0.20,
+        grounding_floor: float = 0.50,
     ) -> None:
         self._embed: EmbedFn = embed_fn or OpenAIEmbedder()
         self._max_batch = max_claims_per_batch
+        self._tau = tau
+        self._count_alpha = count_alpha
+        self._reuse_weight = reuse_weight
+        self._contradiction_weight = contradiction_weight
+        self._grounding_floor = grounding_floor
 
     def similarity(self, a: AuditableSummary, b: AuditableSummary) -> float:
         """Single-pair similarity (for unit tests and single-call use)."""
-        return _align(self._embed, _claims(a), _claims(b))
+        return _align(
+            self._embed, _claims(a), _claims(b),
+            tau=self._tau,
+            count_alpha=self._count_alpha,
+            reuse_weight=self._reuse_weight,
+            contradiction_weight=self._contradiction_weight,
+        )
 
-    def compute_matrix(self, outputs: list[AuditableSummary]) -> np.ndarray:
+    def compute_matrix(
+        self,
+        outputs: list[AuditableSummary],
+        context: AgreementContext | None = None,
+    ) -> np.ndarray:
         """
         Build the full N×N similarity matrix in a single embedding API call.
 
         All claims from all voters are concatenated, embedded in one request,
-        then split back by voter to compute soft-alignment scores.  This avoids
-        O(N²) separate API calls that a naive pairwise approach would require.
+        then split back by voter.  ``_align_precomputed`` applies the full
+        penalty set (tau, count, reuse, contradiction) using the pre-normalised
+        embeddings and raw claim strings.
+
+        If ``context`` is provided and ``len(context.voter_contexts) == N``,
+        each off-diagonal entry ``M[i, j]`` is multiplied by a grounding factor
+        derived from ``min(pf_i, pf_j)`` — the worst-grounded voter in that pair.
 
         Returns
         -------
         np.ndarray
-            N×N float matrix where ``M[i, j]`` is the soft-alignment cosine
-            similarity between voter i and voter j.  Diagonal entries are 1.0.
+            N×N float matrix where ``M[i, j]`` is the adjusted soft-alignment
+            score between voter i and voter j.  Diagonal entries are 1.0.
         """
         n = len(outputs)
         claim_lists = [_claims(o) for o in outputs]
@@ -56,7 +98,7 @@ class EmbeddingSimilarityStrategy:
         if not all_claims:
             return np.eye(n)
 
-        # One API call for every claim across every voter (chunked when > max_batch).
+        # One embedding API call for all claims across all voters.
         if len(all_claims) <= self._max_batch:
             raw_embs = np.array(self._embed(all_claims), dtype=float)
         else:
@@ -79,19 +121,31 @@ class EmbeddingSimilarityStrategy:
             voter_embs.append(all_embs[start : start + count])
             start += count
 
-        # Build symmetric matrix.
+        # Build symmetric matrix using the shared alignment core.
         matrix = np.eye(n)
         for i in range(n):
             for j in range(i + 1, n):
-                emb_a, emb_b = voter_embs[i], voter_embs[j]
-                if emb_a.shape[0] == 0 or emb_b.shape[0] == 0:
-                    score = 0.0
-                else:
-                    sim = emb_a @ emb_b.T
-                    a_to_b = float(sim.max(axis=1).mean())
-                    b_to_a = float(sim.max(axis=0).mean())
-                    score = (a_to_b + b_to_a) / 2.0
+                score = _align_precomputed(
+                    voter_embs[i], voter_embs[j],
+                    claim_lists[i], claim_lists[j],
+                    tau=self._tau,
+                    count_alpha=self._count_alpha,
+                    reuse_weight=self._reuse_weight,
+                    contradiction_weight=self._contradiction_weight,
+                )
                 matrix[i, j] = score
                 matrix[j, i] = score
+
+        # Per-pair grounding penalty: min(pf_i, pf_j) for each off-diagonal entry.
+        if context is not None and len(context.voter_contexts) == n:
+            for i in range(n):
+                for j in range(i + 1, n):
+                    g = min(
+                        context.voter_contexts[i].grounding_pass_fraction,
+                        context.voter_contexts[j].grounding_pass_fraction,
+                    )
+                    factor = self._grounding_floor + (1.0 - self._grounding_floor) * g
+                    matrix[i, j] *= factor
+                    matrix[j, i] *= factor
 
         return matrix

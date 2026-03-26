@@ -24,6 +24,7 @@ from pipeline.stages.summarization.interfaces.scoring import (
     AgreementContext,
     ChunkDecision,
     ScoreBundle,
+    VoterContext,
 )
 from pipeline.stages.summarization.interfaces.similarity import SimilarityStrategy
 from pipeline.stages.summarization.models import AuditableSummary
@@ -147,8 +148,16 @@ class SemanticAgreementScorer:
         quality_sub = [quality[i] for i in non_empty_idx]
 
         # Build similarity matrix over non-empty voters only (batched if supported).
+        # Forward a filtered AgreementContext so EmbeddingSimilarityStrategy can
+        # apply per-pair grounding penalties aligned with outputs_sub.
         if hasattr(self._strategy, "compute_matrix"):
-            matrix = self._strategy.compute_matrix(outputs_sub)
+            ctx_sub: AgreementContext | None = None
+            if context is not None:
+                ctx_sub = AgreementContext(voter_contexts=[
+                    VoterContext(grounding_pass_fraction=pf, mean_evidence_length=me)
+                    for pf, me in quality_sub
+                ])
+            matrix = self._strategy.compute_matrix(outputs_sub, context=ctx_sub)
         else:
             matrix = self._build_matrix_pairwise(outputs_sub)
 
