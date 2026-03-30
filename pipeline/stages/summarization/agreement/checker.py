@@ -56,6 +56,8 @@ class AgreementChecker:
         context: AgreementContext | None = None,
     ) -> ScoreBundle:
         """Run the scorer and guarantee ScoreBundle.decision is populated."""
+        if len(outputs) == 0:
+            return ScoreBundle(confidence=0.0, decision=ChunkDecision.ESCALATE)
         if len(outputs) < 2:
             return ScoreBundle(confidence=1.0, decision=ChunkDecision.KEEP)
 
