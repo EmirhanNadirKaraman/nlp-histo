@@ -8,11 +8,17 @@ from langchain_anthropic import ChatAnthropic
 from pipeline.stages.summarization import SummarizationRunner
 
 runner = SummarizationRunner(
-    voter_llms=[
-        ChatOpenAI(model="gpt-4o-mini",                    temperature=0.1),
-        ChatAnthropic(model="claude-haiku-4-5-20251001",   temperature=0.1),
+    voter_llms=[                                                   # Level 1: cheapest
+        AzureChatOpenAI(model="DeepSeek-V3.2-Speciale",          temperature=0.1),
+        VertexAI(model="gemini-2.5-flash-lite-preview-06-17",     temperature=0.1),
+        AzureChatOpenAI(model="mistral-large-3",                  temperature=0.1),
     ],
-    escalation_llm=ChatOpenAI(model="gpt-4o", temperature=0),
+    level2_voter_llms=[                                            # Level 2: mid-tier
+        VertexAI(model="gemini-2.5-flash",                        temperature=0.1),
+        AzureChatOpenAI(model="kimi-k2.5",                        temperature=0.1),
+        ChatAnthropic(model="claude-haiku-4-5-20251001",          temperature=0.1),
+    ],
+    escalation_llm=ChatAnthropic(model="claude-sonnet-4-6", temperature=0),  # Level 3
     theta=0.7,
     output_dir=Path("out/summaries"),
     trace_enabled=True,   # ← enable structured JSONL traces
@@ -62,11 +68,15 @@ class SummarizationRunner:
     ----------
     voter_llms:
         List of LangChain chat models used as Level-1 voters in the MAP stage.
-        Use models from different providers for genuine independence
-        (e.g. [ChatOpenAI("gpt-4o-mini"), ChatAnthropic("claude-haiku-...")]).
+        Use cheap models from different providers for genuine independence
+        (e.g. [DeepSeek, Gemini-Flash-Lite, Mistral-Large]).
+    level2_voter_llms:
+        List of LangChain chat models used as Level-2 voters.  Called only when
+        Level-1 voters disagree.  Use mid-tier models from different providers
+        (e.g. [Gemini-Flash, kimi-k2.5, Haiku]).
     escalation_llm:
-        LLM for MAP Level-2 escalations, REDUCE, and RULES.
-        Typically a larger model (e.g. gpt-4o).
+        LLM for MAP Level-3 (final) escalations, REDUCE, and RULES.
+        Typically the most capable model (e.g. Sonnet 4.6).
     theta:
         Agreement threshold for the ABC cascade in the MAP stage.
     chunk_size:
@@ -98,6 +108,7 @@ class SummarizationRunner:
     def __init__(
         self,
         voter_llms: list,
+        level2_voter_llms: list,
         escalation_llm,
         theta: float = 0.7,
         chunk_size: int = 10,
@@ -116,7 +127,7 @@ class SummarizationRunner:
         cache_file = cache_path or (output_dir / "pipeline_cache.json")
         self._cache = PipelineCache(cache_file)
 
-        self._map = MapStage(voter_llms, escalation_llm, theta=theta, chunk_size=chunk_size, scorer=scorer)
+        self._map = MapStage(voter_llms, level2_voter_llms, escalation_llm, theta=theta, chunk_size=chunk_size, scorer=scorer)
         self._reduce = ReduceStage(escalation_llm)
         self._rules = RuleStage(escalation_llm)
         self._grounding: GroundingChecker | None = (
@@ -139,6 +150,8 @@ class SummarizationRunner:
             "contradiction_similarity_threshold": contradiction_similarity_threshold,
             "voter_model_count": len(voter_llms),
             "voter_models": [_model_name(m) for m in voter_llms],
+            "level2_voter_model_count": len(level2_voter_llms),
+            "level2_voter_models": [_model_name(m) for m in level2_voter_llms],
             "escalation_model": _model_name(escalation_llm),
         }
 

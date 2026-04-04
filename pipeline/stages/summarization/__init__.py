@@ -8,6 +8,7 @@ from .agreement import (
     ChunkDecision,
 )
 from .runner import SummarizationRunner
+from .batch import BatchSummarizationRunner, BatchHandle, BatchPhase, VoterBatchConfig
 from .models import (
     AuditableSummary,
     ConsolidatedSummary,
@@ -17,6 +18,10 @@ from .models import (
 
 __all__ = [
     "SummarizationRunner",
+    "BatchSummarizationRunner",
+    "BatchHandle",
+    "BatchPhase",
+    "VoterBatchConfig",
     "AuditableSummary",
     "ConsolidatedSummary",
     "ExtractedRules",

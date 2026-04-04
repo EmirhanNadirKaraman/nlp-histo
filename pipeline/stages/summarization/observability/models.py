@@ -103,6 +103,7 @@ class ChunkTrace:
     agreement: AgreementTrace | None  # None on cache hits
     selected_voter_index: int | None  # None when escalated or cache hit
     escalated: bool
+    escalation_level: int = 1  # 1=kept by L1, 2=kept by L2, 3=sent to L3
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -129,8 +130,9 @@ class MapStageTrace:
     total_chunks: int
     cache_hits: int
     cache_misses: int
-    escalations: int           # chunks sent to escalation LLM
-    keeps: int                 # chunks accepted from voters
+    escalations: int           # chunks sent to L3 (final escalation)
+    l2_escalations: int        # chunks that reached L2 (may have been kept there)
+    keeps: int                 # chunks accepted from voters (L1 or L2)
     rejects: int               # hard-rejected chunks (deferral ≤ reject_theta)
     total_findings_out: int    # sum of findings across all accepted chunk summaries
 

@@ -5,12 +5,18 @@ For each chunk of sentences:
   Level 1  — run each voter LLM in parallel (one call per voter).
              Voters should be distinct models / providers so disagreement
              reflects genuine architectural differences, not just sampling
-             noise (e.g. gpt-4o-mini + claude-haiku).  When using same-
-             provider voters, use temperature diversity and lower theta.
+             noise (e.g. gemini-flash + deepseek + mistral).  When using
+             same-provider voters, use temperature diversity and lower theta.
              If pairwise claim-embedding alignment >= theta, accept the
              best result.
-  Level 2  — escalate to the smart model (single call) for chunks where
-             voters disagree.
+  Level 2  — escalate to mid-tier voter LLMs (one call per voter, in
+             parallel) for chunks where Level 1 voters disagree.  If these
+             agree, accept the best result without calling Level 3.
+  Level 3  — escalate to the strong model (single call) for chunks where
+             both Level 1 and Level 2 voters disagree.
+
+Note: the router path (when self._router is not None) bypasses Level 2 and
+escalates directly from Level 1 to Level 3.
 """
 from __future__ import annotations
 
@@ -76,6 +82,7 @@ class MapStage:
     def __init__(
         self,
         voter_llms: list,
+        level2_voter_llms: list,
         escalation_llm,
         theta: float = 0.7,
         chunk_size: int = 10,
@@ -85,7 +92,10 @@ class MapStage:
     ) -> None:
         if not voter_llms:
             raise ValueError("voter_llms must contain at least one LLM.")
+        if not level2_voter_llms:
+            raise ValueError("level2_voter_llms must contain at least one LLM.")
         self._voter_chains = [build_map_chain(llm) for llm in voter_llms]
+        self._level2_voter_chains = [build_map_chain(llm) for llm in level2_voter_llms]
         self._escalation_chain = build_map_chain(escalation_llm)
         self._agreement = AgreementChecker(scorer=scorer or EmbeddingScorer(), theta=theta)
         self._router = router
@@ -159,6 +169,10 @@ class MapStage:
             n_miss = len(uncached)
             chunk_traces = collector.chunk_traces
             escalations = sum(1 for ct in chunk_traces if ct.escalated and not ct.cache_hit)
+            l2_escalations = sum(
+                1 for ct in chunk_traces
+                if not ct.cache_hit and ct.escalation_level >= 2
+            )
             keeps = sum(
                 1 for ct in chunk_traces
                 if not ct.cache_hit and not ct.escalated
@@ -171,6 +185,7 @@ class MapStage:
                 cache_hits=n_cache,
                 cache_misses=n_miss,
                 escalations=escalations,
+                l2_escalations=l2_escalations,
                 keeps=keeps,
                 rejects=max(rejects, 0),
                 total_findings_out=sum(len(r.findings) for r in live_results),
@@ -199,6 +214,7 @@ class MapStage:
         # Slot to hold the agreement bundle and grounding contexts for trace building
         _trace_bundle = None
         _escalated = False
+        _escalation_level = 1  # 1=L1 kept, 2=L2 kept, 3=L3 used
         _voter_contexts = None  # list[VoterContext] | None — from router
 
         # ── Grounding-first router path ─────────────────────────────────────
@@ -237,7 +253,9 @@ class MapStage:
                     else None
                 )
             else:
+                # Router path escalates L1→L3 directly (no L2 step)
                 _escalated = True
+                _escalation_level = 3
                 if decision.decision == ChunkDecision.REJECT:
                     logger.info(
                         "Chunk %s rejected by router — escalating to strong model.",
@@ -295,18 +313,34 @@ class MapStage:
                     )
                 )
 
-        # ── Legacy path (no router) ─────────────────────────────────────────
+        # ── Legacy path (no router): 3-level cascade ───────────────────────
         else:
+            # Level 1: cheapest voters
             bundle = self._agreement.compute(voters, source_text=inp["text"])
             _trace_bundle = bundle
 
             if bundle.decision == ChunkDecision.KEEP:
-                logger.debug("Chunk %s: %s → voters accepted", chunk_id, bundle.decision)
+                logger.debug("Chunk %s: L1 %s → voters accepted", chunk_id, bundle.decision)
                 result = self._agreement.best(voters, bundle=bundle)
             else:
-                _escalated = True
-                logger.debug("Chunk %s: %s → escalating", chunk_id, bundle.decision)
-                result = self._escalation_chain.invoke(inp)
+                # Level 2: mid-tier voters
+                logger.debug("Chunk %s: L1 %s → escalating to L2", chunk_id, bundle.decision)
+                l2_voters, l2_timings = self._run_voters(inp, self._level2_voter_chains)
+                l2_bundle = self._agreement.compute(l2_voters, source_text=inp["text"])
+                _trace_bundle = l2_bundle
+                voters = l2_voters
+                voter_timings = l2_timings
+                _escalation_level = 2
+
+                if l2_bundle.decision == ChunkDecision.KEEP:
+                    logger.debug("Chunk %s: L2 %s → voters accepted", chunk_id, l2_bundle.decision)
+                    result = self._agreement.best(l2_voters, bundle=l2_bundle)
+                else:
+                    # Level 3: final escalation model
+                    _escalated = True
+                    _escalation_level = 3
+                    logger.debug("Chunk %s: L2 %s → escalating to L3", chunk_id, l2_bundle.decision)
+                    result = self._escalation_chain.invoke(inp)
 
         # ── Build chunk trace ───────────────────────────────────────────────
         if collector is not None:
@@ -321,6 +355,7 @@ class MapStage:
                 bundle=_trace_bundle,
                 escalated=_escalated,
                 voter_contexts=_voter_contexts,
+                escalation_level=_escalation_level,
             )
 
         return result
@@ -337,6 +372,7 @@ class MapStage:
         bundle,  # ScoreBundle | None
         escalated: bool,
         voter_contexts=None,  # list[VoterContext] | None — from router
+        escalation_level: int = 1,
     ) -> None:
         from .observability.models import (
             AgreementTrace,
@@ -443,18 +479,26 @@ class MapStage:
             agreement=agreement_trace,
             selected_voter_index=selected_voter_index,
             escalated=escalated,
+            escalation_level=escalation_level,
         ))
 
     def _run_voters(
-        self, inp: dict
+        self, inp: dict, chains: list | None = None
     ) -> tuple[list[AuditableSummary], dict[int, float | None]]:
         """Invoke each voter chain concurrently; return results and per-voter latency.
 
         A single voter chain exception is logged and that voter is excluded
         from the result list.  The router handles the reduced count correctly
         (N_eligible < 2 → ESCALATE or REJECT as appropriate).
+
+        Parameters
+        ----------
+        chains:
+            Voter chains to run.  Defaults to self._voter_chains (Level 1).
+            Pass self._level2_voter_chains to run Level 2 voters.
         """
-        results: list[AuditableSummary | None] = [None] * len(self._voter_chains)
+        target = chains if chains is not None else self._voter_chains
+        results: list[AuditableSummary | None] = [None] * len(target)
         timings: dict[int, float | None] = {}
 
         def _timed_invoke(chain, i: int):
@@ -463,10 +507,10 @@ class MapStage:
             timings[i] = (time.monotonic() - t0) * 1000.0
             return out
 
-        with ThreadPoolExecutor(max_workers=len(self._voter_chains)) as pool:
+        with ThreadPoolExecutor(max_workers=len(target)) as pool:
             future_to_idx = {
                 pool.submit(_timed_invoke, chain, i): i
-                for i, chain in enumerate(self._voter_chains)
+                for i, chain in enumerate(target)
             }
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
