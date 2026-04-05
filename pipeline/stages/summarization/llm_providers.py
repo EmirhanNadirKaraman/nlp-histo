@@ -30,7 +30,6 @@ from __future__ import annotations
 import os
 import re
 
-from langchain_anthropic import ChatAnthropicVertex
 from langchain_openai import ChatOpenAI
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
@@ -102,9 +101,9 @@ def azure_foundry_chat(
         base_url=f"{ep}/models",
         api_key=key,
         temperature=temperature,
-        max_tokens=max_tokens,
         default_query={"api-version": api_version},
         default_headers={"api-key": key},
+        model_kwargs={"max_tokens": max_tokens},
     )
 
 
@@ -175,7 +174,7 @@ def claude_vertex_chat(
     location: str | None = None,
     temperature: float = 0.1,
     max_tokens: int = 4096,
-) -> ChatAnthropicVertex:
+):
     """
     Return a LangChain ChatAnthropicVertex for a Claude model on Vertex AI.
 
@@ -192,6 +191,8 @@ def claude_vertex_chat(
     location:
         Override for CLAUDE_VERTEX_LOCATION (default: us-east5).
     """
+    from langchain_anthropic import ChatAnthropicVertex  # optional dep
+
     proj = project or os.environ["VERTEX_PROJECT"]
     loc = location or os.environ.get("CLAUDE_VERTEX_LOCATION", "us-east5")
     return ChatAnthropicVertex(

@@ -134,6 +134,12 @@ class MapStage:
             results.append(None)
             uncached.append((idx, chunk))
 
+        if cache_hit_indices:
+            logger.info(
+                "[%s] MAP cache: %d/%d chunks hit, %d to process",
+                pmcid, len(cache_hit_indices), len(chunks), len(uncached),
+            )
+
         # Record cache-hit chunk traces (lightweight — no voter/agreement data)
         if collector is not None:
             for idx in cache_hit_indices:
@@ -154,9 +160,22 @@ class MapStage:
                     escalated=False,
                 ))
 
-        for idx, chunk in uncached:
+        total_chunks = len(chunks)
+        n_cached = len(cache_hit_indices)
+        for pos, (idx, chunk) in enumerate(uncached, 1):
             chunk_id = f"C{idx + 1}"
+            logger.info(
+                "[%s] MAP chunk %s/%s (chunk_id=%s, %d sentences) …",
+                pmcid, n_cached + pos, total_chunks, chunk_id, len(chunk),
+            )
+            t_chunk = time.monotonic()
             result = self._cascade(chunk, pmcid, chunk_id, collector=collector)
+            elapsed_ms = (time.monotonic() - t_chunk) * 1000
+            n_findings = len(result.findings) if result else 0
+            logger.info(
+                "[%s] MAP chunk %s/%s done — %d findings  [%.0fms]",
+                pmcid, n_cached + pos, total_chunks, n_findings, elapsed_ms,
+            )
             results[idx] = result
             if cache and result is not None:
                 cache.set_map(chunk, result)

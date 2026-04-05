@@ -17,7 +17,7 @@ import logging
 from collections import Counter
 from functools import cached_property
 
-from .models import AuditableSummary, EvidenceChainItem, ExtractedRules, Rule, RuleAuditSummary, RuleCounts
+from .models import AuditableSummary, EvidenceChainItem, ExtractedRules, Finding, Rule, RuleAuditSummary, RuleCounts
 
 logger = logging.getLogger(__name__)
 
@@ -131,20 +131,93 @@ class GroundingFilter:
         Run NLI on all (premise, hypothesis) pairs in one batch.
         Returns a bool list: True if entailment score >= threshold.
         """
-        inputs = [{"text": premise, "text_pair": hyp} for premise, hyp in pairs]
-        batch_results = self._pipe(inputs)
-
-        mask = []
-        for scores in batch_results:
-            entailment_score = next(
-                (s["score"] for s in scores if s["label"].lower() == "entailment"),
-                0.0,
-            )
-            mask.append(entailment_score >= self.threshold)
-        return mask
+        scores = _score_pairs(pairs, self._pipe)
+        return [s >= self.threshold for s in scores]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _score_pairs(pairs: list[tuple[str, str]], nli_pipe) -> list[float]:
+    """
+    Run NLI on a batch of (premise, hypothesis) pairs.
+    Returns a float list of entailment scores in [0, 1].
+    Empty-string premises score 0.0 without hitting the model.
+    """
+    scores: list[float] = []
+    non_empty_indices: list[int] = []
+    non_empty_inputs: list[dict] = []
+
+    for i, (premise, hyp) in enumerate(pairs):
+        if not premise.strip():
+            scores.append(0.0)
+        else:
+            scores.append(0.0)  # placeholder
+            non_empty_indices.append(i)
+            non_empty_inputs.append({"text": premise, "text_pair": hyp})
+
+    if non_empty_inputs:
+        batch_results = nli_pipe(non_empty_inputs)
+        for idx, result in zip(non_empty_indices, batch_results):
+            scores[idx] = next(
+                (s["score"] for s in result if s["label"].lower() == "entailment"),
+                0.0,
+            )
+
+    return scores
+
+
+def score_findings(findings: list[Finding], nli_pipe) -> None:
+    """
+    Write grounding_score in-place on every Finding without filtering any out.
+    Use this when you want NLI scores available on all findings but do not want
+    to drop anything — e.g. for caching the full scored set before Phase 2
+    NORMALIZE decides its own threshold.
+    """
+    if not findings:
+        return
+    pairs = [(f.verbatim_support, f.claim) for f in findings]
+    for finding, score in zip(findings, _score_pairs(pairs, nli_pipe)):
+        finding.grounding_score = score
+
+
+def filter_atomic_findings(
+    findings: list[Finding],
+    threshold: float,
+    nli_pipe,
+) -> list[Finding]:
+    """
+    Score each Finding's (verbatim_support, claim) pair via NLI, write
+    grounding_score in-place, and return only findings at or above threshold.
+
+    Parameters
+    ----------
+    findings:
+        Flat list of Finding objects from one or more chunks.
+    threshold:
+        Minimum entailment score to retain a finding.
+    nli_pipe:
+        HuggingFace text-classification pipeline (already loaded).
+        Pass GroundingFilter._pipe to reuse the cached model instance.
+    """
+    if not findings:
+        return []
+
+    pairs = [(f.verbatim_support, f.claim) for f in findings]
+    scores = _score_pairs(pairs, nli_pipe)
+
+    kept: list[Finding] = []
+    for finding, score in zip(findings, scores):
+        finding.grounding_score = score
+        if score >= threshold:
+            kept.append(finding)
+        else:
+            logger.debug(
+                "filter_atomic_findings: dropped finding (score=%.3f < %.3f): %s",
+                score, threshold, finding.claim,
+            )
+
+    return kept
+
 
 def _recompute_audit(rules: list[Rule]) -> RuleAuditSummary:
     counts: Counter[str] = Counter(r.type for r in rules)

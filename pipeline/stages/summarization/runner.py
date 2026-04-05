@@ -45,9 +45,11 @@ from pathlib import Path
 
 from .cache import PipelineCache
 from .contradiction_detector import ContradictionDetector
-from .grounding_filter import GroundingFilter
+from .grounding_filter import GroundingFilter, score_findings
 from .map_stage import MapStage
-from .models import ConsolidatedSummary, ContradictionReport, ExtractedRules
+from .group_stage import GroupStage, is_groupable
+from .models import ConsolidatedSummary, ContradictionReport, ExtractedRules, Finding, FindingGroup, NormalFinding
+from .normalize_stage import NormalizeStage
 from .observability import TraceCollector, flush_collector
 from .reduce_stage import ReduceStage
 from .rule_stage import RuleStage
@@ -128,6 +130,8 @@ class SummarizationRunner:
         self._cache = PipelineCache(cache_file)
 
         self._map = MapStage(voter_llms, level2_voter_llms, escalation_llm, theta=theta, chunk_size=chunk_size, scorer=scorer)
+        self._normalize = NormalizeStage()
+        self._group = GroupStage()
         self._reduce = ReduceStage(escalation_llm)
         self._rules = RuleStage(escalation_llm)
         self._grounding: GroundingChecker | None = (
@@ -140,6 +144,14 @@ class SummarizationRunner:
 
         self._trace_enabled = trace_enabled
         self.trace_dir: Path = trace_dir or (output_dir / "traces")
+
+        # Stores all post-MAP findings with grounding_score written in-place,
+        # mirroring exactly what flows into REDUCE. NORMALIZE reads this.
+        self._scored_map_findings: dict[str, list[Finding]] = {}
+        # Stores NORMALIZE output per pmcid. Input to GROUP.
+        self._normal_findings: dict[str, list[NormalFinding]] = {}
+        # Stores GROUP output per pmcid. Input to Phase 4 CANONICALIZE.
+        self._finding_groups: dict[str, list[FindingGroup]] = {}
 
         # Snapshot of config for traces (model introspection is best-effort)
         self._config_snapshot = {
@@ -227,6 +239,32 @@ class SummarizationRunner:
                         items_before=findings_before,
                         items_after=findings_after,
                     )
+
+                # Score all surviving findings in-place (grounding_score written
+                # onto the same objects that flow into REDUCE) and store the
+                # full scored set. No filtering here — REDUCE sees all findings;
+                # NORMALIZE applies its own threshold against these scores.
+                all_findings = [f for cs in chunk_summaries for f in cs.findings]
+                score_findings(all_findings, nli_pipe=self._grounding._pipe)
+                self._scored_map_findings[pmcid] = all_findings
+
+            # 1b. NORMALIZE — entity normalization + conditional dedup
+            logger.info("[%s] NORMALIZE — %d scored findings", pmcid,
+                        len(self._scored_map_findings.get(pmcid, [])))
+            self._normal_findings[pmcid] = self._normalize.normalize(
+                self._scored_map_findings.get(pmcid, []), pmcid
+            )
+
+            # 1c. GROUP — bucket groupable NormalFindings by (subject, outcome, category)
+            all_normal = self._normal_findings[pmcid]
+            groupable = [nf for nf in all_normal if is_groupable(nf)]
+            non_groupable_count = len(all_normal) - len(groupable)
+            logger.info(
+                "[%s] GROUP — %d normal findings total: %d groupable, %d non-groupable "
+                "(missing subject/outcome/direction)",
+                pmcid, len(all_normal), len(groupable), non_groupable_count,
+            )
+            self._finding_groups[pmcid] = self._group.group(groupable, pmcid)
 
             # 2. REDUCE (recursive tree collapse)
             logger.info("[%s] REDUCE — %d chunks", pmcid, len(chunk_summaries))
