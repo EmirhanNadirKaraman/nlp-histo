@@ -1,5 +1,6 @@
 """
-Pydantic schemas for the three pipeline stages: MAP → REDUCE → RULES.
+Pydantic schemas for all pipeline stages:
+  MAP → REDUCE → RULES → NORMALIZE → GROUP → CANONICALIZE → RELATE → RESOLVE
 """
 from __future__ import annotations
 
@@ -29,6 +30,12 @@ class RelationTypeEnum(str, Enum):
     unclear            = "unclear"            # relation type genuinely not inferable
 
 
+class AssertionStatusEnum(str, Enum):
+    positive  = "positive"   # claim asserts presence, expression, or positive association
+    negative  = "negative"   # claim asserts absence, non-expression, or negative finding
+    uncertain = "uncertain"  # polarity not determinable from surface form
+
+
 class FindingScope(BaseModel):
     disease_subtype:   str | None = None
     cohort_n:          int | None = None
@@ -50,12 +57,13 @@ class Finding(BaseModel):
     confidence: Literal["high", "medium", "low"]
     verbatim_support: str = Field(description="Exact quote from source text")
     # ── Phase 1 additions (optional; populated by updated MAP prompt) ──────────
-    subject_entity:  str | None               = None
-    outcome_entity:  str | None               = None
-    relation_type:   RelationTypeEnum         = RelationTypeEnum.unclear
-    direction:       DirectionEnum | None     = None
-    scope:           FindingScope | None      = None
-    grounding_score: float | None             = None
+    subject_entity:    str | None               = None
+    outcome_entity:    str | None               = None
+    relation_type:     RelationTypeEnum         = RelationTypeEnum.unclear
+    direction:         DirectionEnum | None     = None
+    assertion_status:  AssertionStatusEnum      = AssertionStatusEnum.uncertain
+    scope:             FindingScope | None      = None
+    grounding_score:   float | None             = None
 
 
 class AuditMetadata(BaseModel):
@@ -203,6 +211,7 @@ class NormalFinding(BaseModel):
     outcome_entity:       str | None        # normalized; None if MAP did not extract
     relation_type:        RelationTypeEnum  # groupability key; unclear = non-groupable
     direction:            DirectionEnum | None
+    assertion_status:     AssertionStatusEnum  # deterministic; inferred from claim text
     category:             Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"]
     predicate_text:       str               # representative claim text
     scope:                FindingScope      # from the best-grounded source finding
@@ -256,3 +265,90 @@ class AtomicFinding(BaseModel):
     evidence:         List[str]
     verbatim_support: str
     grounding_score:  float | None
+
+
+# ── Phase 4: CANONICALIZE output ──────────────────────────────────────────────
+
+class CanonicalScopeEnum(str, Enum):
+    single_study  = "single_study"   # only one PMCID supports this rule
+    multi_study   = "multi_study"    # ≥2 distinct PMCIDs support this rule
+    conflicted    = "conflicted"     # ≥2 opposing directions within the group
+    unknown       = "unknown"        # no PMCID information available
+
+
+class CanonicalRule(BaseModel):
+    """
+    Output of the CANONICALIZE stage for one direction-bin of a FindingGroup.
+
+    One CanonicalRule represents the best-grounded, direction-consistent
+    predicate text that can be generalised across member NormalFindings.
+    """
+    canonical_id:        str                   # "CR_{sha8(group_id)}_{direction}"
+    group_id:            str                   # source FindingGroup.group_id
+    subject_entity:      str
+    outcome_entity:      str
+    relation_type:       RelationTypeEnum
+    direction:           DirectionEnum | None  # dominant direction for this bin
+    predicate_text:      str                   # LLM-selected or best-score fallback
+    canonical_scope:     CanonicalScopeEnum
+    category:            Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"]
+    supporting_pmcids:   List[str]             # unique PMCIDs across member NFs
+    member_normal_ids:   List[str]             # NormalFinding.normal_id values in this bin
+    mean_grounding_score: float | None
+    finding_count:       int                   # number of NormalFindings in this bin
+
+
+# ── Phase 5: RELATE output ────────────────────────────────────────────────────
+
+class RelationTypeLabel(str, Enum):
+    SUPPORT        = "SUPPORT"
+    CONTRADICT     = "CONTRADICT"
+    SCOPE_QUALIFY  = "SCOPE_QUALIFY"
+    UNRELATED      = "UNRELATED"
+
+
+class Relation(BaseModel):
+    """
+    Output of the RELATE stage: a directional NLI-derived relation between
+    two CanonicalRules.
+
+    rule_id_a and rule_id_b are symmetric for SUPPORT; for SCOPE_QUALIFY the
+    rule with higher entailment score is rule_id_a (broader claim).
+    """
+    rule_id_a:       str
+    rule_id_b:       str
+    relation_type:   RelationTypeLabel
+    nli_score_a_to_b: float   # entailment score from A→B direction
+    nli_score_b_to_a: float   # entailment score from B→A direction
+
+
+# ── Phase 6: RESOLVE output ───────────────────────────────────────────────────
+
+class FinalRule(BaseModel):
+    """
+    Output of the RESOLVE stage: a scored, ranked canonical rule.
+
+    Inherits all fields from CanonicalRule and adds scoring metadata.
+    """
+    final_id:              str                   # "FR_{canonical_id}"
+    canonical_id:          str
+    group_id:              str
+    subject_entity:        str
+    outcome_entity:        str
+    relation_type:         RelationTypeEnum
+    direction:             DirectionEnum | None
+    predicate_text:        str
+    canonical_scope:       CanonicalScopeEnum
+    category:              Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"]
+    supporting_pmcids:     List[str]
+    member_normal_ids:     List[str]
+    mean_grounding_score:  float | None
+    finding_count:         int
+    # ── Scoring ──────────────────────────────────────────────────────────────
+    final_score:           float                 # 0–1, higher is better
+    support_count:         int                   # SUPPORT relations touching this rule
+    contradict_count:      int                   # CONTRADICT relations touching this rule
+    scope_qualify_count:   int                   # SCOPE_QUALIFY relations touching this rule
+    is_contradicted:       bool
+    contradicted_by:       List[str]             # canonical_ids that contradict this rule
+

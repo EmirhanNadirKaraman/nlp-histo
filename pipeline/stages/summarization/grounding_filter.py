@@ -15,13 +15,17 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from functools import cached_property
 
 from .models import AuditableSummary, EvidenceChainItem, ExtractedRules, Finding, Rule, RuleAuditSummary, RuleCounts
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "cross-encoder/nli-deberta-v3-base"
+
+# Module-level NLI pipeline singleton — shared across all GroundingFilter
+# instances and reused by RelateStage via relate_stage._get_nli_pipe().
+# Avoids reloading the model on each GroundingFilter instantiation.
+_NLI_PIPE_CACHE: dict[str, object] = {}
 
 
 class GroundingFilter:
@@ -116,15 +120,19 @@ class GroundingFilter:
 
     # ── Internals ──────────────────────────────────────────────────────────────
 
-    @cached_property
+    @property
     def _pipe(self):
-        """Lazy-load the NLI pipeline (cached after first access)."""
-        from transformers import pipeline  # optional dep
-        return pipeline(
-            "text-classification",
-            model=self._model_name,
-            top_k=None,
-        )
+        """Return the NLI pipeline, loading it if not already cached."""
+        global _NLI_PIPE_CACHE
+        if self._model_name not in _NLI_PIPE_CACHE:
+            from transformers import pipeline  # optional dep
+            logger.info("GroundingFilter: loading NLI model %r (singleton)", self._model_name)
+            _NLI_PIPE_CACHE[self._model_name] = pipeline(
+                "text-classification",
+                model=self._model_name,
+                top_k=None,
+            )
+        return _NLI_PIPE_CACHE[self._model_name]
 
     def _entailment_mask(self, pairs: list[tuple[str, str]]) -> list[bool]:
         """

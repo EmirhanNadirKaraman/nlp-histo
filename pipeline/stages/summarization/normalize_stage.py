@@ -20,7 +20,7 @@ import hashlib
 import logging
 from collections import defaultdict
 
-from .models import DirectionEnum, Finding, FindingScope, NormalFinding, RelationTypeEnum, SourceSpan
+from .models import AssertionStatusEnum, Finding, FindingScope, NormalFinding, RelationTypeEnum, SourceSpan
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ _SYNONYMS: dict[str, str] = {
     "ki-67":                     "Ki-67",
     "ki67":                      "Ki-67",
     "mib-1":                     "Ki-67",
+    "mib1":                      "Ki-67",
     "bcl-2":                     "BCL2",
     "bcl2":                      "BCL2",
     "bcl-6":                     "BCL6",
@@ -59,6 +60,8 @@ _SYNONYMS: dict[str, str] = {
     "cd8":                       "CD8",
     "cd4":                       "CD4",
     "cd10":                      "CD10",
+    "cd31":                      "CD31",
+    "cd34":                      "CD34",
     "cd138":                     "CD138",
     "cd56":                      "CD56",
     "cd30 expression":           "CD30",
@@ -70,6 +73,18 @@ _SYNONYMS: dict[str, str] = {
     "r chop":                    "R-CHOP",
     "rituximab-chop":            "R-CHOP",
     "chop":                      "CHOP",
+    # Disease entity variants — extend as new papers are processed
+    # CEAN: Cutaneous Epithelioid Angiomatous Nodule
+    "caen":                                      "CEAN",
+    "cean":                                      "CEAN",
+    "cutaneous epithelioid angiomatous nodule":   "CEAN",
+    "epithelioid angiomatous nodule":             "CEAN",
+    # Cell population capitalisation variants
+    "tumour cells":              "tumour cells",
+    "tumor cells":               "tumour cells",
+    "tumour cell":               "tumour cells",
+    "tumor cell":                "tumour cells",
+    "neoplastic cells":          "tumour cells",
     # Disease subtypes — keep as-is (subtype normalization is scope's job)
 }
 
@@ -79,6 +94,68 @@ def normalize_entity(name: str | None) -> str | None:
     if name is None:
         return None
     return _SYNONYMS.get(name.strip().lower(), name.strip())
+
+
+# ── Assertion status inference ─────────────────────────────────────────────────
+
+# Ordered: negative checked first so "not expressed" beats "expressed"
+_NEGATIVE_TRIGGERS = (
+    "not immunoreactive",
+    "not reactive",
+    "non-reactive",
+    "not identified",
+    "not detected",
+    "not expressed",
+    "no recurrence",
+    "no metastasis",
+    "no pleomorphism",
+    "no cytologic atypia",
+    "no atypia",
+    "no mitoses",
+    "not seen",
+    "not observed",
+    "non-",
+    "absent",
+    "negative",
+    "lacking",
+    "without",
+    "no ",
+    "not ",
+)
+
+_POSITIVE_TRIGGERS = (
+    "present",
+    "positive",
+    "expressed",
+    "immunoreactive",
+    "reactive",
+    "identified",
+    "detected",
+    "seen",
+    "observed",
+    "exhibits",
+    "shows",
+    "found",
+)
+
+
+def infer_assertion_status(claim: str) -> AssertionStatusEnum:
+    """
+    Infer assertion polarity from claim text using ordered keyword matching.
+
+    Negative triggers are checked before positive triggers so that phrases
+    like "not expressed" correctly return negative rather than positive.
+
+    Returns AssertionStatusEnum.uncertain when no trigger matches.
+    """
+    lower = claim.lower()
+    for trigger in _NEGATIVE_TRIGGERS:
+        if trigger in lower:
+            return AssertionStatusEnum.negative
+    for trigger in _POSITIVE_TRIGGERS:
+        if trigger in lower:
+            return AssertionStatusEnum.positive
+    return AssertionStatusEnum.uncertain
 
 
 # ── Dedup key ──────────────────────────────────────────────────────────────────
@@ -233,6 +310,7 @@ class NormalizeStage:
             normed = f.model_copy(update={
                 "subject_entity": self._norm(f.subject_entity),
                 "outcome_entity": self._norm(f.outcome_entity),
+                "assertion_status": infer_assertion_status(f.claim),
             })
             result.append((normed, te_id))
         return result
@@ -268,6 +346,7 @@ class NormalizeStage:
             outcome_entity=rep.outcome_entity,
             relation_type=rep.relation_type,
             direction=rep.direction,
+            assertion_status=infer_assertion_status(rep.claim),
             category=rep.category,
             predicate_text=rep.claim,
             scope=rep.scope or FindingScope(),
@@ -288,6 +367,7 @@ class NormalizeStage:
             outcome_entity=f.outcome_entity,
             relation_type=f.relation_type,
             direction=f.direction,
+            assertion_status=infer_assertion_status(f.claim),
             category=f.category,
             predicate_text=f.claim,
             scope=f.scope or FindingScope(),

@@ -313,16 +313,14 @@ Do these rules contradict each other?"""
 def build_map_chain(llm):
     """Return a runnable chain: prompt | llm (structured AuditableSummary)."""
     prompt = ChatPromptTemplate([("system", _MAP_SYSTEM), ("user", _MAP_USER)])
-    return prompt | llm.with_structured_output(AuditableSummary, strict=True).with_retry(
-        stop_after_attempt=3
-    )
+    return prompt | llm.with_structured_output(AuditableSummary, strict=True)
 
 
 def build_reduce_chain(llm):
     """Return a runnable chain: prompt | llm (structured ConsolidatedSummary)."""
     prompt = ChatPromptTemplate([("system", _REDUCE_SYSTEM), ("user", _REDUCE_USER)])
     return prompt | llm.with_structured_output(ConsolidatedSummary, strict=True).with_retry(
-        stop_after_attempt=3
+        stop_after_attempt=2,
     )
 
 
@@ -330,7 +328,7 @@ def build_rule_chain(llm):
     """Return a runnable chain: prompt | llm (structured ExtractedRules)."""
     prompt = ChatPromptTemplate([("system", _RULE_SYSTEM), ("user", _RULE_USER)])
     return prompt | llm.with_structured_output(ExtractedRules, strict=True).with_retry(
-        stop_after_attempt=3
+        stop_after_attempt=2,
     )
 
 
@@ -338,5 +336,5 @@ def build_judge_chain(llm):
     """Return a runnable chain: prompt | llm (structured PairJudgment)."""
     prompt = ChatPromptTemplate([("system", _JUDGE_SYSTEM), ("user", _JUDGE_USER)])
     return prompt | llm.with_structured_output(PairJudgment, strict=True).with_retry(
-        stop_after_attempt=3
+        stop_after_attempt=2,
     )

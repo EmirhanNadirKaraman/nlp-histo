@@ -116,6 +116,7 @@ def vertex_gemini_chat(
     location: str | None = None,
     temperature: float = 0.1,
     max_tokens: int = 4096,
+    request_timeout: int = 20,
 ) -> ChatOpenAI:
     """
     Return a LangChain ChatOpenAI pointed at the Vertex AI OpenAI-compatible
@@ -162,6 +163,7 @@ def vertex_gemini_chat(
         api_key=credentials.token,  # short-lived bearer token
         temperature=temperature,
         max_tokens=max_tokens,
+        timeout=request_timeout,
     )
 
 
@@ -174,9 +176,14 @@ def claude_vertex_chat(
     location: str | None = None,
     temperature: float = 0.1,
     max_tokens: int = 4096,
-):
+    request_timeout: int = 20,
+) -> ChatOpenAI:
     """
-    Return a LangChain ChatAnthropicVertex for a Claude model on Vertex AI.
+    Return a LangChain ChatOpenAI pointed at the Vertex AI OpenAI-compatible
+    endpoint for the given Claude model.
+
+    Claude on Vertex AI is accessible via the same OpenAI-compat REST API as
+    Gemini models, so ChatOpenAI works here too — no ChatAnthropicVertex needed.
 
     Authentication uses Google ADC — same credentials as vertex_gemini_chat().
 
@@ -191,14 +198,28 @@ def claude_vertex_chat(
     location:
         Override for CLAUDE_VERTEX_LOCATION (default: us-east5).
     """
-    from langchain_anthropic import ChatAnthropicVertex  # optional dep
+    import google.auth
+    import google.auth.transport.requests
 
     proj = project or os.environ["VERTEX_PROJECT"]
     loc = location or os.environ.get("CLAUDE_VERTEX_LOCATION", "us-east5")
-    return ChatAnthropicVertex(
+
+    credentials, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    credentials.refresh(google.auth.transport.requests.Request())
+
+    base_url = (
+        f"https://{loc}-aiplatform.googleapis.com/v1beta1"
+        f"/projects/{proj}/locations/{loc}/endpoints/openapi"
+    )
+
+    return ChatOpenAI(
         model=model,
-        project=proj,
-        location=loc,
+        base_url=base_url,
+        api_key=credentials.token,
         temperature=temperature,
         max_tokens=max_tokens,
+        timeout=request_timeout,
     )
+

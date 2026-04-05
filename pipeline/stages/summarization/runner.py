@@ -1,5 +1,6 @@
 """
-SummarizationRunner — orchestrates MAP → REDUCE → RULES with ABC cascading.
+SummarizationRunner — orchestrates MAP → REDUCE → RULES → NORMALIZE → GROUP
+→ CANONICALIZE → RELATE → RESOLVE with ABC cascading.
 
 Usage example
 -------------
@@ -40,18 +41,32 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .cache import PipelineCache
+from .canonicalize_stage import CanonicalizeStage
 from .contradiction_detector import ContradictionDetector
 from .grounding_filter import GroundingFilter, score_findings
-from .map_stage import MapStage
 from .group_stage import GroupStage, is_groupable
-from .models import ConsolidatedSummary, ContradictionReport, ExtractedRules, Finding, FindingGroup, NormalFinding
+from .map_stage import MapStage
+from .models import (
+    CanonicalRule,
+    ConsolidatedSummary,
+    ContradictionReport,
+    ExtractedRules,
+    FinalRule,
+    Finding,
+    FindingGroup,
+    NormalFinding,
+    Relation,
+)
 from .normalize_stage import NormalizeStage
 from .observability import TraceCollector, flush_collector
 from .reduce_stage import ReduceStage
+from .relate_stage import RelateStage
+from .resolve_stage import ResolveStage
 from .rule_stage import RuleStage
 from pipeline.stages.summarization.interfaces import (
     ContradictionChecker,
@@ -117,6 +132,9 @@ class SummarizationRunner:
         scorer: MapOutputScorer | None = None,
         grounding_threshold: float | None = 0.5,
         contradiction_similarity_threshold: float | None = 0.7,
+        canonicalize_with_llm: bool = True,
+        nli_entailment_threshold: float = 0.50,
+        nli_contradiction_threshold: float = 0.50,
         output_dir: Path = Path("langchain-summarization/summarization_results"),
         cache_path: Path | None = None,
         trace_enabled: bool = False,
@@ -132,6 +150,14 @@ class SummarizationRunner:
         self._map = MapStage(voter_llms, level2_voter_llms, escalation_llm, theta=theta, chunk_size=chunk_size, scorer=scorer)
         self._normalize = NormalizeStage()
         self._group = GroupStage()
+        self._canonicalize = CanonicalizeStage(
+            llm=escalation_llm if canonicalize_with_llm else None
+        )
+        self._relate = RelateStage(
+            entailment_threshold=nli_entailment_threshold,
+            contradiction_threshold=nli_contradiction_threshold,
+        )
+        self._resolve = ResolveStage()
         self._reduce = ReduceStage(escalation_llm)
         self._rules = RuleStage(escalation_llm)
         self._grounding: GroundingChecker | None = (
@@ -152,6 +178,12 @@ class SummarizationRunner:
         self._normal_findings: dict[str, list[NormalFinding]] = {}
         # Stores GROUP output per pmcid. Input to Phase 4 CANONICALIZE.
         self._finding_groups: dict[str, list[FindingGroup]] = {}
+        # Stores CANONICALIZE output per pmcid. Input to Phase 5 RELATE.
+        self._canonical_rules: dict[str, list[CanonicalRule]] = {}
+        # Stores RELATE output per pmcid. Input to Phase 6 RESOLVE.
+        self._relations: dict[str, list[Relation]] = {}
+        # Stores RESOLVE output per pmcid. Final knowledge base.
+        self._final_rules: dict[str, list[FinalRule]] = {}
 
         # Snapshot of config for traces (model introspection is best-effort)
         self._config_snapshot = {
@@ -197,6 +229,7 @@ class SummarizationRunner:
         )
 
         try:
+            t_total = time.perf_counter()
             sentences = file_data["sentences_with_provenance"]
 
             # Record ingestion
@@ -209,9 +242,14 @@ class SummarizationRunner:
 
             # 1. MAP (ABC cascade per chunk)
             logger.info("[%s] MAP — %d sentences", pmcid, len(sentences))
+            t0 = time.perf_counter()
             chunk_summaries = self._map.process(
                 sentences, pmcid, cache=self._cache, collector=collector
             )
+            logger.info("[%s] MAP done [%.1fs] — %d chunks, %d raw findings",
+                        pmcid, time.perf_counter() - t0,
+                        len(chunk_summaries),
+                        sum(len(cs.findings) for cs in chunk_summaries))
 
             # Record chunking info (chunk_size is on MapStage)
             if collector is not None:
@@ -223,15 +261,15 @@ class SummarizationRunner:
             # 1a. Grounding filter — drop ungrounded findings before REDUCE
             if self._grounding is not None:
                 findings_before = sum(len(cs.findings) for cs in chunk_summaries)
+                logger.info("[%s] GROUNDING (filter) — %d findings", pmcid, findings_before)
+                t0 = time.perf_counter()
                 chunk_summaries = [
                     self._grounding.filter_findings(cs) for cs in chunk_summaries
                 ]
                 findings_after = sum(len(cs.findings) for cs in chunk_summaries)
                 logger.info(
-                    "[%s] Grounding (MAP): %d findings remaining across %d chunks",
-                    pmcid,
-                    findings_after,
-                    len(chunk_summaries),
+                    "[%s] GROUNDING (filter) done [%.1fs] — %d/%d findings kept",
+                    pmcid, time.perf_counter() - t0, findings_after, findings_before,
                 )
                 if collector is not None:
                     collector.record_grounding(
@@ -240,50 +278,99 @@ class SummarizationRunner:
                         items_after=findings_after,
                     )
 
-                # Score all surviving findings in-place (grounding_score written
-                # onto the same objects that flow into REDUCE) and store the
-                # full scored set. No filtering here — REDUCE sees all findings;
-                # NORMALIZE applies its own threshold against these scores.
+                # Score all surviving findings in-place
+                logger.info("[%s] GROUNDING (score) — %d findings", pmcid, findings_after)
+                t0 = time.perf_counter()
                 all_findings = [f for cs in chunk_summaries for f in cs.findings]
                 score_findings(all_findings, nli_pipe=self._grounding._pipe)
                 self._scored_map_findings[pmcid] = all_findings
+                logger.info("[%s] GROUNDING (score) done [%.1fs]",
+                            pmcid, time.perf_counter() - t0)
 
             # 1b. NORMALIZE — entity normalization + conditional dedup
-            logger.info("[%s] NORMALIZE — %d scored findings", pmcid,
-                        len(self._scored_map_findings.get(pmcid, [])))
+            n_scored = len(self._scored_map_findings.get(pmcid, []))
+            logger.info("[%s] NORMALIZE — %d scored findings", pmcid, n_scored)
+            t0 = time.perf_counter()
             self._normal_findings[pmcid] = self._normalize.normalize(
                 self._scored_map_findings.get(pmcid, []), pmcid
             )
+            logger.info("[%s] NORMALIZE done [%.1fs] — %d NormalFindings",
+                        pmcid, time.perf_counter() - t0, len(self._normal_findings[pmcid]))
 
             # 1c. GROUP — bucket groupable NormalFindings by (subject, outcome, category)
             all_normal = self._normal_findings[pmcid]
             groupable = [nf for nf in all_normal if is_groupable(nf)]
             non_groupable_count = len(all_normal) - len(groupable)
             logger.info(
-                "[%s] GROUP — %d normal findings total: %d groupable, %d non-groupable "
-                "(missing subject/outcome/direction)",
-                pmcid, len(all_normal), len(groupable), non_groupable_count,
+                "[%s] GROUP — %d groupable, %d non-groupable",
+                pmcid, len(groupable), non_groupable_count,
             )
+            t0 = time.perf_counter()
             self._finding_groups[pmcid] = self._group.group(groupable, pmcid)
+            logger.info("[%s] GROUP done [%.1fs] — %d groups",
+                        pmcid, time.perf_counter() - t0, len(self._finding_groups[pmcid]))
+
+            # 1d. CANONICALIZE — FindingGroup[] → CanonicalRule[]
+            logger.info("[%s] CANONICALIZE — %d groups", pmcid, len(self._finding_groups[pmcid]))
+            t0 = time.perf_counter()
+            nf_by_id: dict[str, NormalFinding] = {
+                nf.normal_id: nf for nf in all_normal
+            }
+            self._canonical_rules[pmcid] = self._canonicalize.canonicalize(
+                self._finding_groups[pmcid], nf_by_id, pmcid
+            )
+            logger.info("[%s] CANONICALIZE done [%.1fs] — %d CanonicalRules",
+                        pmcid, time.perf_counter() - t0, len(self._canonical_rules[pmcid]))
+
+            # 1e. RELATE — CanonicalRule[] → Relation[]
+            logger.info(
+                "[%s] RELATE — %d canonical rules", pmcid, len(self._canonical_rules[pmcid])
+            )
+            t0 = time.perf_counter()
+            self._relations[pmcid] = self._relate.relate(
+                self._canonical_rules[pmcid], pmcid
+            )
+            logger.info("[%s] RELATE done [%.1fs] — %d relations",
+                        pmcid, time.perf_counter() - t0, len(self._relations[pmcid]))
+
+            # 1f. RESOLVE — CanonicalRule[] + Relation[] → FinalRule[]
+            logger.info(
+                "[%s] RESOLVE — %d canonical rules, %d relations",
+                pmcid, len(self._canonical_rules[pmcid]), len(self._relations[pmcid]),
+            )
+            t0 = time.perf_counter()
+            self._final_rules[pmcid] = self._resolve.resolve(
+                self._canonical_rules[pmcid], self._relations[pmcid], pmcid
+            )
+            logger.info("[%s] RESOLVE done [%.1fs] — %d FinalRules",
+                        pmcid, time.perf_counter() - t0, len(self._final_rules[pmcid]))
 
             # 2. REDUCE (recursive tree collapse)
             logger.info("[%s] REDUCE — %d chunks", pmcid, len(chunk_summaries))
+            t0 = time.perf_counter()
             master: ConsolidatedSummary = self._reduce.reduce(
                 chunk_summaries, pmcid, cache=self._cache, collector=collector
             )
+            logger.info("[%s] REDUCE done [%.1fs]", pmcid, time.perf_counter() - t0)
 
             # 3. RULE EXTRACTION
             logger.info("[%s] RULES", pmcid)
+            t0 = time.perf_counter()
             rules: ExtractedRules = self._rules.extract(
                 master, pmcid, cache=self._cache, collector=collector
             )
+            logger.info("[%s] RULES done [%.1fs] — %d rules",
+                        pmcid, time.perf_counter() - t0, len(rules.rules))
 
             # 3a. Grounding filter — drop ungrounded rules
             if self._grounding is not None:
                 rules_before = len(rules.rules)
+                logger.info("[%s] GROUNDING (rules) — %d rules", pmcid, rules_before)
+                t0 = time.perf_counter()
                 rules = self._grounding.filter_rules(rules)
                 rules_after = len(rules.rules)
-                logger.info("[%s] Grounding (RULES): %d rules remaining", pmcid, rules_after)
+                logger.info("[%s] GROUNDING (rules) done [%.1fs] — %d/%d rules kept",
+                            pmcid, time.perf_counter() - t0, rules_after, rules_before)
                 if collector is not None:
                     collector.record_grounding(
                         stage="rules",
@@ -295,7 +382,13 @@ class SummarizationRunner:
             contradiction_report: ContradictionReport | None = None
             if self._contradiction is not None:
                 logger.info("[%s] CONTRADICTION DETECTION", pmcid)
+                t0 = time.perf_counter()
                 contradiction_report = self._contradiction.detect(rules)
+                logger.info("[%s] CONTRADICTION DETECTION done [%.1fs]",
+                            pmcid, time.perf_counter() - t0)
+
+            logger.info("[%s] Pipeline complete [%.1fs total]",
+                        pmcid, time.perf_counter() - t_total)
 
             result = {
                 "status": "success",
@@ -303,6 +396,16 @@ class SummarizationRunner:
                 "summary": master.narrative_summary,
                 "rules": [r.model_dump() for r in rules.rules],
                 "contradiction_report": contradiction_report.model_dump() if contradiction_report else None,
+                # Phase 4–6 knowledge base
+                "canonical_rules": [
+                    r.model_dump() for r in self._canonical_rules.get(pmcid, [])
+                ],
+                "relations": [
+                    r.model_dump() for r in self._relations.get(pmcid, [])
+                ],
+                "final_rules": [
+                    r.model_dump() for r in self._final_rules.get(pmcid, [])
+                ],
                 "audit_trail": {
                     "map_chunks": [cs.model_dump() for cs in chunk_summaries],
                     "master_summary": master.model_dump(),

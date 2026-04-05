@@ -521,10 +521,36 @@ class MapStage:
         timings: dict[int, float | None] = {}
 
         def _timed_invoke(chain, i: int):
+            chunk_id = inp.get("chunk_id", "?")
+            pmcid = inp.get("pmcid", "?")
+            attempt = 0
             t0 = time.monotonic()
-            out = chain.invoke(inp)
-            timings[i] = (time.monotonic() - t0) * 1000.0
-            return out
+            last_exc: BaseException | None = None
+            while attempt < 2:
+                attempt += 1
+                if attempt > 1:
+                    logger.warning(
+                        "[%s] MAP chunk %s voter %d — attempt %d/2 (prev error: %s)",
+                        pmcid, chunk_id, i, attempt, type(last_exc).__name__,
+                    )
+                try:
+                    out = chain.invoke(inp)
+                    elapsed_ms = (time.monotonic() - t0) * 1000.0
+                    if attempt > 1:
+                        logger.info(
+                            "[%s] MAP chunk %s voter %d — attempt %d succeeded  [%.0fms total]",
+                            pmcid, chunk_id, i, attempt, elapsed_ms,
+                        )
+                    timings[i] = elapsed_ms
+                    return out
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "[%s] MAP chunk %s voter %d — attempt %d failed: %s: %s",
+                        pmcid, chunk_id, i, attempt, type(exc).__name__, exc,
+                    )
+            timings[i] = None
+            raise last_exc  # type: ignore[misc]
 
         with ThreadPoolExecutor(max_workers=len(target)) as pool:
             future_to_idx = {
