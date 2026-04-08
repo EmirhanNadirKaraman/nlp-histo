@@ -1,4 +1,5 @@
 # query the database to get all texts in a document, filter out the ones with few character counts, and run NER from scispacy on it
+import re
 import sys
 from pathlib import Path
 from tqdm import tqdm
@@ -25,9 +26,48 @@ def load_linker_model():
     nlp.add_pipe("scispacy_linker", config={
         "resolve_abbreviations": True,
         "linker_name": "umls",
-        "threshold": 0.7
+        "threshold": 0.85
     })
     return nlp
+
+
+# UMLS semantic types that are never valid entity links for biomedical text mining:
+# taxonomy groups (organisms, animals, plants), geographic entities, occupations.
+_JUNK_SEMANTIC_TYPES = frozenset({
+    "T001",  # Organism
+    "T002",  # Plant
+    "T004",  # Fungus
+    "T005",  # Virus
+    "T007",  # Bacterium
+    "T008",  # Animal
+    "T009",  # Invertebrate
+    "T010",  # Vertebrate
+    "T011",  # Amphibian
+    "T012",  # Bird
+    "T013",  # Fish
+    "T014",  # Reptile
+    "T015",  # Mammal  ← Cetacea lives here
+    "T016",  # Human   (keep? debatable — often useful, but "Human" as canonical_name is noise)
+    "T083",  # Geographic Area
+    "T093",  # Health Care Related Organization
+    "T097",  # Professional or Occupational Group
+})
+
+# Short all-caps tokens (≤5 chars) are acronyms; the linker almost always
+# maps them to the wrong concept via string similarity.
+_ACRONYM_RE = re.compile(r'^[A-Z]{2,5}$')
+
+
+def _is_junk_link(mapping: dict, entity_text: str) -> bool:
+    """Return True if a UMLS mapping should be discarded."""
+    types = set(mapping.get("semantic_types") or [])
+    # Pure taxonomy / geography hit
+    if types and types.issubset(_JUNK_SEMANTIC_TYPES):
+        return True
+    # Short acronym linked with a junk semantic type
+    if _ACRONYM_RE.match(entity_text.strip()) and types & _JUNK_SEMANTIC_TYPES:
+        return True
+    return False
 
 
 def link_entities_batch(entity_texts: list, linker_nlp, linker, entity_cache: dict) -> dict:
@@ -61,24 +101,28 @@ def link_entities_batch(entity_texts: list, linker_nlp, linker, entity_cache: di
                     for cui, score in ent._.kb_ents:
                         concept = linker.kb.cui_to_entity.get(cui)
                         if concept:
-                            mappings.append({
+                            m = {
                                 "cui": cui,
                                 "score": float(score),
                                 "canonical_name": concept.canonical_name,
-                                "semantic_types": list(concept.types) if concept.types else None
-                            })
+                                "semantic_types": list(concept.types) if concept.types else None,
+                            }
+                            if not _is_junk_link(m, text):
+                                mappings.append(m)
 
         # If no entities found, try treating whole text as entity
         if not mappings and hasattr(doc._, 'kb_ents') and doc._.kb_ents:
             for cui, score in doc._.kb_ents:
                 concept = linker.kb.cui_to_entity.get(cui)
                 if concept:
-                    mappings.append({
+                    m = {
                         "cui": cui,
                         "score": float(score),
                         "canonical_name": concept.canonical_name,
-                        "semantic_types": list(concept.types) if concept.types else None
-                    })
+                        "semantic_types": list(concept.types) if concept.types else None,
+                    }
+                    if not _is_junk_link(m, text):
+                        mappings.append(m)
 
         new_mappings[text] = mappings
 
