@@ -86,38 +86,45 @@ def _classify_pair(
     NLI scores.
 
     Logic:
-      - CONTRADICT   : both directions score high on 'contradiction'
-                       + for has_feature: only if outcome_entity matches
-                         (gate already enforces this; this is a safety belt)
+      - CONTRADICT   : both directions score high on 'contradiction',
+                       AND the two rules do not share the same direction
+                       (two positive rules or two negative rules cannot
+                       contradict each other — they are coexisting findings).
+                       The comparability gate already ensures same
+                       (subject, outcome, relation_type, category), so a high
+                       mutual contradiction score with opposite directions is a
+                       genuine conflict.
       - SUPPORT      : both directions score high on 'entailment'
       - SCOPE_QUALIFY: one direction entails the other but not vice-versa
       - None         : UNRELATED — caller skips this pair
     """
-    from .models import AssertionStatusEnum, RelationTypeEnum
-    from .normalize_stage import infer_assertion_status
+    from .models import DirectionEnum
 
     ent_ab = scores_ab.get("entailment", 0.0)
     ent_ba = scores_ba.get("entailment", 0.0)
     con_ab = scores_ab.get("contradiction", 0.0)
     con_ba = scores_ba.get("contradiction", 0.0)
 
-    # CONTRADICT prerequisite: one rule must be positive-asserted and the other
-    # negative-asserted.  Two positive rules cannot contradict; two uncertain rules
-    # cannot contradict.  This blocks NLI from hallucinating contradictions between
-    # coexisting positive findings that happen to score high on the contradiction class.
-    status_a = infer_assertion_status(rule_a.predicate_text)
-    status_b = infer_assertion_status(rule_b.predicate_text)
-    contradict_allowed = (
-        # one positive, one negative
-        (status_a == AssertionStatusEnum.positive and status_b == AssertionStatusEnum.negative)
-        or (status_a == AssertionStatusEnum.negative and status_b == AssertionStatusEnum.positive)
-    )
+    # CONTRADICT guard: block when both rules point in the same direction.
+    # Two positive (or two negative/absent) findings about the same entity
+    # pair are coexisting observations — not contradictions — even if the NLI
+    # model scores them high on 'contradiction' due to lexical overlap.
+    # We use the structured direction field (set by the LLM) rather than
+    # re-inferring polarity from text, which was unreliable and blocked almost
+    # all genuine contradictions.
+    _NEGATIVE_DIRECTIONS = {DirectionEnum.negative, DirectionEnum.absent}
+    _POSITIVE_DIRECTIONS = {DirectionEnum.positive, DirectionEnum.partial}
 
-    # Safety belt: for has_feature, also require same outcome (gate already enforces
-    # this; belt catches any edge cases).
-    if rule_a.relation_type == RelationTypeEnum.has_feature:
-        if _norm_outcome(rule_a.outcome_entity) != _norm_outcome(rule_b.outcome_entity):
-            contradict_allowed = False
+    dir_a = rule_a.direction
+    dir_b = rule_b.direction
+
+    same_polarity = (
+        # both clearly positive
+        (dir_a in _POSITIVE_DIRECTIONS and dir_b in _POSITIVE_DIRECTIONS)
+        # both clearly negative / absent
+        or (dir_a in _NEGATIVE_DIRECTIONS and dir_b in _NEGATIVE_DIRECTIONS)
+    )
+    contradict_allowed = not same_polarity
 
     # Mutual contradiction
     if contradict_allowed and con_ab >= contradiction_threshold and con_ba >= contradiction_threshold:
@@ -307,16 +314,22 @@ class RelateStage:
             if label is None:
                 continue  # UNRELATED — skip
 
+            # Store the score that is semantically meaningful for this label:
+            #   SUPPORT / SCOPE_QUALIFY → entailment score (the signal that fired)
+            #   CONTRADICT             → contradiction score
+            if label == RelationTypeLabel.CONTRADICT:
+                score_ab = s_ab.get("contradiction", 0.0)
+                score_ba = s_ba.get("contradiction", 0.0)
+            else:
+                score_ab = s_ab.get("entailment", 0.0)
+                score_ba = s_ba.get("entailment", 0.0)
+
             relation = Relation(
                 rule_id_a=rules[i].canonical_id,
                 rule_id_b=rules[j].canonical_id,
                 relation_type=label,
-                nli_score_a_to_b=s_ab.get("entailment", 0.0)
-                if label == RelationTypeLabel.SUPPORT
-                else s_ab.get("contradiction", 0.0),
-                nli_score_b_to_a=s_ba.get("entailment", 0.0)
-                if label == RelationTypeLabel.SUPPORT
-                else s_ba.get("contradiction", 0.0),
+                nli_score_a_to_b=score_ab,
+                nli_score_b_to_a=score_ba,
             )
             relations.append(relation)
 

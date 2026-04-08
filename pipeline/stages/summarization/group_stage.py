@@ -52,8 +52,8 @@ def _sha8(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:8]
 
 
-def _group_id(subject: str, outcome: str, relation_type: str) -> str:
-    return f"GRP_{_sha8(subject)}_{_sha8(outcome)}_{relation_type}"
+def _group_id(subject: str, outcome: str, relation_type: str, category: str) -> str:
+    return f"GRP_{_sha8(subject)}_{_sha8(outcome)}_{relation_type}_{_sha8(category)}"
 
 
 def _scope_heterogeneity(members: list[NormalFinding]) -> float:
@@ -101,12 +101,12 @@ class GroupStage:
 
     def group(self, findings: list[NormalFinding], pmcid: str) -> list[FindingGroup]:
         """
-        Group NormalFindings for one paper by (subject_entity, outcome_entity, relation_type).
+        Group NormalFindings for one paper by (subject_entity, outcome_entity, relation_type, category).
 
         All findings must be groupable (subject_entity, outcome_entity non-None,
         relation_type not unclear).  Raises ValueError on the first violation.
 
-        Returns one FindingGroup per distinct (subject, outcome, relation_type) triple.
+        Returns one FindingGroup per distinct (subject, outcome, relation_type, category) tuple.
         """
         if not findings:
             return []
@@ -120,7 +120,7 @@ class GroupStage:
                     f"(subject={nf.subject_entity!r}, outcome={nf.outcome_entity!r}, "
                     f"relation_type={nf.relation_type!r}). Filter with is_groupable() before calling group()."
                 )
-            key = _group_id(nf.subject_entity, nf.outcome_entity, nf.relation_type.value)  # type: ignore[arg-type]
+            key = _group_id(nf.subject_entity, nf.outcome_entity, nf.relation_type.value, nf.category)  # type: ignore[arg-type]
             buckets[key].append(nf)
 
         groups = [

@@ -5,22 +5,32 @@ Deterministic weighted confidence scoring.  No LLM required.
 
 Scoring formula
 ---------------
-  base          = mean_grounding_score * 0.60   (range 0–0.60; default 0.30 if unknown)
-  finding_bonus = min(finding_count / 5, 1.0) * 0.10   (up to +0.10 for ≥5 findings)
-  support_bonus = min(support_count * 0.08, 0.20)       (up to +0.20)
-  single_study_pen = 0.10 if canonical_scope == single_study else 0.0  (−0.10)
-  contradict_pen   = min(contradict_count * 0.15, 0.30)  (up to −0.30)
+Two modes depending on whether the RELATE stage produced any relations:
+
+  relations_present (support_count + contradict_count > 0 for at least one rule):
+    base          = mean_grounding_score * 0.60   (range 0–0.60; default 0.30 if unknown)
+    finding_bonus = min(finding_count / 5, 1.0) * 0.10   (up to +0.10 for ≥5 findings)
+    support_bonus = min(support_count * 0.08, 0.20)       (up to +0.20)
+    single_study_pen = 0.10 if canonical_scope == single_study else 0.0  (−0.10)
+    contradict_pen   = min(contradict_count * 0.15, 0.30)  (up to −0.30)
+
+  relations_absent (no RELATE output, e.g. single-paper run or NLI skipped):
+    Grounding weight is raised to 0.80 so scores spread meaningfully across
+    rules rather than collapsing to a narrow band around 0.50.
+    base          = mean_grounding_score * 0.80   (range 0–0.80; default 0.40 if unknown)
+    finding_bonus = min(finding_count / 5, 1.0) * 0.15   (up to +0.15 for ≥5 findings)
+    single_study_pen = 0.05 (halved — less punishing without cross-rule signal)
+    support_bonus = 0   (no relations → no support signal)
+    contradict_pen = 0
 
   final_score = clip(base + finding_bonus + support_bonus
                      − single_study_pen − contradict_pen, 0.0, 1.0)
 
-Example scores (approximate):
-  Well-grounded (0.9), 3 findings, 1 support, single_study, 0 contradictions:
-    0.54 + 0.06 + 0.08 − 0.10 − 0.0 = 0.58
-  Singleton (0.5), 1 finding, 0 support, single_study, 1 contradiction:
-    0.30 + 0.02 + 0.0  − 0.10 − 0.15 = 0.07
-  Multi-study (0.8), 5 findings, 2 supports, 0 contradictions:
-    0.48 + 0.10 + 0.16 − 0.0  − 0.0  = 0.74
+Example scores, relations-absent mode:
+  Well-grounded (0.9), 3 findings, single_study:
+    0.72 + 0.09 − 0.05 = 0.76
+  Low-grounded (0.3), 1 finding, single_study:
+    0.24 + 0.03 − 0.05 = 0.22
 
 is_contradicted flag is set when any CONTRADICT relation touches the rule.
 
@@ -34,16 +44,23 @@ from .models import CanonicalRule, CanonicalScopeEnum, FinalRule, Relation, Rela
 
 logger = logging.getLogger(__name__)
 
-# Scoring constants — all explicit, no magic numbers elsewhere
-_GROUNDING_WEIGHT       = 0.60   # base = mean_grounding_score * this
+# Scoring constants — relations-present mode
+_GROUNDING_WEIGHT       = 0.60
 _GROUNDING_DEFAULT      = 0.50   # used when mean_grounding_score is None
-_FINDING_BONUS_MAX      = 0.10   # max bonus from finding_count
-_FINDING_BONUS_SCALE    = 5      # finding_count / this, capped at 1.0
+_FINDING_BONUS_MAX      = 0.10
+_FINDING_BONUS_SCALE    = 5
 _SUPPORT_BOOST_PER_REL  = 0.08
 _SUPPORT_BOOST_CAP      = 0.20
-_SINGLE_STUDY_PEN       = 0.10   # penalty for single-paper rules
-_CONTRADICT_PEN_PER_REL = 0.15   # now active
+_SINGLE_STUDY_PEN       = 0.10
+_CONTRADICT_PEN_PER_REL = 0.15
 _CONTRADICT_PEN_CAP     = 0.30
+
+# Scoring constants — relations-absent mode (RELATE skipped or empty)
+# Grounding weight raised so scores spread across [0, 1] rather than
+# clustering in a narrow band around 0.50.
+_NO_REL_GROUNDING_WEIGHT  = 0.80
+_NO_REL_FINDING_BONUS_MAX = 0.15
+_NO_REL_SINGLE_STUDY_PEN  = 0.05
 
 
 def _build_adjacency(
@@ -93,6 +110,13 @@ class ResolveStage:
             return []
 
         adj = _build_adjacency(rules, relations)
+
+        # Detect whether RELATE produced any relational signal at all.
+        # When it didn't (single-paper run, NLI skipped, or no rule pairs
+        # exceeded the similarity threshold), use the wider grounding-dominant
+        # formula so scores are meaningfully spread.
+        relations_present = len(relations) > 0
+
         final_rules: list[FinalRule] = []
 
         for rule in rules:
@@ -117,22 +141,27 @@ class ResolveStage:
                 if rule.mean_grounding_score is not None
                 else _GROUNDING_DEFAULT
             )
-            base = grounding * _GROUNDING_WEIGHT
 
-            finding_bonus = min(rule.finding_count / _FINDING_BONUS_SCALE, 1.0) * _FINDING_BONUS_MAX
-
-            support_bonus = min(len(supports) * _SUPPORT_BOOST_PER_REL, _SUPPORT_BOOST_CAP)
-
-            single_study_pen = (
-                _SINGLE_STUDY_PEN
-                if rule.canonical_scope == CanonicalScopeEnum.single_study
-                else 0.0
-            )
-
-            contradict_pen = min(
-                len(contradicts) * _CONTRADICT_PEN_PER_REL,
-                _CONTRADICT_PEN_CAP,
-            )
+            if relations_present:
+                base           = grounding * _GROUNDING_WEIGHT
+                finding_bonus  = min(rule.finding_count / _FINDING_BONUS_SCALE, 1.0) * _FINDING_BONUS_MAX
+                support_bonus  = min(len(supports) * _SUPPORT_BOOST_PER_REL, _SUPPORT_BOOST_CAP)
+                single_study_pen = (
+                    _SINGLE_STUDY_PEN
+                    if rule.canonical_scope == CanonicalScopeEnum.single_study
+                    else 0.0
+                )
+                contradict_pen = min(len(contradicts) * _CONTRADICT_PEN_PER_REL, _CONTRADICT_PEN_CAP)
+            else:
+                base           = grounding * _NO_REL_GROUNDING_WEIGHT
+                finding_bonus  = min(rule.finding_count / _FINDING_BONUS_SCALE, 1.0) * _NO_REL_FINDING_BONUS_MAX
+                support_bonus  = 0.0
+                single_study_pen = (
+                    _NO_REL_SINGLE_STUDY_PEN
+                    if rule.canonical_scope == CanonicalScopeEnum.single_study
+                    else 0.0
+                )
+                contradict_pen = 0.0
 
             final_score = max(
                 0.0,

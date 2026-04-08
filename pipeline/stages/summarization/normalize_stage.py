@@ -23,16 +23,20 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import defaultdict
+from pathlib import Path
 
 from .models import AssertionStatusEnum, Finding, FindingScope, NormalFinding, RelationTypeEnum, SourceSpan
 
 logger = logging.getLogger(__name__)
 
 # ── Synonym dictionary ─────────────────────────────────────────────────────────
-# Keys are lowercase surface forms; values are canonical names.
-# Extend this dict as new papers are processed.
+# Canonical source of truth is synonyms.yaml in this directory.
+# The hardcoded dict below is the fallback used when the YAML file is absent
+# or unreadable (e.g. in tests that don't have the full repo on disk).
 
-_SYNONYMS: dict[str, str] = {
+_SYNONYMS_YAML = Path(__file__).parent / "synonyms.yaml"
+
+_SYNONYMS_FALLBACK: dict[str, str] = {
     # Overall survival
     "overall survival":          "OS",
     "os":                        "OS",
@@ -93,6 +97,29 @@ _SYNONYMS: dict[str, str] = {
 }
 
 
+def _load_synonyms() -> dict[str, str]:
+    """
+    Load the synonym dictionary from synonyms.yaml if available,
+    otherwise fall back to the hardcoded dict.
+    """
+    try:
+        import yaml  # type: ignore
+        with open(_SYNONYMS_YAML, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        if isinstance(data, dict):
+            loaded = {str(k).lower(): str(v) for k, v in data.items()}
+            logger.debug("NORMALIZE: loaded %d synonyms from %s", len(loaded), _SYNONYMS_YAML)
+            return loaded
+    except FileNotFoundError:
+        logger.debug("NORMALIZE: synonyms.yaml not found, using hardcoded fallback")
+    except Exception as exc:
+        logger.warning("NORMALIZE: failed to load synonyms.yaml (%s), using hardcoded fallback", exc)
+    return dict(_SYNONYMS_FALLBACK)
+
+
+_SYNONYMS: dict[str, str] = _load_synonyms()
+
+
 # ── UMLS entity resolver ───────────────────────────────────────────────────────
 # Module-level cache: entity surface text → canonical name string.
 # Shared across all NormalizeStage instances in the same process.
@@ -103,7 +130,44 @@ _SPACY_NLP = None
 _SPACY_LINKER = None
 _SPACY_AVAILABLE: bool | None = None   # None = not yet probed
 
-_UMLS_THRESHOLD = 0.7
+_UMLS_THRESHOLD = 0.85
+
+# UMLS semantic types that are never valid entity normalizations in a
+# histopathology / clinical text mining context.  A concept whose *only*
+# semantic types fall in this set is discarded regardless of linker score.
+_JUNK_SEMANTIC_TYPES = frozenset({
+    "T001",  # Organism
+    "T002",  # Plant
+    "T004",  # Fungus
+    "T005",  # Virus
+    "T007",  # Bacterium
+    "T008",  # Animal
+    "T009",  # Invertebrate
+    "T010",  # Vertebrate
+    "T011",  # Amphibian
+    "T012",  # Bird
+    "T013",  # Fish
+    "T014",  # Reptile
+    "T015",  # Mammal  ← Cetacea lives here
+    "T083",  # Geographic Area
+    "T093",  # Health Care Related Organization
+    "T097",  # Professional or Occupational Group
+})
+
+# Short all-caps tokens (≤5 chars) are acronyms; the linker almost always
+# maps them to the wrong concept via string similarity.
+import re as _re
+_ACRONYM_RE = _re.compile(r'^[A-Z]{2,5}$')
+
+
+def _is_junk_umls(canonical_name: str, types: list[str] | None, entity_text: str) -> bool:
+    """Return True if a UMLS hit should be discarded."""
+    type_set = set(types or [])
+    if type_set and type_set.issubset(_JUNK_SEMANTIC_TYPES):
+        return True
+    if _ACRONYM_RE.match(entity_text.strip()) and type_set & _JUNK_SEMANTIC_TYPES:
+        return True
+    return False
 
 
 def _probe_spacy() -> bool:
@@ -180,7 +244,9 @@ def _umls_canonical(text: str) -> str | None:
         if best_cui and best_score >= _UMLS_THRESHOLD:
             concept = _SPACY_LINKER.kb.cui_to_entity.get(best_cui)  # type: ignore[union-attr]
             if concept:
-                canonical = concept.canonical_name
+                types = list(concept.types) if concept.types else []
+                if not _is_junk_umls(concept.canonical_name, types, text):
+                    canonical = concept.canonical_name
 
         _UMLS_CACHE[text] = canonical  # type: ignore[assignment]  # cache None too
         return canonical
@@ -274,7 +340,7 @@ def infer_assertion_status(claim: str) -> AssertionStatusEnum:
 # ── Dedup key ──────────────────────────────────────────────────────────────────
 
 def _dedup_key(
-    text_element_id: int,
+    text_element_id: int | None,
     subject: str | None,
     outcome: str | None,
     relation_type: RelationTypeEnum,
@@ -282,8 +348,17 @@ def _dedup_key(
     """
     Return a grouping key for conditional dedup, or None if any field that
     would make the key meaningful is absent (→ finding kept as-is, not merged).
+
+    text_element_id=None means the evidence string was missing or malformed;
+    treat as ungroupable to avoid merging unrelated findings under a shared
+    sentinel value.
     """
-    if subject is None or outcome is None or relation_type is RelationTypeEnum.unclear:
+    if (
+        subject is None
+        or outcome is None
+        or relation_type is RelationTypeEnum.unclear
+        or text_element_id is None
+    ):
         return None
     return f"{text_element_id}|{subject}|{outcome}|{relation_type.value}"
 
@@ -410,8 +485,10 @@ class NormalizeStage:
         """
         result = []
         for f in findings:
-            # Extract te_id from first evidence string for grouping key
-            te_id = 0
+            # Extract te_id from first evidence string for grouping key.
+            # None means evidence was absent or malformed → treated as
+            # ungroupable so unrelated findings are never merged.
+            te_id: int | None = None
             if f.evidence:
                 parts = f.evidence[0].split("|")
                 if len(parts) == 3:
@@ -420,10 +497,18 @@ class NormalizeStage:
                     except ValueError:
                         pass
 
+            # Only apply the keyword heuristic when the LLM returned uncertain —
+            # it may recover a clear polarity the LLM missed.  For confirmed /
+            # negated / positive / negative the LLM's judgment is preserved.
+            assertion = (
+                infer_assertion_status(f.claim)
+                if f.assertion_status == AssertionStatusEnum.uncertain
+                else f.assertion_status
+            )
             normed = f.model_copy(update={
                 "subject_entity": self._norm(f.subject_entity),
                 "outcome_entity": self._norm(f.outcome_entity),
-                "assertion_status": infer_assertion_status(f.claim),
+                "assertion_status": assertion,
             })
             result.append((normed, te_id))
         return result
@@ -433,19 +518,24 @@ class NormalizeStage:
         Resolve an entity name to its canonical form.
 
         Resolution order:
-          1. UMLS linker (module-level scispaCy singleton)
-          2. Instance synonym dict (built-in + extra_synonyms)
-          3. Identity fallback
+          1. Instance synonym dict (built-in + extra_synonyms) — domain
+             knowledge takes priority; covers acronyms the linker gets wrong.
+          2. UMLS linker (module-level scispaCy singleton).
+          3. Identity fallback — stripped input returned unchanged.
         """
         if name is None:
             return None
         stripped = name.strip()
-        # 1. UMLS
+        # 1. Instance dict (includes extra_synonyms)
+        from_dict = self._synonyms.get(stripped.lower())
+        if from_dict is not None:
+            return from_dict
+        # 2. UMLS
         umls = _umls_canonical(stripped)
         if umls:
             return umls
-        # 2. Instance dict (includes extra_synonyms)
-        return self._synonyms.get(stripped.lower(), stripped)
+        # 3. Identity
+        return stripped
 
     def _merge(self, group: list[Finding], pmcid: str) -> NormalFinding:
         # Representative finding: highest grounding_score
@@ -466,6 +556,11 @@ class NormalizeStage:
 
         unique_pmcids = sorted({s.pmcid for s in spans}) or [pmcid]
 
+        assertion = (
+            infer_assertion_status(rep.claim)
+            if rep.assertion_status == AssertionStatusEnum.uncertain
+            else rep.assertion_status
+        )
         return NormalFinding(
             normal_id=_normal_id(pmcid, rep.subject_entity, rep.outcome_entity,
                                  rep.relation_type, te_ids),
@@ -473,7 +568,7 @@ class NormalizeStage:
             outcome_entity=rep.outcome_entity,
             relation_type=rep.relation_type,
             direction=rep.direction,
-            assertion_status=infer_assertion_status(rep.claim),
+            assertion_status=assertion,
             category=rep.category,
             predicate_text=rep.claim,
             scope=rep.scope or FindingScope(),
@@ -487,6 +582,11 @@ class NormalizeStage:
         spans = _spans_from_finding(f)
         te_ids = [s.text_element_id for s in spans]
         unique_pmcids = sorted({s.pmcid for s in spans}) or [pmcid]
+        assertion = (
+            infer_assertion_status(f.claim)
+            if f.assertion_status == AssertionStatusEnum.uncertain
+            else f.assertion_status
+        )
         return NormalFinding(
             normal_id=_normal_id(pmcid, f.subject_entity, f.outcome_entity,
                                  f.relation_type, te_ids),
@@ -494,7 +594,7 @@ class NormalizeStage:
             outcome_entity=f.outcome_entity,
             relation_type=f.relation_type,
             direction=f.direction,
-            assertion_status=infer_assertion_status(f.claim),
+            assertion_status=assertion,
             category=f.category,
             predicate_text=f.claim,
             scope=f.scope or FindingScope(),

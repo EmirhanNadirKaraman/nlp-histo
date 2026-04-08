@@ -145,31 +145,63 @@ class GroundingFilter:
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+# cross-encoder/nli-deberta-v3-base has a 512-token limit.  A long
+# verbatim_support paragraph can exceed this and get silently truncated,
+# making the entailment check unreliable.  We split the premise into
+# overlapping windows of ~400 chars (well inside 512 tokens for English)
+# and take the max entailment score across windows.
+_WINDOW_CHARS = 400
+_STEP_CHARS   = 200   # 50 % overlap so a sentence split across a boundary is covered
+
+
+def _split_windows(text: str) -> list[str]:
+    """
+    Split *text* into overlapping character windows.
+    Returns the original text as a single window if it is short enough.
+    """
+    if len(text) <= _WINDOW_CHARS:
+        return [text]
+    windows: list[str] = []
+    start = 0
+    while start < len(text):
+        windows.append(text[start: start + _WINDOW_CHARS])
+        start += _STEP_CHARS
+    return windows
+
+
 def _score_pairs(pairs: list[tuple[str, str]], nli_pipe) -> list[float]:
     """
     Run NLI on a batch of (premise, hypothesis) pairs.
     Returns a float list of entailment scores in [0, 1].
+
+    Long premises are split into overlapping windows; the maximum entailment
+    score across windows is returned so that a supporting sentence in the
+    second half of a paragraph is not missed due to token-limit truncation.
     Empty-string premises score 0.0 without hitting the model.
     """
-    scores: list[float] = []
-    non_empty_indices: list[int] = []
-    non_empty_inputs: list[dict] = []
+    # Build a flat list of (pair_index, window_text, hyp) inputs
+    flat_inputs: list[dict] = []
+    flat_pair_indices: list[int] = []
+
+    scores: list[float] = [0.0] * len(pairs)
 
     for i, (premise, hyp) in enumerate(pairs):
         if not premise.strip():
-            scores.append(0.0)
-        else:
-            scores.append(0.0)  # placeholder
-            non_empty_indices.append(i)
-            non_empty_inputs.append({"text": premise, "text_pair": hyp})
+            continue
+        for window in _split_windows(premise):
+            flat_inputs.append({"text": window, "text_pair": hyp})
+            flat_pair_indices.append(i)
 
-    if non_empty_inputs:
-        batch_results = nli_pipe(non_empty_inputs)
-        for idx, result in zip(non_empty_indices, batch_results):
-            scores[idx] = next(
+    if flat_inputs:
+        batch_results = nli_pipe(flat_inputs)
+        for pair_idx, result in zip(flat_pair_indices, batch_results):
+            window_score = next(
                 (s["score"] for s in result if s["label"].lower() == "entailment"),
                 0.0,
             )
+            # Keep the best window score for this pair
+            if window_score > scores[pair_idx]:
+                scores[pair_idx] = window_score
 
     return scores
 
