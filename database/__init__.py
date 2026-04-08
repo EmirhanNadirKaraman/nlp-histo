@@ -11,7 +11,16 @@ from .models import (
     TextElementFigureReference,
     TextElementTableReference,
     Entity,
-    Base
+    PipelineRun,
+    SumMapFinding,
+    SumNormalFinding,
+    SumNormalFindingSpan,
+    SumFindingGroup,
+    SumGroupMember,
+    SumCanonicalRule,
+    SumRelation,
+    SumFinalRule,
+    Base,
 )
 from .db_connection import (
     DatabaseConnection,
@@ -29,10 +38,19 @@ __all__ = [
     'TextElementFigureReference',
     'TextElementTableReference',
     'Entity',
+    'PipelineRun',
+    'SumMapFinding',
+    'SumNormalFinding',
+    'SumNormalFindingSpan',
+    'SumFindingGroup',
+    'SumGroupMember',
+    'SumCanonicalRule',
+    'SumRelation',
+    'SumFinalRule',
     'Base',
     'DatabaseConnection',
     'get_db_connection',
     'close_db_connection',
     'get_database_url',
-    'DB_CONFIG'
+    'DB_CONFIG',
 ]

@@ -4,7 +4,8 @@ Defines Document and TextElement models with relationships.
 """
 
 from sqlalchemy import (
-    Column, Integer, String, Text, TIMESTAMP, ForeignKey, ARRAY, Index, Float
+    Boolean, Column, Integer, String, Text, TIMESTAMP,
+    ForeignKey, ARRAY, Index, Float, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.ext.declarative import declarative_base
@@ -300,3 +301,322 @@ class Entity(Base):
         cui_info = f", CUI={self.umls_cui}" if self.umls_cui else ""
         canonical_info = f", canonical='{self.canonical_name}'" if self.canonical_name else ""
         return f"<Entity(text='{self.entity_text}', label='{self.entity_label}'{cui_info}{canonical_info})>"
+
+
+class PipelineRun(Base):
+    """
+    Tracks one execution of SummarizationRunner.process() for a single paper.
+
+    Every stage-level persistence table (added in later phases) will FK here,
+    making this the root of all lineage tracing.
+    """
+    __tablename__ = "pipeline_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # Human-readable unique key: "{pmcid}_{YYYYMMDDTHHmmss}"
+    run_id = Column(String(100), unique=True, nullable=False, index=True)
+
+    pmcid = Column(String(50), nullable=False, index=True)
+
+    # Nullable: document may not be in the DB when the run starts
+    document_id = Column(
+        Integer,
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # running / success / failed
+    status = Column(String(20), nullable=False, default="running")
+
+    # Snapshot of SummarizationRunner config (models, thresholds, etc.)
+    config_snapshot = Column(JSON, nullable=True)
+
+    # Set on failure
+    error = Column(Text, nullable=True)
+
+    started_at = Column(TIMESTAMP, nullable=False, default=func.now())
+    finished_at = Column(TIMESTAMP, nullable=True)
+
+    document = relationship("Document", backref="pipeline_runs")
+
+    __table_args__ = (
+        Index("ix_pipeline_runs_pmcid_started_at", "pmcid", "started_at"),
+    )
+
+    def __repr__(self):
+        return f"<PipelineRun(run_id='{self.run_id}', status='{self.status}')>"
+
+
+# ── Phase 2: MAP findings & Normalized findings ────────────────────────────────
+
+class SumMapFinding(Base):
+    """
+    One row per Finding that survived the grounding filter, stored after
+    grounding scores are written in-place (post-scoring).
+    Entities are PRE-normalization — use SumNormalFinding to see resolved names.
+    """
+    __tablename__ = "sum_map_findings"
+
+    id                      = Column(Integer, primary_key=True, autoincrement=True)
+    pipeline_run_id         = Column(Integer, ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False)
+    pmcid                   = Column(String(50),  nullable=False)
+    chunk_id                = Column(String(20),  nullable=False)   # "C1", "C2", …
+    position_in_chunk       = Column(Integer,     nullable=False)   # 0-indexed within chunk
+    category                = Column(String(50),  nullable=False)
+    claim                   = Column(Text,        nullable=False)
+    confidence              = Column(String(20),  nullable=False)
+    verbatim_support        = Column(Text,        nullable=False)
+    subject_entity          = Column(Text,        nullable=True)    # pre-normalization
+    outcome_entity          = Column(Text,        nullable=True)    # pre-normalization
+    relation_type           = Column(String(50),  nullable=False)
+    direction               = Column(String(20),  nullable=True)
+    assertion_status        = Column(String(20),  nullable=False)
+    grounding_score         = Column(Float,       nullable=True)
+    evidence_refs           = Column(ARRAY(Text), nullable=True)
+    scope_disease_subtype   = Column(Text,    nullable=True)
+    scope_cohort_n          = Column(Integer, nullable=True)
+    scope_assay_method      = Column(Text,    nullable=True)
+    scope_biomarker_cutoff  = Column(Text,    nullable=True)
+    scope_tissue_site       = Column(Text,    nullable=True)
+    scope_treatment_context = Column(Text,    nullable=True)
+    scope_endpoint          = Column(Text,    nullable=True)
+    scope_study_design      = Column(Text,    nullable=True)
+    created_at              = Column(TIMESTAMP, server_default="now()")
+
+    __table_args__ = (
+        Index("ix_smf_run",     "pipeline_run_id"),
+        Index("ix_smf_pmcid",   "pmcid"),
+        Index("ix_smf_subject", "subject_entity"),
+        UniqueConstraint("pipeline_run_id", "chunk_id", "position_in_chunk",
+                         name="uq_sum_map_finding_pos"),
+    )
+
+
+class SumNormalFinding(Base):
+    """
+    One row per NormalFinding output from the NORMALIZE stage.
+    Entities are POST-normalization (e.g. CAEN -> CEAN after synonym lookup).
+    """
+    __tablename__ = "sum_normal_findings"
+
+    id                      = Column(Integer, primary_key=True, autoincrement=True)
+    pipeline_run_id         = Column(Integer, ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False)
+    pmcid                   = Column(String(50),  nullable=False)
+    normal_id               = Column(String(100), nullable=False)
+    subject_entity          = Column(Text,        nullable=True)
+    outcome_entity          = Column(Text,        nullable=True)
+    relation_type           = Column(String(50),  nullable=False)
+    direction               = Column(String(20),  nullable=True)
+    assertion_status        = Column(String(20),  nullable=False)
+    category                = Column(String(50),  nullable=False)
+    predicate_text          = Column(Text,        nullable=False)
+    mean_grounding_score    = Column(Float,       nullable=True)
+    pmcids                  = Column(ARRAY(Text), nullable=True)
+    scope_disease_subtype   = Column(Text,    nullable=True)
+    scope_cohort_n          = Column(Integer, nullable=True)
+    scope_assay_method      = Column(Text,    nullable=True)
+    scope_biomarker_cutoff  = Column(Text,    nullable=True)
+    scope_tissue_site       = Column(Text,    nullable=True)
+    scope_treatment_context = Column(Text,    nullable=True)
+    scope_endpoint          = Column(Text,    nullable=True)
+    scope_study_design      = Column(Text,    nullable=True)
+    created_at              = Column(TIMESTAMP, server_default="now()")
+
+    spans = relationship(
+        "SumNormalFindingSpan",
+        back_populates="normal_finding",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_snf_run",     "pipeline_run_id"),
+        Index("ix_snf_pmcid",   "pmcid"),
+        Index("ix_snf_subject", "subject_entity"),
+        Index("ix_snf_outcome", "outcome_entity"),
+        UniqueConstraint("pipeline_run_id", "normal_id", name="uq_sum_normal_finding"),
+    )
+
+
+class SumNormalFindingSpan(Base):
+    """
+    One row per SourceSpan attached to a SumNormalFinding.
+    Links to the originating TextElement for full provenance.
+    """
+    __tablename__ = "sum_normal_finding_spans"
+
+    id                  = Column(Integer, primary_key=True, autoincrement=True)
+    normal_finding_id   = Column(Integer, ForeignKey("sum_normal_findings.id", ondelete="CASCADE"), nullable=False)
+    sentence_id         = Column(String(20), nullable=False)
+    pmcid               = Column(String(50), nullable=False)
+    text_element_id     = Column(Integer, ForeignKey("text_elements.id", ondelete="SET NULL"), nullable=True)
+    verbatim            = Column(Text, nullable=False)
+    created_at          = Column(TIMESTAMP, server_default="now()")
+
+    normal_finding = relationship("SumNormalFinding", back_populates="spans")
+
+    __table_args__ = (
+        Index("ix_snfs_finding", "normal_finding_id"),
+        Index("ix_snfs_te",      "text_element_id"),
+        UniqueConstraint("normal_finding_id", "sentence_id", name="uq_sum_nf_span"),
+    )
+
+
+# ── Phase 3: Finding groups ────────────────────────────────────────────────────
+
+class SumFindingGroup(Base):
+    """
+    One row per FindingGroup produced by the GROUP stage.
+
+    All NormalFindings with the same (subject, outcome, relation_type) land
+    in the same group regardless of direction — contradictions are handled by
+    the RELATE stage (Phase 5), not here.
+    """
+    __tablename__ = "sum_finding_groups"
+
+    id                  = Column(Integer, primary_key=True, autoincrement=True)
+    pipeline_run_id     = Column(Integer, ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False)
+    pmcid               = Column(String(50),  nullable=False)
+    group_id            = Column(String(100), nullable=False)   # "GRP_{sha8}_{sha8}_{relation_type}"
+    subject_entity      = Column(Text,        nullable=False)
+    outcome_entity      = Column(Text,        nullable=False)
+    relation_type       = Column(String(50),  nullable=False)
+    category            = Column(String(50),  nullable=False)
+    scope_heterogeneity = Column(Float,       nullable=False)
+    direction_counts    = Column(JSON,        nullable=False)    # {"positive": 2, "negative": 1, …}
+    created_at          = Column(TIMESTAMP,   server_default="now()")
+
+    members = relationship(
+        "SumGroupMember",
+        back_populates="group",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_sfg_run",     "pipeline_run_id"),
+        Index("ix_sfg_pmcid",   "pmcid"),
+        Index("ix_sfg_subject", "subject_entity"),
+        Index("ix_sfg_outcome", "outcome_entity"),
+        UniqueConstraint("pipeline_run_id", "group_id", name="uq_sum_finding_group"),
+    )
+
+
+class SumGroupMember(Base):
+    """
+    Junction table: one row per (FindingGroup, NormalFinding) membership.
+
+    normal_finding_id is nullable — it stays NULL when Phase 2 persistence
+    was skipped (db=None) or failed.  normal_id is always stored as a string
+    so membership can still be traced without the FK.
+    """
+    __tablename__ = "sum_group_members"
+
+    id                  = Column(Integer, primary_key=True, autoincrement=True)
+    finding_group_id    = Column(Integer, ForeignKey("sum_finding_groups.id", ondelete="CASCADE"), nullable=False)
+    normal_finding_id   = Column(Integer, ForeignKey("sum_normal_findings.id", ondelete="SET NULL"), nullable=True)
+    normal_id           = Column(String(100), nullable=False)   # string backup always present
+    created_at          = Column(TIMESTAMP, server_default="now()")
+
+    group          = relationship("SumFindingGroup", back_populates="members")
+    normal_finding = relationship("SumNormalFinding")
+
+    __table_args__ = (
+        Index("ix_sgm_group",  "finding_group_id"),
+        Index("ix_sgm_nf",     "normal_finding_id"),
+        UniqueConstraint("finding_group_id", "normal_id", name="uq_sum_group_member"),
+    )
+
+
+# ── Phase 4: Canonical rules ──────────────────────────────────────────────────
+
+class SumCanonicalRule(Base):
+    __tablename__ = "sum_canonical_rules"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    pipeline_run_id      = Column(Integer, ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False)
+    pmcid                = Column(String(50),  nullable=False)
+    canonical_id         = Column(String(100), nullable=False)
+    finding_group_id     = Column(Integer, ForeignKey("sum_finding_groups.id", ondelete="SET NULL"), nullable=True)
+    group_id             = Column(String(100), nullable=False)
+    subject_entity       = Column(Text,        nullable=False)
+    outcome_entity       = Column(Text,        nullable=False)
+    relation_type        = Column(String(50),  nullable=False)
+    direction            = Column(String(20),  nullable=True)
+    predicate_text       = Column(Text,        nullable=False)
+    canonical_scope      = Column(String(20),  nullable=False)
+    category             = Column(String(50),  nullable=False)
+    pmcids               = Column(ARRAY(Text), nullable=True)
+    member_normal_ids    = Column(ARRAY(Text), nullable=True)
+    mean_grounding_score = Column(Float,       nullable=True)
+    finding_count        = Column(Integer,     nullable=False)
+    created_at           = Column(TIMESTAMP,   server_default="now()")
+
+    __table_args__ = (
+        Index("ix_scr_run",     "pipeline_run_id"),
+        Index("ix_scr_pmcid",   "pmcid"),
+        Index("ix_scr_subject", "subject_entity"),
+        Index("ix_scr_outcome", "outcome_entity"),
+        UniqueConstraint("pipeline_run_id", "canonical_id", name="uq_sum_canonical_rule"),
+    )
+
+
+# ── Phase 5: Relations ────────────────────────────────────────────────────────
+
+class SumRelation(Base):
+    __tablename__ = "sum_relations"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    pipeline_run_id      = Column(Integer, ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False)
+    pmcid                = Column(String(50),  nullable=False)
+    rule_id_a            = Column(String(100), nullable=False)
+    rule_id_b            = Column(String(100), nullable=False)
+    canonical_rule_a_id  = Column(Integer, ForeignKey("sum_canonical_rules.id", ondelete="CASCADE"), nullable=True)
+    canonical_rule_b_id  = Column(Integer, ForeignKey("sum_canonical_rules.id", ondelete="CASCADE"), nullable=True)
+    relation_type        = Column(String(20),  nullable=False)
+    nli_score_a_to_b     = Column(Float,       nullable=False)
+    nli_score_b_to_a     = Column(Float,       nullable=False)
+    created_at           = Column(TIMESTAMP,   server_default="now()")
+
+    __table_args__ = (
+        Index("ix_sr_run",    "pipeline_run_id"),
+        Index("ix_sr_pmcid",  "pmcid"),
+        Index("ix_sr_rule_a", "rule_id_a"),
+        Index("ix_sr_rule_b", "rule_id_b"),
+    )
+
+
+# ── Phase 6: Final rules ──────────────────────────────────────────────────────
+
+class SumFinalRule(Base):
+    __tablename__ = "sum_final_rules"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    pipeline_run_id      = Column(Integer, ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False)
+    pmcid                = Column(String(50),  nullable=False)
+    final_id             = Column(String(100), nullable=False)
+    canonical_rule_id    = Column(Integer, ForeignKey("sum_canonical_rules.id", ondelete="SET NULL"), nullable=True)
+    canonical_id         = Column(String(100), nullable=False)
+    
+    subject_entity       = Column(Text,        nullable=False)
+    outcome_entity       = Column(Text,        nullable=False)
+    relation_type        = Column(String(50),  nullable=False)
+    direction            = Column(String(20),  nullable=True)
+    predicate_text       = Column(Text,        nullable=False)
+    category             = Column(String(50),  nullable=False)
+    
+    final_score          = Column(Float,       nullable=False)
+    support_count        = Column(Integer,     nullable=False)
+    contradict_count     = Column(Integer,     nullable=False)
+    scope_qualify_count  = Column(Integer,     nullable=False)
+    is_contradicted      = Column(Boolean,     nullable=False)
+    contradicted_by      = Column(ARRAY(Text), nullable=True)
+    created_at           = Column(TIMESTAMP,   server_default="now()")
+
+    __table_args__ = (
+        Index("ix_sfr_run",     "pipeline_run_id"),
+        Index("ix_sfr_pmcid",   "pmcid"),
+        Index("ix_sfr_subject", "subject_entity"),
+        Index("ix_sfr_outcome", "outcome_entity"),
+        UniqueConstraint("pipeline_run_id", "final_id", name="uq_sum_final_rule"),
+    )

@@ -139,6 +139,8 @@ class SummarizationRunner:
         cache_path: Path | None = None,
         trace_enabled: bool = False,
         trace_dir: Path | None = None,
+        db=None,
+        force_rerun: bool = False,
     ) -> None:
         self._output_dir = output_dir
         self._summaries_dir = output_dir / "summaries"
@@ -167,6 +169,9 @@ class SummarizationRunner:
             ContradictionDetector(escalation_llm, similarity_threshold=contradiction_similarity_threshold)
             if contradiction_similarity_threshold is not None else None
         )
+
+        self._db = db  # DatabaseConnection | None — persistence is fully optional
+        self._force_rerun = force_rerun
 
         self._trace_enabled = trace_enabled
         self.trace_dir: Path = trace_dir or (output_dir / "traces")
@@ -215,17 +220,21 @@ class SummarizationRunner:
         """
         pmcid = file_data["pmcid"]
 
-        # Skip if already fully processed
-        existing = self._load_result(pmcid)
-        if existing is not None:
-            logger.info("[%s] skipped (cached result on disk)", pmcid)
-            if self._trace_enabled:
-                collector = self._make_collector(pmcid)
-                flush_collector(collector, self.trace_dir, status="skipped")
-            return existing
+        # Skip if already fully processed (bypass with force_rerun=True)
+        if not self._force_rerun:
+            existing = self._load_result(pmcid)
+            if existing is not None:
+                logger.info("[%s] skipped (cached result on disk)", pmcid)
+                if self._trace_enabled:
+                    collector = self._make_collector(pmcid)
+                    flush_collector(collector, self.trace_dir, status="skipped")
+                return existing
+
+        run_id = self._make_run_id(pmcid)
+        pipeline_run_db_id = self._create_pipeline_run(pmcid, run_id)
 
         collector: TraceCollector | None = (
-            self._make_collector(pmcid) if self._trace_enabled else None
+            self._make_collector(pmcid, run_id) if self._trace_enabled else None
         )
 
         try:
@@ -286,6 +295,8 @@ class SummarizationRunner:
                 self._scored_map_findings[pmcid] = all_findings
                 logger.info("[%s] GROUNDING (score) done [%.1fs]",
                             pmcid, time.perf_counter() - t0)
+                logger.info("[%s] chunk_ids before persist: %s", pmcid, [cs.chunk_id for cs in chunk_summaries])
+                self._persist_map_findings(pipeline_run_db_id, pmcid, chunk_summaries)
 
             # 1b. NORMALIZE — entity normalization + conditional dedup
             n_scored = len(self._scored_map_findings.get(pmcid, []))
@@ -296,6 +307,9 @@ class SummarizationRunner:
             )
             logger.info("[%s] NORMALIZE done [%.1fs] — %d NormalFindings",
                         pmcid, time.perf_counter() - t0, len(self._normal_findings[pmcid]))
+            _nf_db_id_map = self._persist_normal_findings(
+                pipeline_run_db_id, pmcid, self._normal_findings[pmcid]
+            )
 
             # 1c. GROUP — bucket groupable NormalFindings by (subject, outcome, category)
             all_normal = self._normal_findings[pmcid]
@@ -309,6 +323,9 @@ class SummarizationRunner:
             self._finding_groups[pmcid] = self._group.group(groupable, pmcid)
             logger.info("[%s] GROUP done [%.1fs] — %d groups",
                         pmcid, time.perf_counter() - t0, len(self._finding_groups[pmcid]))
+            _fg_db_id_map = self._persist_finding_groups(
+                pipeline_run_db_id, pmcid, self._finding_groups[pmcid], _nf_db_id_map
+            )
 
             # 1d. CANONICALIZE — FindingGroup[] → CanonicalRule[]
             logger.info("[%s] CANONICALIZE — %d groups", pmcid, len(self._finding_groups[pmcid]))
@@ -321,6 +338,9 @@ class SummarizationRunner:
             )
             logger.info("[%s] CANONICALIZE done [%.1fs] — %d CanonicalRules",
                         pmcid, time.perf_counter() - t0, len(self._canonical_rules[pmcid]))
+            _cr_db_id_map = self._persist_canonical_rules(
+                pipeline_run_db_id, pmcid, self._canonical_rules[pmcid], _fg_db_id_map
+            )
 
             # 1e. RELATE — CanonicalRule[] → Relation[]
             logger.info(
@@ -332,6 +352,9 @@ class SummarizationRunner:
             )
             logger.info("[%s] RELATE done [%.1fs] — %d relations",
                         pmcid, time.perf_counter() - t0, len(self._relations[pmcid]))
+            self._persist_relations(
+                pipeline_run_db_id, pmcid, self._relations[pmcid], _cr_db_id_map
+            )
 
             # 1f. RESOLVE — CanonicalRule[] + Relation[] → FinalRule[]
             logger.info(
@@ -344,6 +367,9 @@ class SummarizationRunner:
             )
             logger.info("[%s] RESOLVE done [%.1fs] — %d FinalRules",
                         pmcid, time.perf_counter() - t0, len(self._final_rules[pmcid]))
+            self._persist_final_rules(
+                pipeline_run_db_id, pmcid, self._final_rules[pmcid], _cr_db_id_map
+            )
 
             # 2. REDUCE (recursive tree collapse)
             logger.info("[%s] REDUCE — %d chunks", pmcid, len(chunk_summaries))
@@ -392,6 +418,7 @@ class SummarizationRunner:
 
             result = {
                 "status": "success",
+                "run_id": run_id,
                 "pmcid": pmcid,
                 "summary": master.narrative_summary,
                 "rules": [r.model_dump() for r in rules.rules],
@@ -412,6 +439,7 @@ class SummarizationRunner:
                     "rules_provenance": rules.model_dump(),
                 },
             }
+            self._finish_pipeline_run(pipeline_run_db_id, "success")
             self._save_result(result)
             self._cache.save()
 
@@ -424,9 +452,10 @@ class SummarizationRunner:
 
         except Exception as exc:
             logger.exception("[%s] Pipeline failed: %s", pmcid, exc)
+            self._finish_pipeline_run(pipeline_run_db_id, "failed", error=str(exc))
             if collector is not None:
                 flush_collector(collector, self.trace_dir, status="error", error=str(exc))
-            return {"status": "error", "pmcid": pmcid, "error": str(exc)}
+            return {"status": "error", "run_id": run_id, "pmcid": pmcid, "error": str(exc)}
 
     def process_batch(self, file_data_list: list[dict]) -> list[dict]:
         """
@@ -493,14 +522,389 @@ class SummarizationRunner:
 
         return {"pmcid": pmcid, "sentences_with_provenance": sentences}
 
-    def _make_collector(self, pmcid: str) -> TraceCollector:
+    def _make_run_id(self, pmcid: str) -> str:
+        """Generate a human-readable run identifier: {pmcid}_{YYYYMMDDTHHmmss}."""
         ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
-        run_id = f"{pmcid}_{ts}"
+        return f"{pmcid}_{ts}"
+
+    def _make_collector(self, pmcid: str, run_id: str | None = None) -> TraceCollector:
+        if run_id is None:
+            run_id = self._make_run_id(pmcid)
         return TraceCollector(
             run_id=run_id,
             pmcid=pmcid,
             config_snapshot=self._config_snapshot,
         )
+
+    def _create_pipeline_run(self, pmcid: str, run_id: str) -> int | None:
+        """
+        Insert a pipeline_runs row with status='running'.
+
+        Returns the integer row id on success, None if db=None or on any error.
+        Persistence failures are logged as warnings and never crash the pipeline.
+        """
+        if self._db is None:
+            return None
+        try:
+            from database import Document, PipelineRun  # noqa: PLC0415 — lazy import
+            with self._db.session_scope() as session:
+                doc = session.query(Document).filter_by(pmcid=pmcid).first()
+                run = PipelineRun(
+                    run_id=run_id,
+                    pmcid=pmcid,
+                    document_id=doc.id if doc else None,
+                    status="running",
+                    config_snapshot=self._config_snapshot,
+                    started_at=datetime.now(tz=timezone.utc),
+                )
+                session.add(run)
+                session.flush()
+                return run.id
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to create pipeline_run: %s", pmcid, exc)
+            return None
+
+    def _finish_pipeline_run(
+        self,
+        db_id: int | None,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        """
+        Update a pipeline_runs row to its final status.
+
+        No-op when db_id is None (db=None or creation failed).
+        Persistence failures are logged as warnings and never crash the pipeline.
+        """
+        if db_id is None:
+            return
+        try:
+            from database import PipelineRun  # noqa: PLC0415 — lazy import
+            with self._db.session_scope() as session:
+                run = session.query(PipelineRun).filter_by(id=db_id).first()
+                if run is not None:
+                    run.status = status
+                    run.finished_at = datetime.now(tz=timezone.utc)
+                    run.error = error
+        except Exception as exc:
+            logger.warning("DB: failed to update pipeline_run id=%s: %s", db_id, exc)
+
+    # ── Phase 2: DB persistence ────────────────────────────────────────────────
+
+    def _persist_map_findings(
+        self,
+        db_id: int | None,
+        pmcid: str,
+        chunk_summaries: list,
+    ) -> None:
+        """
+        Persist scored MAP findings (post-grounding) to sum_map_findings.
+        Entities are pre-normalization.  No-op when db_id is None.
+        """
+        if db_id is None:
+            return
+        try:
+            from database.models import SumMapFinding
+            from .models import FindingScope
+            rows = []
+            for cs in chunk_summaries:
+                for pos, f in enumerate(cs.findings):
+                    scope = f.scope or FindingScope()
+                    rows.append({
+                        "pipeline_run_id":       db_id,
+                        "pmcid":                 pmcid,
+                        "chunk_id":              cs.chunk_id,
+                        "position_in_chunk":     pos,
+                        "category":              f.category,
+                        "claim":                 f.claim,
+                        "confidence":            f.confidence,
+                        "verbatim_support":      f.verbatim_support,
+                        "subject_entity":        f.subject_entity,
+                        "outcome_entity":        f.outcome_entity,
+                        "relation_type":         f.relation_type.value,
+                        "direction":             f.direction.value if f.direction else None,
+                        "assertion_status":      f.assertion_status.value,
+                        "grounding_score":       f.grounding_score,
+                        "evidence_refs":         list(f.evidence) if f.evidence else [],
+                        "scope_disease_subtype":   scope.disease_subtype,
+                        "scope_cohort_n":          scope.cohort_n,
+                        "scope_assay_method":      scope.assay_method,
+                        "scope_biomarker_cutoff":  scope.biomarker_cutoff,
+                        "scope_tissue_site":       scope.tissue_site,
+                        "scope_treatment_context": scope.treatment_context,
+                        "scope_endpoint":          scope.endpoint,
+                        "scope_study_design":      scope.study_design,
+                    })
+            if not rows:
+                return
+            with self._db.engine.begin() as conn:
+                conn.execute(
+                    SumMapFinding.__table__.delete().where(
+                        SumMapFinding.__table__.c.pipeline_run_id == db_id
+                    )
+                )
+                conn.execute(SumMapFinding.__table__.insert(), rows)
+            logger.info(
+                "[%s] DB: persisted %d map findings (run_id=%d)",
+                pmcid, len(rows), db_id,
+            )
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to persist map findings: %s", pmcid, exc, exc_info=True)
+
+    def _persist_normal_findings(
+        self,
+        db_id: int | None,
+        pmcid: str,
+        normal_findings: list,
+    ) -> dict[str, int]:
+        """
+        Persist NormalFindings + evidence spans to sum_normal_findings /
+        sum_normal_finding_spans.  Returns {normal_id: db_row_id} for later
+        phases.  No-op (returns {}) when db_id is None.
+        """
+        if db_id is None:
+            return {}
+        nf_id_map: dict[str, int] = {}
+        try:
+            from database.models import SumNormalFinding, SumNormalFindingSpan
+            from .models import FindingScope
+            with self._db.session_scope() as session:
+                for nf in normal_findings:
+                    scope = nf.scope or FindingScope()
+                    row = SumNormalFinding(
+                        pipeline_run_id     = db_id,
+                        pmcid               = pmcid,
+                        normal_id           = nf.normal_id,
+                        subject_entity      = nf.subject_entity,
+                        outcome_entity      = nf.outcome_entity,
+                        relation_type       = nf.relation_type.value,
+                        direction           = nf.direction.value if nf.direction else None,
+                        assertion_status    = nf.assertion_status.value,
+                        category            = nf.category,
+                        predicate_text      = nf.predicate_text,
+                        mean_grounding_score= nf.mean_grounding_score,
+                        pmcids              = list(nf.pmcids) if nf.pmcids else [],
+                        scope_disease_subtype   = scope.disease_subtype,
+                        scope_cohort_n          = scope.cohort_n,
+                        scope_assay_method      = scope.assay_method,
+                        scope_biomarker_cutoff  = scope.biomarker_cutoff,
+                        scope_tissue_site       = scope.tissue_site,
+                        scope_treatment_context = scope.treatment_context,
+                        scope_endpoint          = scope.endpoint,
+                        scope_study_design      = scope.study_design,
+                    )
+                    session.add(row)
+                    session.flush()           # get row.id before adding spans
+                    nf_id_map[nf.normal_id] = row.id
+                    for span in (nf.evidence or []):
+                        session.add(SumNormalFindingSpan(
+                            normal_finding_id = row.id,
+                            sentence_id       = span.sentence_id,
+                            pmcid             = span.pmcid,
+                            text_element_id   = span.text_element_id or None,
+                            verbatim          = span.verbatim,
+                        ))
+            logger.info(
+                "[%s] DB: persisted %d normal findings + spans (run_id=%d)",
+                pmcid, len(nf_id_map), db_id,
+            )
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to persist normal findings: %s", pmcid, exc)
+        return nf_id_map
+
+    def _persist_finding_groups(
+        self,
+        db_id: int | None,
+        pmcid: str,
+        finding_groups: list,
+        nf_db_id_map: dict[str, int],
+    ) -> dict[str, int]:
+        """
+        Persist FindingGroups + member links to sum_finding_groups /
+        sum_group_members.
+
+        nf_db_id_map maps normal_id -> DB integer id from _persist_normal_findings.
+        Member rows are still created when nf_db_id_map is empty — normal_id
+        is stored as a string backup; normal_finding_id FK will be NULL.
+
+        Returns {group_id: db_row_id} for Phase 4 (CANONICALIZE) persistence.
+        No-op (returns {}) when db_id is None.
+        """
+        if db_id is None:
+            return {}
+        group_id_map: dict[str, int] = {}
+        try:
+            from database.models import SumFindingGroup, SumGroupMember
+            with self._db.session_scope() as session:
+                for fg in finding_groups:
+                    row = SumFindingGroup(
+                        pipeline_run_id     = db_id,
+                        pmcid               = pmcid,
+                        group_id            = fg.group_id,
+                        subject_entity      = fg.subject_entity,
+                        outcome_entity      = fg.outcome_entity,
+                        relation_type       = fg.relation_type.value,
+                        category            = fg.category,
+                        scope_heterogeneity = fg.scope_heterogeneity,
+                        direction_counts    = dict(fg.direction_counts),
+                    )
+                    session.add(row)
+                    session.flush()          # get row.id before adding members
+                    group_id_map[fg.group_id] = row.id
+                    missing = 0
+                    for normal_id in fg.member_ids:
+                        nf_db_id = nf_db_id_map.get(normal_id)
+                        if nf_db_id is None:
+                            missing += 1
+                        session.add(SumGroupMember(
+                            finding_group_id  = row.id,
+                            normal_finding_id = nf_db_id,   # None when Phase 2 skipped
+                            normal_id         = normal_id,
+                        ))
+                    if missing:
+                        logger.debug(
+                            "[%s] group %s: %d member(s) have no NF DB id (Phase 2 incomplete)",
+                            pmcid, fg.group_id, missing,
+                        )
+            logger.info(
+                "[%s] DB: persisted %d finding groups (run_id=%d)",
+                pmcid, len(group_id_map), db_id,
+            )
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to persist finding groups: %s", pmcid, exc)
+        return group_id_map
+
+    def _persist_canonical_rules(
+        self,
+        db_id: int | None,
+        pmcid: str,
+        canonical_rules: list,
+        fg_db_id_map: dict[str, int],
+    ) -> dict[str, int]:
+        """
+        Persist CanonicalRules to sum_canonical_rules.
+        Returns {canonical_id: db_row_id} for Phase 5/6 persistence.
+        """
+        if db_id is None:
+            return {}
+        cr_id_map: dict[str, int] = {}
+        try:
+            from database.models import SumCanonicalRule
+            rows = []
+            for cr in canonical_rules:
+                fg_db_id = fg_db_id_map.get(cr.group_id)
+                row = SumCanonicalRule(
+                    pipeline_run_id      = db_id,
+                    pmcid                = pmcid,
+                    canonical_id         = cr.canonical_id,
+                    finding_group_id     = fg_db_id,
+                    group_id             = cr.group_id,
+                    subject_entity       = cr.subject_entity,
+                    outcome_entity       = cr.outcome_entity,
+                    relation_type        = cr.relation_type.value,
+                    direction            = cr.direction.value if cr.direction else None,
+                    predicate_text       = cr.predicate_text,
+                    canonical_scope      = cr.canonical_scope.value,
+                    category             = cr.category,
+                    pmcids               = list(cr.supporting_pmcids) if cr.supporting_pmcids else [],
+                    member_normal_ids    = list(cr.member_normal_ids) if cr.member_normal_ids else [],
+                    mean_grounding_score = cr.mean_grounding_score,
+                    finding_count        = cr.finding_count,
+                )
+                rows.append(row)
+            
+            with self._db.session_scope() as session:
+                for row in rows:
+                    session.add(row)
+                session.flush()
+                for row in rows:
+                    cr_id_map[row.canonical_id] = row.id
+            
+            logger.info(
+                "[%s] DB: persisted %d canonical rules (run_id=%d)",
+                pmcid, len(cr_id_map), db_id,
+            )
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to persist canonical rules: %s", pmcid, exc)
+        return cr_id_map
+
+    def _persist_relations(
+        self,
+        db_id: int | None,
+        pmcid: str,
+        relations: list,
+        cr_db_id_map: dict[str, int],
+    ) -> None:
+        """Persist Relations to sum_relations."""
+        if db_id is None:
+            return
+        try:
+            from database.models import SumRelation
+            rows = []
+            for rel in relations:
+                rows.append(SumRelation(
+                    pipeline_run_id     = db_id,
+                    pmcid               = pmcid,
+                    rule_id_a           = rel.rule_id_a,
+                    rule_id_b           = rel.rule_id_b,
+                    canonical_rule_a_id = cr_db_id_map.get(rel.rule_id_a),
+                    canonical_rule_b_id = cr_db_id_map.get(rel.rule_id_b),
+                    relation_type       = rel.relation_type.value,
+                    nli_score_a_to_b    = rel.nli_score_a_to_b,
+                    nli_score_b_to_a    = rel.nli_score_b_to_a,
+                ))
+            if rows:
+                with self._db.session_scope() as session:
+                    session.bulk_save_objects(rows)
+                logger.info(
+                    "[%s] DB: persisted %d relations (run_id=%d)",
+                    pmcid, len(rows), db_id,
+                )
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to persist relations: %s", pmcid, exc)
+
+    def _persist_final_rules(
+        self,
+        db_id: int | None,
+        pmcid: str,
+        final_rules: list,
+        cr_db_id_map: dict[str, int],
+    ) -> None:
+        """Persist FinalRules (scored canonical rules) to sum_final_rules."""
+        if db_id is None:
+            return
+        try:
+            from database.models import SumFinalRule
+            rows = []
+            for fr in final_rules:
+                rows.append(SumFinalRule(
+                    pipeline_run_id      = db_id,
+                    pmcid                = pmcid,
+                    final_id             = fr.final_id,
+                    canonical_rule_id    = cr_db_id_map.get(fr.canonical_id),
+                    canonical_id         = fr.canonical_id,
+                    subject_entity       = fr.subject_entity,
+                    outcome_entity       = fr.outcome_entity,
+                    relation_type        = fr.relation_type.value,
+                    direction            = fr.direction.value if fr.direction else None,
+                    predicate_text       = fr.predicate_text,
+                    category             = fr.category,
+                    final_score          = fr.final_score,
+                    support_count        = fr.support_count,
+                    contradict_count     = fr.contradict_count,
+                    scope_qualify_count  = fr.scope_qualify_count,
+                    is_contradicted      = fr.is_contradicted,
+                    contradicted_by      = list(fr.contradicted_by) if fr.contradicted_by else [],
+                ))
+            if rows:
+                with self._db.session_scope() as session:
+                    session.bulk_save_objects(rows)
+                logger.info(
+                    "[%s] DB: persisted %d final rules (run_id=%d)",
+                    pmcid, len(rows), db_id,
+                )
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to persist final rules: %s", pmcid, exc)
 
     def _result_path(self, pmcid: str) -> Path:
         return self._summaries_dir / f"{pmcid}.json"

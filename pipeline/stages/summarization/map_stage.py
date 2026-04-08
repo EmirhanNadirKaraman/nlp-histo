@@ -128,6 +128,9 @@ class MapStage:
             if cache:
                 hit = cache.get_map(chunk)
                 if hit:
+                    # Always assign chunk_id from current position — cached
+                    # chunk_id may be stale (e.g. from a different run or paper).
+                    hit = hit.model_copy(update={"chunk_id": f"C{idx + 1}"})
                     results.append(hit)
                     cache_hit_indices.append(idx)
                     continue

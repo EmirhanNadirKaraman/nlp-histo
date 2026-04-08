@@ -13,14 +13,16 @@ Usage
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --skip-nli
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --chunks 3
     PYTHONPATH=. python scripts/run_paper_single_model.py --list-only
+    PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --force-rerun
 
 Options
 -------
---trace       Write JSONL traces to out/summaries/traces/.
---skip-nli    Disable NLI grounding filter and RELATE stage (faster, no GPU needed).
---chunks N    Limit to the first N×10 sentences (default: all).
---no-canon    Skip CANONICALIZE LLM call; use deterministic (highest score) fallback.
---list-only   Print available PMCIDs from the database and exit.
+--trace        Write JSONL traces to out/summaries/traces/.
+--skip-nli     Disable NLI grounding filter and RELATE stage (faster, no GPU needed).
+--chunks N     Limit to the first N×10 sentences (default: all).
+--no-canon     Skip CANONICALIZE LLM call; use deterministic (highest score) fallback.
+--list-only    Print available PMCIDs from the database and exit.
+--force-rerun  Ignore cached result JSON and reprocess from scratch.
 """
 from __future__ import annotations
 
@@ -65,8 +67,10 @@ def build_runner(
     trace: bool,
     skip_nli: bool,
     no_canon: bool,
+    force_rerun: bool = False,
 ) -> "SummarizationRunner":
     from pipeline.stages.summarization import SummarizationRunner
+    from database import get_db_connection
 
     llm = build_llm()
 
@@ -85,6 +89,8 @@ def build_runner(
         nli_contradiction_threshold=0.50,
         output_dir=Path("out/summaries"),
         trace_enabled=trace,
+        db=get_db_connection(),
+        force_rerun=force_rerun,
     )
 
 
@@ -170,7 +176,8 @@ def main() -> None:
     parser.add_argument("--no-canon",  action="store_true", help="Skip CANONICALIZE LLM call")
     parser.add_argument("--chunks",    type=int, default=None,
                         help="Limit to first N chunks (each chunk = 10 sentences)")
-    parser.add_argument("--list-only", action="store_true", help="Print available PMCIDs and exit")
+    parser.add_argument("--list-only",   action="store_true", help="Print available PMCIDs and exit")
+    parser.add_argument("--force-rerun", action="store_true", help="Ignore cached result JSON and reprocess")
     args = parser.parse_args()
 
     if args.list_only:
@@ -190,6 +197,7 @@ def main() -> None:
         trace=args.trace,
         skip_nli=args.skip_nli,
         no_canon=args.no_canon,
+        force_rerun=args.force_rerun,
     )
 
     logger.info("Loading %s from database…", pmcid)
