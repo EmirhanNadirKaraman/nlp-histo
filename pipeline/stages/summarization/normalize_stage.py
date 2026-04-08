@@ -2,9 +2,13 @@
 NORMALIZE stage: Finding[] → NormalFinding[]
 
 Two operations:
-1. Entity normalization — resolve common surface-form variants to canonical
-   names using a curated biomedical synonym dictionary.  Lowercased,
-   whitespace-stripped lookup.  No embedding fallback in Phase 2.
+1. Entity normalization — resolve surface-form variants to canonical names.
+   Resolution order:
+     a. UMLS linker via scispaCy (en_core_sci_lg, threshold 0.7) — loaded
+        lazily and cached at module level; skipped if scispaCy unavailable.
+     b. Hand-curated synonym dictionary (_SYNONYMS) — covers rare entities
+        that UMLS does not link (CEAN, MGA, …).
+     c. Identity fallback — stripped input returned unchanged.
 
 2. Conditional dedup — findings that share the same
    (text_element_id, subject_entity, outcome_entity, relation_type) after
@@ -89,11 +93,120 @@ _SYNONYMS: dict[str, str] = {
 }
 
 
+# ── UMLS entity resolver ───────────────────────────────────────────────────────
+# Module-level cache: entity surface text → canonical name string.
+# Shared across all NormalizeStage instances in the same process.
+_UMLS_CACHE: dict[str, str] = {}
+
+# Module-level scispaCy model + linker singleton (None until first use).
+_SPACY_NLP = None
+_SPACY_LINKER = None
+_SPACY_AVAILABLE: bool | None = None   # None = not yet probed
+
+_UMLS_THRESHOLD = 0.7
+
+
+def _probe_spacy() -> bool:
+    """
+    Try to load a scispaCy model with UMLS linker.  Attempts en_core_sci_lg
+    first; falls back to en_core_sci_sm if lg is not installed.  Sets
+    module-level _SPACY_NLP, _SPACY_LINKER, _SPACY_AVAILABLE.
+    Returns True on success.
+    """
+    global _SPACY_NLP, _SPACY_LINKER, _SPACY_AVAILABLE
+    try:
+        import spacy                                # type: ignore
+        import scispacy                             # noqa: F401  # type: ignore
+        from scispacy.linking import EntityLinker   # noqa: F401  # type: ignore
+
+        for model_name in ("en_core_sci_lg", "en_core_sci_sm"):
+            try:
+                logger.info("NORMALIZE: loading %s + UMLS linker (one-time)…", model_name)
+                nlp = spacy.load(model_name, disable=["parser", "attribute_ruler", "lemmatizer"])
+                nlp.add_pipe("scispacy_linker", config={
+                    "resolve_abbreviations": True,
+                    "linker_name": "umls",
+                    "threshold": _UMLS_THRESHOLD,
+                })
+                _SPACY_NLP = nlp
+                _SPACY_LINKER = nlp.get_pipe("scispacy_linker")
+                _SPACY_AVAILABLE = True
+                logger.info("NORMALIZE: scispaCy + UMLS linker ready (%s).", model_name)
+                return True
+            except OSError:
+                logger.info("NORMALIZE: %s not found, trying next…", model_name)
+                continue
+
+        raise RuntimeError("No scispaCy model found (tried en_core_sci_lg, en_core_sci_sm)")
+    except Exception as exc:
+        logger.warning("NORMALIZE: scispaCy unavailable (%s) — using dict fallback only.", exc)
+        _SPACY_AVAILABLE = False
+        return False
+
+
+def _umls_canonical(text: str) -> str | None:
+    """
+    Return the UMLS preferred name for *text*, or None if no confident link.
+
+    Uses the module-level scispaCy model.  Results are cached in _UMLS_CACHE.
+    """
+    global _SPACY_AVAILABLE
+
+    if text in _UMLS_CACHE:
+        return _UMLS_CACHE[text]
+
+    # Probe on first call
+    if _SPACY_AVAILABLE is None:
+        _probe_spacy()
+
+    if not _SPACY_AVAILABLE:
+        return None
+
+    try:
+        doc = _SPACY_NLP(text)  # type: ignore[arg-type]
+        best_cui: str | None = None
+        best_score: float = 0.0
+
+        # Prefer entity spans; fall back to doc-level kb_ents
+        ents = doc.ents if doc.ents else [doc]
+        for span in ents:
+            kb_ents = getattr(span._, "kb_ents", [])
+            for cui, score in kb_ents:
+                if score > best_score:
+                    best_score = score
+                    best_cui = cui
+
+        canonical: str | None = None
+        if best_cui and best_score >= _UMLS_THRESHOLD:
+            concept = _SPACY_LINKER.kb.cui_to_entity.get(best_cui)  # type: ignore[union-attr]
+            if concept:
+                canonical = concept.canonical_name
+
+        _UMLS_CACHE[text] = canonical  # type: ignore[assignment]  # cache None too
+        return canonical
+    except Exception as exc:
+        logger.debug("NORMALIZE: UMLS lookup failed for %r: %s", text, exc)
+        return None
+
+
 def normalize_entity(name: str | None) -> str | None:
-    """Return the canonical form of an entity name, or None if input is None."""
+    """
+    Return the canonical form of an entity name, or None if input is None.
+
+    Resolution order:
+      1. UMLS linker (scispaCy) — preferred name from UMLS knowledge base.
+      2. Hand-curated _SYNONYMS dict — covers rare/unlinked entities.
+      3. Identity — stripped input returned unchanged.
+    """
     if name is None:
         return None
-    return _SYNONYMS.get(name.strip().lower(), name.strip())
+    stripped = name.strip()
+    # 1. UMLS
+    umls = _umls_canonical(stripped)
+    if umls:
+        return umls
+    # 2. Dict
+    return _SYNONYMS.get(stripped.lower(), stripped)
 
 
 # ── Assertion status inference ─────────────────────────────────────────────────
@@ -316,9 +429,23 @@ class NormalizeStage:
         return result
 
     def _norm(self, name: str | None) -> str | None:
+        """
+        Resolve an entity name to its canonical form.
+
+        Resolution order:
+          1. UMLS linker (module-level scispaCy singleton)
+          2. Instance synonym dict (built-in + extra_synonyms)
+          3. Identity fallback
+        """
         if name is None:
             return None
-        return self._synonyms.get(name.strip().lower(), name.strip())
+        stripped = name.strip()
+        # 1. UMLS
+        umls = _umls_canonical(stripped)
+        if umls:
+            return umls
+        # 2. Instance dict (includes extra_synonyms)
+        return self._synonyms.get(stripped.lower(), stripped)
 
     def _merge(self, group: list[Finding], pmcid: str) -> NormalFinding:
         # Representative finding: highest grounding_score

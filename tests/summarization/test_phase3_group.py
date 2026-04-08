@@ -5,6 +5,7 @@ No LLM or NLI model required.
 import pytest
 
 from pipeline.stages.summarization.models import (
+    AssertionStatusEnum,
     DirectionEnum,
     FindingGroup,
     FindingScope,
@@ -37,6 +38,7 @@ def _nf(
         outcome_entity=outcome,
         relation_type=relation_type,
         direction=direction,
+        assertion_status=AssertionStatusEnum.positive,
         category=category,
         predicate_text="CD30 predicts worse OS",
         scope=scope or FindingScope(),
