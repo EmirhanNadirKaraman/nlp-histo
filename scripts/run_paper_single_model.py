@@ -11,6 +11,7 @@ Usage
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --trace
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --skip-nli
+    PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --skip-ner
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --chunks 3
     PYTHONPATH=. python scripts/run_paper_single_model.py --list-only
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --force-rerun
@@ -68,6 +69,7 @@ def build_runner(
     skip_nli: bool,
     no_canon: bool,
     force_rerun: bool = False,
+    skip_ner: bool = False,
 ) -> "SummarizationRunner":
     from pipeline.stages.summarization import SummarizationRunner
     from database import get_db_connection
@@ -91,6 +93,7 @@ def build_runner(
         trace_enabled=trace,
         db=get_db_connection(),
         force_rerun=force_rerun,
+        run_ner=not skip_ner,
     )
 
 
@@ -178,6 +181,7 @@ def main() -> None:
                         help="Limit to first N chunks (each chunk = 10 sentences)")
     parser.add_argument("--list-only",   action="store_true", help="Print available PMCIDs and exit")
     parser.add_argument("--force-rerun", action="store_true", help="Ignore cached result JSON and reprocess")
+    parser.add_argument("--skip-ner",    action="store_true", help="Skip NER + UMLS linking")
     args = parser.parse_args()
 
     if args.list_only:
@@ -198,6 +202,7 @@ def main() -> None:
         skip_nli=args.skip_nli,
         no_canon=args.no_canon,
         force_rerun=args.force_rerun,
+        skip_ner=args.skip_ner,
     )
 
     logger.info("Loading %s from database…", pmcid)

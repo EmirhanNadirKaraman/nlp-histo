@@ -141,6 +141,7 @@ class SummarizationRunner:
         trace_dir: Path | None = None,
         db=None,
         force_rerun: bool = False,
+        run_ner: bool = True,
     ) -> None:
         self._output_dir = output_dir
         self._summaries_dir = output_dir / "summaries"
@@ -172,6 +173,7 @@ class SummarizationRunner:
 
         self._db = db  # DatabaseConnection | None — persistence is fully optional
         self._force_rerun = force_rerun
+        self._run_ner = run_ner
 
         self._trace_enabled = trace_enabled
         self.trace_dir: Path = trace_dir or (output_dir / "traces")
@@ -412,6 +414,17 @@ class SummarizationRunner:
                 contradiction_report = self._contradiction.detect(rules)
                 logger.info("[%s] CONTRADICTION DETECTION done [%.1fs]",
                             pmcid, time.perf_counter() - t0)
+
+            # NER + UMLS linking (optional)
+            if self._run_ner and self._db is not None:
+                logger.info("[%s] NER — running entity extraction + UMLS linking", pmcid)
+                t0 = time.perf_counter()
+                try:
+                    from named_entity_recognition.ner import run_ner_on_db
+                    run_ner_on_db(pmcid, save_to_db=True, force=False)
+                    logger.info("[%s] NER done [%.1fs]", pmcid, time.perf_counter() - t0)
+                except Exception as ner_exc:
+                    logger.warning("[%s] NER failed (non-fatal): %s", pmcid, ner_exc)
 
             logger.info("[%s] Pipeline complete [%.1fs total]",
                         pmcid, time.perf_counter() - t_total)
