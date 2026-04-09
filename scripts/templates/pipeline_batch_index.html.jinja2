@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pipeline Inspector — Batch Index</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --bg2: #1a1d27;
+    --bg3: #22263a;
+    --border: #2e3350;
+    --text: #d4d8f0;
+    --text-dim: #7880a0;
+    --accent: #5b7cfa;
+    --green: #22c55e;
+    --yellow: #f59e0b;
+    --red: #ef4444;
+    --orange: #f97316;
+    --font: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    --font-ui: system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font-ui); font-size: 14px; line-height: 1.5; padding: 24px 32px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 6px; }
+  h2 { font-size: 1.0rem; font-weight: 600; color: var(--accent); margin-bottom: 16px; }
+
+  .meta { color: var(--text-dim); font-size: 0.82rem; margin-bottom: 24px; }
+
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
+  .controls input[type=text] { background: var(--bg2); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 6px 10px; font-size: 0.85rem; width: 220px; }
+  .controls input[type=text]:focus { outline: none; border-color: var(--accent); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.83rem; }
+  th { text-align: left; padding: 7px 10px; background: var(--bg2); color: var(--text-dim); font-weight: 600; border-bottom: 2px solid var(--border); cursor: pointer; user-select: none; white-space: nowrap; }
+  th:hover { color: var(--text); }
+  td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:hover td { background: var(--bg2); }
+  td.num { font-family: var(--font); text-align: right; }
+
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 0.72rem; font-weight: 600; font-family: var(--font); vertical-align: middle; }
+  .badge-green  { background: #14532d; color: #86efac; }
+  .badge-red    { background: #7f1d1d; color: #fca5a5; }
+  .badge-orange { background: #7c2d12; color: #fdba74; }
+  .badge-gray   { background: #1f2937; color: #9ca3af; }
+  .badge-cyan   { background: #0c4a6e; color: #67e8f9; }
+
+  .warn-badges { display: flex; gap: 4px; flex-wrap: wrap; }
+  .empty-row td { color: var(--text-dim); font-style: italic; text-align: center; padding: 24px; }
+</style>
+</head>
+<body>
+
+<h1>🔬 Pipeline Inspector — Batch Index</h1>
+<div class="meta">
+  Source: <code>{{ source_dir }}</code> &nbsp;·&nbsp; {{ total }} paper{{ 's' if total != 1 else '' }}
+</div>
+
+<div class="controls">
+  <input type="text" id="search" placeholder="Search PMCID, run_id…" oninput="filterRows()">
+</div>
+
+<table id="index-table">
+  <thead>
+    <tr>
+      <th onclick="sortBy('pmcid')">PMCID ↕</th>
+      <th onclick="sortBy('run_id')">Run ID ↕</th>
+      <th onclick="sortBy('status')">Status ↕</th>
+      <th onclick="sortBy('map_findings')" style="text-align:right">MAP ↕</th>
+      <th onclick="sortBy('canonical')" style="text-align:right">Canonical ↕</th>
+      <th onclick="sortBy('final')" style="text-align:right">Final ↕</th>
+      <th onclick="sortBy('relations')" style="text-align:right">Relations ↕</th>
+      <th onclick="sortBy('flagged')" style="text-align:right">⚠ Flagged ↕</th>
+      <th>Warnings</th>
+      <th>Inspector</th>
+    </tr>
+  </thead>
+  <tbody id="table-body">
+  {% for row in rows %}
+  <tr data-pmcid="{{ row.pmcid|lower }}" data-run="{{ row.run_id|lower }}"
+      data-map="{{ row.map_findings }}" data-canonical="{{ row.canonical }}"
+      data-final="{{ row.final }}" data-relations="{{ row.relations }}"
+      data-flagged="{{ row.flagged }}" data-status="{{ row.status }}">
+    <td><span style="font-family:var(--font); font-weight:600">{{ row.pmcid }}</span></td>
+    <td><span style="font-family:var(--font); font-size:0.78rem; color:var(--text-dim)">{{ row.run_id }}</span></td>
+    <td>
+      <span class="badge badge-{% if row.status == 'success' %}green{% else %}red{% endif %}">{{ row.status }}</span>
+    </td>
+    <td class="num">{{ row.map_findings }}</td>
+    <td class="num">{{ row.canonical }}</td>
+    <td class="num">{{ row.final }}</td>
+    <td class="num">{{ row.relations }}</td>
+    <td class="num">
+      {% if row.flagged %}
+      <span class="badge badge-orange">{{ row.flagged }}</span>
+      {% else %}
+      <span style="color:var(--text-dim)">0</span>
+      {% endif %}
+    </td>
+    <td>
+      {% if row.warnings %}
+      <span style="color:var(--orange); font-size:0.8rem">{{ row.warnings }}</span>
+      {% else %}
+      <span style="color:var(--text-dim); font-size:0.8rem">—</span>
+      {% endif %}
+    </td>
+    <td><a href="{{ row.html_path }}">open →</a></td>
+  </tr>
+  {% else %}
+  <tr class="empty-row"><td colspan="10">No papers found.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<script>
+function filterRows() {
+  const q = document.getElementById('search').value.toLowerCase();
+  document.querySelectorAll('#table-body tr').forEach(function(tr) {
+    const pmcid = (tr.dataset.pmcid || '');
+    const run   = (tr.dataset.run   || '');
+    tr.style.display = (!q || pmcid.includes(q) || run.includes(q)) ? '' : 'none';
+  });
+}
+
+let _sortCol = null, _sortDir = 1;
+function sortBy(col) {
+  _sortDir = (_sortCol === col) ? -_sortDir : 1;
+  _sortCol = col;
+  const tbody = document.getElementById('table-body');
+  const rows = Array.from(tbody.querySelectorAll('tr[data-pmcid]'));
+  rows.sort(function(a, b) {
+    let va = a.dataset[col] || '';
+    let vb = b.dataset[col] || '';
+    // Numeric sort for count columns
+    if (['map', 'canonical', 'final', 'relations', 'flagged'].includes(col)) {
+      va = parseInt(va) || 0;
+      vb = parseInt(vb) || 0;
+      return _sortDir * (va - vb);
+    }
+    return _sortDir * va.localeCompare(vb);
+  });
+  rows.forEach(function(r) { tbody.appendChild(r); });
+}
+</script>
+</body>
+</html>

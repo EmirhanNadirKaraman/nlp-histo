@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Pipeline Inspector — {{ pmcid }}</title>
+<!-- sentence_lookup is injected as a JS object for hover tooltips -->
+<script>
+const SENTENCE_LOOKUP = {{ sentence_lookup_json }};
+</script>
 <style>
   :root {
     --bg: #0f1117;
@@ -135,6 +139,30 @@
 
   /* Sticky section headers */
   .section-anchor { scroll-margin-top: 20px; }
+
+  /* Sentence hover tooltip */
+  .ev-tag { position: relative; cursor: help; }
+  .ev-tag .ev-tooltip {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 0;
+    min-width: 280px;
+    max-width: 420px;
+    background: #2a2d3e;
+    border: 1px solid var(--accent);
+    border-radius: 5px;
+    padding: 8px 10px;
+    font-size: 0.78rem;
+    color: var(--text);
+    font-family: var(--font-ui);
+    line-height: 1.5;
+    white-space: normal;
+    z-index: 100;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    word-break: break-word;
+  }
+  .ev-tag:hover .ev-tooltip { display: block; }
 
   /* Responsive tweaks */
   @media (max-width: 900px) {
@@ -329,7 +357,7 @@
                   <div class="verbatim">{{ mf.verbatim_support[:300] }}{% if mf.verbatim_support|length > 300 %}…{% endif %}</div>
                   {% endif %}
                   {% if mf.evidence %}
-                  <div style="margin-top:4px;">{% for ev in mf.evidence %}<span class="tag">{{ ev }}</span>{% endfor %}</div>
+                  <div style="margin-top:4px;">{% for ev in mf.evidence %}<span class="tag ev-tag" data-ev="{{ ev }}">{{ ev }}<span class="ev-tooltip"></span></span>{% endfor %}</div>
                   {% endif %}
                 </div>
               </div>
@@ -519,7 +547,7 @@
               <tr><td>direction</td><td>{{ f.direction or '—' }}</td></tr>
               <tr><td>confidence</td><td>{{ f.confidence or '—' }}</td></tr>
               <tr><td>grounding_score</td><td>{{ '%.4f'|format(f.grounding_score) if f.grounding_score is not none else '—' }}</td></tr>
-              <tr><td>evidence</td><td>{% for ev in (f.evidence or []) %}<span class="tag">{{ ev }}</span>{% endfor %}</td></tr>
+              <tr><td>evidence</td><td>{% for ev in (f.evidence or []) %}<span class="tag ev-tag" data-ev="{{ ev }}">{{ ev }}<span class="ev-tooltip"></span></span>{% endfor %}</td></tr>
               {% if f.verbatim_support %}<tr><td>verbatim_support</td><td><div class="verbatim">{{ f.verbatim_support }}</div></td></tr>{% endif %}
               {% if f.scope %}
               <tr><td>scope</td><td>
@@ -633,6 +661,21 @@ function filterCards(prefix) {
     card.style.display = show ? '' : 'none';
   });
 }
+
+// Sentence hover — populate tooltip text from SENTENCE_LOOKUP
+(function() {
+  document.querySelectorAll('.ev-tag').forEach(function(tag) {
+    const ev = tag.dataset.ev;
+    const tooltip = tag.querySelector('.ev-tooltip');
+    if (!tooltip) return;
+    const text = SENTENCE_LOOKUP[ev];
+    if (text) {
+      tooltip.textContent = '\u201c' + text + '\u201d';
+    } else {
+      tooltip.textContent = '(sentence text unavailable for ' + ev + ')';
+    }
+  });
+})();
 </script>
 </body>
 </html>

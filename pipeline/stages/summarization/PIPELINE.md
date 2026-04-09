@@ -344,21 +344,68 @@ Runs as part of `SummarizationRunner` after RESOLVE when `run_ner=True` (default
 
 ## `scripts/inspect_pipeline_output.py`
 
-Generates a self-contained HTML inspector from a pipeline output JSON.
+Generates self-contained HTML inspector(s) from pipeline output JSON files.
 
+### Single-run mode
 ```bash
 PYTHONPATH=. python scripts/inspect_pipeline_output.py out/summaries/summaries/PMC10047158.json
 # → out/inspector/PMC10047158.html
+
+# With explicit output path:
+PYTHONPATH=. python scripts/inspect_pipeline_output.py out/summaries/summaries/PMC10047158.json -o out/inspector/PMC10047158.html
+
+# Export flagged findings to CSV:
+PYTHONPATH=. python scripts/inspect_pipeline_output.py out/summaries/summaries/PMC10047158.json --export-flagged-csv out/inspector/PMC10047158_flagged.csv
 ```
 
-Shows: overview stats, final rules with full FINAL→CANONICAL→MAP lineage, stage-by-stage field comparison with diff highlights, suspicious-case badges, client-side search/filter by category/relation_type/flagged/contradicted.
+### Cross-run diff mode
+Compare two runs of the same PMCID side-by-side. Both JSONs must have matching `pmcid` fields.
+```bash
+PYTHONPATH=. python scripts/inspect_pipeline_output.py run_a.json --compare run_b.json
+# → out/inspector/PMC10047158_diff.html
+```
+Produces a diff report with: summary stats for both runs, added/removed/changed final rules, canonical rules, relations, and MAP findings. Field-level diffs shown for `final_score`, `support_count`, `contradict_count`, `is_contradicted`, `mean_grounding_score`, `direction`, `category`, `relation_type`.
 
-Flag types detected:
+### Batch mode
+```bash
+PYTHONPATH=. python scripts/inspect_pipeline_output.py --batch-dir out/summaries/summaries/
+# → out/inspector/<pmcid>.html  (one per JSON)
+# → out/inspector/index.html    (sortable/searchable index page)
+```
+Invalid JSON files are skipped with a warning rather than stopping the batch.
+
+### Templates
+- `scripts/templates/pipeline_inspector.html.jinja2` — single-run inspector
+- `scripts/templates/pipeline_diff.html.jinja2` — cross-run diff view
+- `scripts/templates/pipeline_batch_index.html.jinja2` — batch index page
+
+### Features
+- Overview stats, final rules with full FINAL→CANONICAL→MAP lineage
+- Stage-by-stage field comparison with diff highlights
+- Suspicious-case badges and client-side search/filter by category/relation_type/flagged/contradicted
+- **Sentence hover**: hovering over evidence tokens (e.g. `S2|PMC10047158|5`) shows the original sentence verbatim text as a tooltip
+- **Cross-run diff**: added/removed/changed rules with field-level highlights
+- **CSV export**: flagged findings with all metadata columns
+- **Batch index**: sortable table linking all inspectors
+
+### Flag types detected
 - `taxonomy-leak`: subject_entity matches known taxonomy strings
 - `polarity-mismatch`: assertion_status=uncertain but claim contains polarity words
 - `generic-entity`: subject_entity is a generic term (patient, cell, lesion, etc.)
-- `low-grounding`: grounding_score or mean_grounding_score < 0.4
+- `low-grounding`: grounding_score or mean_grounding_score < threshold (default 0.4)
 - `empty-outcome`: outcome_entity is empty/None
+
+### Sentence hover implementation
+Sentence text is mined from two sources in the JSON (without guessing):
+1. `audit_trail.map_chunks[].findings[].verbatim_support` paired with the first `evidence` token
+2. `audit_trail.rules_provenance.rules[].evidence_chain[].verbatim` keyed by `sentence_id|pmcid|text_element_id`
+
+The lookup is serialised as a JS object (`SENTENCE_LOOKUP`) embedded in the HTML.
+
+### Export flagged CSV columns
+`pmcid`, `run_id`, `stage`, `item_type`, `item_id`, `stable_key`, `category`, `relation_type`, `subject_entity`, `outcome_entity`, `predicate_text`, `direction`, `assertion_status`, `grounding_score`, `mean_grounding_score`, `final_score`, `flags`, `evidence_refs`, `verbatim_summary`
+
+Note: `--export-flagged-csv` is only supported in single-run mode. In diff mode, run each JSON separately.
 
 ---
 

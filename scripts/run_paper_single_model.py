@@ -230,6 +230,16 @@ def main() -> None:
 
     _print_result(result)
 
+    # Auto-generate HTML inspector
+    json_path = Path("out/summaries/summaries") / f"{pmcid}.json"
+    html_path = Path("out/inspector") / f"{pmcid}.html"
+    try:
+        from inspect_pipeline_output import render
+        render(json_path, html_path)
+        print(f"  Inspector    → {html_path}")
+    except Exception as exc:
+        logger.warning("Inspector generation failed (non-fatal): %s", exc)
+
 
 if __name__ == "__main__":
     main()
