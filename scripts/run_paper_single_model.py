@@ -1,5 +1,5 @@
 """
-Run the full summarization pipeline on one paper using a single LLM.
+Run the full summarization pipeline on one or more papers using a single LLM.
 
 Bypasses ABC multi-model cascading by wiring the same model into all three
 voter slots and setting theta=0.0, so Level-1 always "agrees" and escalation
@@ -8,7 +8,17 @@ credentials.
 
 Usage
 -----
+Single paper:
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158
+
+Multiple papers:
+    PYTHONPATH=. python scripts/run_paper_single_model.py PMC111 PMC222 PMC333
+
+Random selection (same 5 papers every time):
+    PYTHONPATH=. python scripts/run_paper_single_model.py --random 5
+    PYTHONPATH=. python scripts/run_paper_single_model.py --random 5 --seed 99
+
+With options:
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --trace
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --skip-nli
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --skip-ner
@@ -24,12 +34,15 @@ Options
 --no-canon     Skip CANONICALIZE LLM call; use deterministic (highest score) fallback.
 --list-only    Print available PMCIDs from the database and exit.
 --force-rerun  Ignore cached result JSON and reprocess from scratch.
+--no-corpus    Skip corpus-level relation stage (only relevant when ≥2 papers are run).
+--no-html      Skip HTML inspector generation.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import random
 import sys
 from pathlib import Path
 
@@ -99,22 +112,40 @@ def build_runner(
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 
-def list_pmcids() -> None:
+def _fetch_all_pmcids() -> list[str]:
     from database import get_db_connection
     from database.models import Document
 
     db = get_db_connection()
     with db.session_scope() as session:
-        pmcids = [
+        return [
             row.pmcid
             for row in session.query(Document.pmcid).order_by(Document.pmcid).all()
         ]
+
+
+def list_pmcids() -> None:
+    pmcids = _fetch_all_pmcids()
     if not pmcids:
         print("No documents found in database.")
     else:
         print(f"{len(pmcids)} document(s) available:")
         for p in pmcids:
             print(f"  {p}")
+
+
+def sample_pmcids(n: int, seed: int) -> list[str]:
+    pmcids = _fetch_all_pmcids()
+    if not pmcids:
+        logger.error("No documents found in database.")
+        sys.exit(1)
+    if n > len(pmcids):
+        logger.warning("Requested %d papers but only %d available; using all.", n, len(pmcids))
+        n = len(pmcids)
+    rng = random.Random(seed)
+    chosen = rng.sample(pmcids, n)
+    logger.info("Sampled %d papers (seed=%d): %s", n, seed, ", ".join(chosen))
+    return chosen
 
 
 # ── Result printer ─────────────────────────────────────────────────────────────
@@ -173,28 +204,41 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("pmcid", nargs="?", help="PubMed Central ID, e.g. PMC10047158")
-    parser.add_argument("--trace",     action="store_true", help="Write JSONL traces")
-    parser.add_argument("--skip-nli",  action="store_true", help="Disable NLI (faster)")
-    parser.add_argument("--no-canon",  action="store_true", help="Skip CANONICALIZE LLM call")
-    parser.add_argument("--chunks",    type=int, default=None,
+    parser.add_argument("pmcid", nargs="*", help="PubMed Central ID(s), e.g. PMC10047158 PMC222")
+    parser.add_argument("--trace",       action="store_true", help="Write JSONL traces")
+    parser.add_argument("--skip-nli",    action="store_true", help="Disable NLI (faster)")
+    parser.add_argument("--no-canon",    action="store_true", help="Skip CANONICALIZE LLM call")
+    parser.add_argument("--chunks",      type=int, default=None,
                         help="Limit to first N chunks (each chunk = 10 sentences)")
     parser.add_argument("--list-only",   action="store_true", help="Print available PMCIDs and exit")
     parser.add_argument("--force-rerun", action="store_true", help="Ignore cached result JSON and reprocess")
     parser.add_argument("--skip-ner",    action="store_true", help="Skip NER + UMLS linking")
+    parser.add_argument("--no-corpus",   action="store_true",
+                        help="Skip corpus-level relation stage (only relevant when ≥2 papers)")
+    parser.add_argument("--no-html",     action="store_true", help="Skip HTML inspector generation")
+    parser.add_argument("--random",      type=int, default=None, metavar="N",
+                        help="Pick N random papers from the database (cannot be combined with pmcid args)")
+    parser.add_argument("--seed",        type=int, default=42,
+                        help="Random seed for --random (default: 42)")
     args = parser.parse_args()
 
     if args.list_only:
         list_pmcids()
         return
 
-    if not args.pmcid:
+    if args.random is not None:
+        if args.pmcid:
+            parser.error("--random cannot be combined with explicit pmcid arguments")
+        pmcids = sample_pmcids(args.random, args.seed)
+    elif args.pmcid:
+        # Normalise explicit PMCIDs
+        pmcids = [
+            (p.strip() if p.strip().startswith("PMC") else "PMC" + p.strip())
+            for p in args.pmcid
+        ]
+    else:
         parser.print_help()
         sys.exit(1)
-
-    pmcid = args.pmcid.strip()
-    if not pmcid.startswith("PMC"):
-        pmcid = "PMC" + pmcid
 
     logger.info("Building single-model runner (Gemini 2.5 Flash Lite)…")
     runner = build_runner(
@@ -205,40 +249,79 @@ def main() -> None:
         skip_ner=args.skip_ner,
     )
 
-    logger.info("Loading %s from database…", pmcid)
-    try:
-        file_data = runner.load_paper_from_db(pmcid)
-    except ValueError as exc:
-        logger.error("%s", exc)
-        sys.exit(1)
+    # ── Process each paper ─────────────────────────────────────────────────────
+    results = []
+    for pmcid in pmcids:
+        logger.info("Loading %s from database…", pmcid)
+        try:
+            file_data = runner.load_paper_from_db(pmcid)
+        except ValueError as exc:
+            logger.error("%s", exc)
+            continue
 
-    sentences = file_data["sentences_with_provenance"]
+        sentences = file_data["sentences_with_provenance"]
+        if args.chunks is not None:
+            cap = args.chunks * 10
+            sentences = sentences[:cap]
+            file_data = {**file_data, "sentences_with_provenance": sentences}
+            logger.info("Capped to first %d sentences (%d chunks)", cap, args.chunks)
 
-    # Optional sentence cap
-    if args.chunks is not None:
-        cap = args.chunks * 10
-        sentences = sentences[:cap]
-        file_data = {**file_data, "sentences_with_provenance": sentences}
-        logger.info("Capped to first %d sentences (%d chunks)", cap, args.chunks)
+        logger.info("Starting pipeline on %d sentences…", len(sentences))
+        result = runner.process(file_data)
 
-    logger.info("Starting pipeline on %d sentences…", len(sentences))
-    result = runner.process(file_data)
+        if result["status"] == "error":
+            logger.error("Pipeline failed for %s: %s", pmcid, result.get("error"))
+        else:
+            _print_result(result)
+        results.append(result)
 
-    if result["status"] == "error":
-        logger.error("Pipeline failed: %s", result["error"])
-        sys.exit(1)
+    n_ok = sum(1 for r in results if r["status"] == "success")
+    if len(pmcids) > 1:
+        logger.info("Batch complete: %d/%d succeeded", n_ok, len(pmcids))
 
-    _print_result(result)
+    # ── Corpus-level relation stage (requires ≥2 successful papers) ───────────
+    summaries_dir = Path("out/summaries/summaries")
+    corpus_json   = Path("out/summaries/corpus_relations.json")
+    ran_corpus    = False
 
-    # Auto-generate HTML inspector
-    json_path = Path("out/summaries/summaries") / f"{pmcid}.json"
-    html_path = Path("out/inspector") / f"{pmcid}.html"
-    try:
-        from inspect_pipeline_output import render
-        render(json_path, html_path)
-        print(f"  Inspector    → {html_path}")
-    except Exception as exc:
-        logger.warning("Inspector generation failed (non-fatal): %s", exc)
+    if not args.no_corpus and not args.skip_nli and n_ok >= 2:
+        logger.info("Running corpus-level relation stage…")
+        try:
+            runner.corpus_relate(
+                source_dir=summaries_dir,
+                output_path=corpus_json,
+            )
+            ran_corpus = True
+        except Exception as exc:
+            logger.warning("Corpus relate failed (non-fatal): %s", exc)
+    elif n_ok >= 2 and args.skip_nli:
+        logger.info("Skipping corpus relate (--skip-nli)")
+    elif n_ok < 2:
+        logger.info("Skipping corpus relate (need ≥2 successful papers; got %d)", n_ok)
+
+    # ── HTML inspector ─────────────────────────────────────────────────────────
+    if not args.no_html:
+        try:
+            sys.path.insert(0, str(Path(__file__).parent))
+            from inspect_pipeline_output import render, render_batch
+
+            if len(pmcids) == 1 and n_ok == 1:
+                # Single paper → per-paper inspector only
+                pmcid = pmcids[0]
+                json_path = summaries_dir / f"{pmcid}.json"
+                html_path = Path("out/inspector") / f"{pmcid}.html"
+                render(json_path, html_path)
+                print(f"  Inspector → {html_path}")
+            else:
+                # Multiple papers → batch index + per-paper inspectors
+                render_batch(
+                    summaries_dir,
+                    Path("out/inspector"),
+                    corpus_relations_path=corpus_json if ran_corpus else None,
+                )
+                print(f"  Batch inspector → out/inspector/index.html")
+        except Exception as exc:
+            logger.warning("Inspector generation failed (non-fatal): %s", exc)
 
 
 if __name__ == "__main__":

@@ -352,3 +352,46 @@ class FinalRule(BaseModel):
     is_contradicted:       bool
     contradicted_by:       List[str]             # canonical_ids that contradict this rule
 
+
+# ── Corpus-level RELATE output ────────────────────────────────────────────────
+
+class CorpusRelation(Relation):
+    """
+    Output of CorpusRelateStage: a pairwise relation from the full pooled corpus.
+
+    Extends Relation with provenance (pmcid_a/b, comparison_scope), human-readable
+    claim text, and grounding metadata.
+
+    comparison_scope distinguishes intra-paper edges (both rules from the same
+    paper's processing run) from cross-paper edges (rules from different papers).
+    NLI methodology is identical for both; the label is purely informational.
+
+    Per-paper JSON `relations` remain the authoritative input for ResolveStage
+    scoring.  This model is for the analytical corpus graph only.
+    """
+    relation_id:              str
+    comparison_scope:         Literal["intra_paper", "cross_paper"]
+    same_paper:               bool
+    pmcid_a:                  str
+    pmcid_b:                  str
+    subject_entity:           str
+    outcome_entity:           str
+    category:                 str
+    relation_type_structural: str                # has_feature / expression / etc.
+    direction_a:              str | None
+    direction_b:              str | None
+    predicate_a:              str
+    predicate_b:              str
+    mean_grounding_a:         float | None
+    mean_grounding_b:         float | None
+    finding_count_a:          int
+    finding_count_b:          int
+    supporting_pmcids_a:      List[str]
+    supporting_pmcids_b:      List[str]
+    canonical_scope_a:        str
+    canonical_scope_b:        str
+    # Scope qualifier check — "scope_unknown" until FindingScope is carried on
+    # CanonicalRule (v2 work).  Values: scope_unknown | scope_compatible |
+    # scope_mismatch | scope_qualified.
+    scope_check_result:       str = "scope_unknown"
+    scope_note:               str = ""

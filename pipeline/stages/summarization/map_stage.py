@@ -167,6 +167,10 @@ class MapStage:
         n_cached = len(cache_hit_indices)
         for pos, (idx, chunk) in enumerate(uncached, 1):
             chunk_id = f"C{idx + 1}"
+            # Brief inter-chunk pause to avoid Vertex AI / OpenAI rate-limit bursts.
+            # Only inserted between chunks (not before the first one).
+            if pos > 1:
+                time.sleep(3.0)
             logger.info(
                 "[%s] MAP chunk %s/%s (chunk_id=%s, %d sentences) …",
                 pmcid, n_cached + pos, total_chunks, chunk_id, len(chunk),

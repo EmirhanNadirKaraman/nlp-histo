@@ -67,6 +67,35 @@ _POLARITY_RE = re.compile(
 )
 
 
+def _load_corpus_relations(path: Path) -> dict | None:
+    """Load corpus_relations.json and return parsed dict, or None on failure."""
+    if not path or not path.exists():
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: could not load corpus relations from {path}: {exc}", file=sys.stderr)
+        return None
+
+
+def build_corpus_index(corpus_data: dict) -> dict[str, list[dict]]:
+    """
+    Build a canonical_id → list[relation dict] index for per-paper lookups.
+    Only cross-paper relations are indexed (intra-paper are shown in per-paper
+    Relations section already).
+    """
+    index: dict[str, list[dict]] = {}
+    for rel in corpus_data.get("relations", []):
+        if rel.get("comparison_scope") != "cross_paper":
+            continue
+        for cid_key in ("rule_id_a", "rule_id_b"):
+            cid = rel.get(cid_key)
+            if cid:
+                index.setdefault(cid, []).append(rel)
+    return index
+
+
 def _entity_flags(entity: str | None) -> list[str]:
     """Return warning labels for a suspicious entity string."""
     if not entity:
@@ -239,7 +268,11 @@ def _unique_sorted(values: list[str | None]) -> list[str]:
     return sorted({v for v in values if v})
 
 
-def build_context(data: dict, low_gs_threshold: float = 0.4) -> dict:
+def build_context(
+    data: dict,
+    low_gs_threshold: float = 0.4,
+    corpus_connections: dict[str, list[dict]] | None = None,
+) -> dict:
     pmcid   = data.get("pmcid", "unknown")
     run_id  = data.get("run_id", "")
     status  = data.get("status", "unknown")
@@ -258,6 +291,14 @@ def build_context(data: dict, low_gs_threshold: float = 0.4) -> dict:
     # Enrich each layer
     final_rules     = [_enrich_final_rule(fr, lineage_index, low_gs_threshold) for fr in raw_final_rules]
     canonical_rules = [_enrich_canonical_rule(cr, low_gs_threshold) for cr in raw_canonical_rules]
+
+    # Inject cross-paper connections from corpus_relations.json (if provided)
+    cross_paper_total = 0
+    for cr in canonical_rules:
+        cid = cr.get("canonical_id", "")
+        conns = (corpus_connections or {}).get(cid, [])
+        cr["corpus_connections"] = conns
+        cross_paper_total += len(conns)
 
     enriched_chunks = []
     all_map_findings: list[dict] = []
@@ -302,6 +343,7 @@ def build_context(data: dict, low_gs_threshold: float = 0.4) -> dict:
         "mf_categories":       mf_categories,
         "mf_relation_types":   mf_relation_types,
         "sentence_lookup_json": sentence_lookup_json,
+        "cross_paper_total":   cross_paper_total,
     }
 
 
@@ -634,12 +676,13 @@ def render(
     output_path: Path,
     low_gs_threshold: float = 0.4,
     export_csv_path: Path | None = None,
+    corpus_connections: dict[str, list[dict]] | None = None,
 ) -> dict:
     """Render single-run inspector. Returns context dict."""
     with open(json_path, encoding="utf-8") as f:
         data = json.load(f)
 
-    ctx = build_context(data, low_gs_threshold)
+    ctx = build_context(data, low_gs_threshold, corpus_connections=corpus_connections)
 
     env = _make_env()
     template = env.get_template("pipeline_inspector.html.jinja2")
@@ -706,6 +749,7 @@ def render_batch(
     source_dir: Path,
     output_dir: Path,
     low_gs_threshold: float = 0.4,
+    corpus_relations_path: Path | None = None,
 ) -> None:
     """Generate one inspector HTML per JSON in source_dir, plus an index page."""
     json_files = sorted(source_dir.glob("*.json"))
@@ -715,6 +759,29 @@ def render_batch(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Auto-detect corpus_relations.json ─────────────────────────────────────
+    corpus_data: dict | None = None
+    corpus_index: dict[str, list[dict]] = {}
+    if corpus_relations_path is None:
+        for candidate in [
+            source_dir.parent / "corpus_relations.json",
+            source_dir / "corpus_relations.json",
+        ]:
+            if candidate.exists():
+                corpus_relations_path = candidate
+                break
+    if corpus_relations_path:
+        corpus_data = _load_corpus_relations(corpus_relations_path)
+        if corpus_data:
+            corpus_index = build_corpus_index(corpus_data)
+            print(
+                f"Corpus relations loaded: "
+                f"{corpus_data.get('total_relations', 0)} relations "
+                f"({corpus_data.get('cross_paper_count', 0)} cross-paper, "
+                f"{corpus_data.get('intra_paper_count', 0)} intra-paper) "
+                f"from {corpus_relations_path}"
+            )
+
     index_rows: list[dict] = []
 
     for json_path in json_files:
@@ -723,7 +790,7 @@ def render_batch(
                 data = json.load(fh)
 
             pmcid = data.get("pmcid") or json_path.stem
-            ctx = build_context(data, low_gs_threshold)
+            ctx = build_context(data, low_gs_threshold, corpus_connections=corpus_index)
 
             out_html = output_dir / f"{json_path.stem}.html"
             env = _make_env()
@@ -767,6 +834,7 @@ def render_batch(
         rows=index_rows,
         source_dir=str(source_dir),
         total=len(index_rows),
+        corpus_data=corpus_data,
     )
     index_path = output_dir / "index.html"
     index_path.write_text(index_html, encoding="utf-8")
@@ -816,6 +884,15 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--corpus-relations", type=Path, default=None, metavar="CORPUS_JSON",
+        help=(
+            "Path to corpus_relations.json.  In batch mode, auto-detected from "
+            "the source directory parent if omitted.  Adds a cross-paper relations "
+            "section to the batch index and per-paper inspectors."
+        ),
+    )
+
+    parser.add_argument(
         "--low-gs-threshold", type=float, default=0.4,
         help="Grounding score below which a finding is flagged as low-grounding (default: 0.4)",
     )
@@ -839,7 +916,10 @@ def main() -> None:
 
         output_dir = args.output or Path("out/inspector")
         print(f"Batch mode: scanning {source_dir}")
-        render_batch(source_dir, output_dir, args.low_gs_threshold)
+        render_batch(
+            source_dir, output_dir, args.low_gs_threshold,
+            corpus_relations_path=args.corpus_relations,
+        )
         return
 
     # ── Single / diff mode — require json_path ──────────────────────────────────

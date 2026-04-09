@@ -182,6 +182,7 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json }};
       <a href="#canonical-rules">Canonical Rules ({{ canonical_rules|length }})</a>
       <a href="#map-findings">MAP Findings ({{ total_map_findings }})</a>
       <a href="#relations">Relations ({{ relations|length }})</a>
+      {% if cross_paper_total > 0 %}<a href="#corpus-connections">Cross-paper ({{ cross_paper_total }})</a>{% endif %}
       <a href="#summary">Narrative Summary</a>
     </nav>
   </div>
@@ -599,6 +600,49 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json }};
       <div class="empty">No relations found (RELATE stage may have been skipped or produced no output).</div>
       {% endif %}
     </div>
+
+    <!-- Cross-paper connections from corpus_relations.json -->
+    {% if cross_paper_total > 0 %}
+    <div id="corpus-connections" class="section section-anchor">
+      <h2>Cross-paper Connections ({{ cross_paper_total }})</h2>
+      <table class="rel-table">
+        <thead>
+          <tr>
+            <th>This rule</th>
+            <th>Type</th>
+            <th>Other PMCID</th>
+            <th>Other predicate</th>
+            <th>NLI A→B</th>
+            <th>NLI B→A</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for cr in canonical_rules %}
+          {% for conn in cr.corpus_connections %}
+          {% set is_a = (conn.rule_id_a == cr.canonical_id) %}
+          <tr>
+            <td>
+              <code style="font-size:0.75rem">{{ cr.canonical_id }}</code><br>
+              <span style="color:var(--text-dim); font-size:0.78rem">{{ cr.predicate_text }}</span>
+            </td>
+            <td>
+              <span class="badge badge-{% if conn.relation_type == 'CONTRADICT' %}red{% elif conn.relation_type == 'SUPPORT' %}green{% elif conn.relation_type == 'SCOPE_QUALIFY' %}blue{% else %}gray{% endif %}">{{ conn.relation_type }}</span>
+            </td>
+            <td>
+              <span class="badge badge-cyan">{{ conn.pmcid_b if is_a else conn.pmcid_a }}</span>
+            </td>
+            <td style="max-width:280px; font-size:0.78rem; color:var(--text-dim)">
+              {{ conn.predicate_b if is_a else conn.predicate_a }}
+            </td>
+            <td>{{ '%.3f'|format(conn.nli_score_a_to_b) }}</td>
+            <td>{{ '%.3f'|format(conn.nli_score_b_to_a) }}</td>
+          </tr>
+          {% endfor %}
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
 
     <!-- Narrative summary full text -->
     <div id="summary" class="section section-anchor">

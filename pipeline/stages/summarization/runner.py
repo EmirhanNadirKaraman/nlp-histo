@@ -490,6 +490,72 @@ class SummarizationRunner:
         logger.info(self._cache.stats_str())
         return results
 
+    def corpus_relate(
+        self,
+        source_dir: Path | None = None,
+        output_path: Path | None = None,
+        entailment_threshold: float | None = None,
+        contradiction_threshold: float | None = None,
+        run_selection: str = "latest_per_pmcid",
+        manifest: list[Path] | None = None,
+    ) -> list:
+        """
+        Run the corpus-level relation stage over all per-paper JSONs in source_dir.
+
+        Pools canonical_rules from every per-paper JSON, runs the same NLI-based
+        pairwise comparison used by the per-paper RELATE stage, and writes a
+        single corpus_relations.json artifact.  Each relation is labeled as
+        "intra_paper" or "cross_paper" based on whether both rules came from the
+        same paper.
+
+        This is a post-hoc analytical step.  It does NOT modify any per-paper
+        output and does NOT affect ResolveStage scoring (which continues to use
+        the per-paper ``relations`` key).
+
+        Parameters
+        ----------
+        source_dir:
+            Directory containing per-paper JSON files.
+            Defaults to ``self._summaries_dir``.
+        output_path:
+            Destination for corpus_relations.json.
+            Defaults to ``self._output_dir / "corpus_relations.json"``.
+        entailment_threshold:
+            NLI entailment threshold forwarded to RelateStage.
+            Defaults to the threshold used by the per-paper RELATE stage.
+        contradiction_threshold:
+            NLI contradiction threshold.  Defaults similarly.
+        run_selection:
+            "latest_per_pmcid" (default) — one representative run per PMCID.
+            "all" — every valid file (status=success, non-empty canonical_rules).
+            Ignored when manifest is provided.
+        manifest:
+            Explicit list of JSON paths to load.  When provided, source_dir and
+            run_selection are both ignored.
+
+        Returns
+        -------
+        List of CorpusRelation objects written to output_path.
+        """
+        from .corpus_relate import CorpusRelateStage  # noqa: PLC0415 — lazy import
+
+        src = source_dir or self._summaries_dir
+        out = output_path or (self._output_dir / "corpus_relations.json")
+
+        stage = CorpusRelateStage(
+            entailment_threshold=(
+                entailment_threshold
+                if entailment_threshold is not None
+                else self._relate._entailment_threshold
+            ),
+            contradiction_threshold=(
+                contradiction_threshold
+                if contradiction_threshold is not None
+                else self._relate._contradiction_threshold
+            ),
+        )
+        return stage.relate_from_dir(src, out, run_selection=run_selection, manifest=manifest)
+
     # ── Disk I/O ───────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -604,6 +670,57 @@ class SummarizationRunner:
 
     # ── Phase 2: DB persistence ────────────────────────────────────────────────
 
+    def _clear_normalized_run_data(self, db_id: int, pmcid: str) -> None:
+        """
+        Delete all post-MAP rows for (pipeline_run_id, pmcid) in FK-safe order
+        (children before parents).  Called before re-inserting NORMALIZE onwards
+        so that re-runs don't hit unique-constraint or FK violations.
+
+        MAP findings are handled separately in _persist_map_findings (which also
+        does delete-before-insert), so they are not touched here.
+        """
+        try:
+            from database.models import (
+                SumFinalRule, SumRelation, SumCanonicalRule,
+                SumGroupMember, SumFindingGroup,
+                SumNormalFindingSpan, SumNormalFinding,
+            )
+            with self._db.engine.begin() as conn:
+                t = SumFinalRule.__table__
+                conn.execute(t.delete().where(
+                    (t.c.pipeline_run_id == db_id) & (t.c.pmcid == pmcid)))
+                t = SumRelation.__table__
+                conn.execute(t.delete().where(
+                    (t.c.pipeline_run_id == db_id) & (t.c.pmcid == pmcid)))
+                t = SumCanonicalRule.__table__
+                conn.execute(t.delete().where(
+                    (t.c.pipeline_run_id == db_id) & (t.c.pmcid == pmcid)))
+                # SumGroupMember has no pmcid column — join via finding_group_id
+                fg_table = SumFindingGroup.__table__
+                subq = fg_table.select().where(
+                    (fg_table.c.pipeline_run_id == db_id) & (fg_table.c.pmcid == pmcid)
+                ).with_only_columns(fg_table.c.id)
+                t = SumGroupMember.__table__
+                conn.execute(t.delete().where(t.c.finding_group_id.in_(subq)))
+                t = SumFindingGroup.__table__
+                conn.execute(t.delete().where(
+                    (t.c.pipeline_run_id == db_id) & (t.c.pmcid == pmcid)))
+                # SumNormalFindingSpan has no pmcid — join via normal_finding_id
+                nf_table = SumNormalFinding.__table__
+                subq2 = nf_table.select().where(
+                    (nf_table.c.pipeline_run_id == db_id) & (nf_table.c.pmcid == pmcid)
+                ).with_only_columns(nf_table.c.id)
+                t = SumNormalFindingSpan.__table__
+                conn.execute(t.delete().where(t.c.normal_finding_id.in_(subq2)))
+                t = SumNormalFinding.__table__
+                conn.execute(t.delete().where(
+                    (t.c.pipeline_run_id == db_id) & (t.c.pmcid == pmcid)))
+        except Exception as exc:
+            logger.warning(
+                "[%s] DB: failed to clear normalized run data (run_id=%d): %s",
+                pmcid, db_id, exc, exc_info=True,
+            )
+
     def _persist_map_findings(
         self,
         db_id: int | None,
@@ -677,6 +794,7 @@ class SummarizationRunner:
         """
         if db_id is None:
             return {}
+        self._clear_normalized_run_data(db_id, pmcid)
         nf_id_map: dict[str, int] = {}
         try:
             from database.models import SumNormalFinding, SumNormalFindingSpan
@@ -723,6 +841,7 @@ class SummarizationRunner:
             )
         except Exception as exc:
             logger.warning("[%s] DB: failed to persist normal findings: %s", pmcid, exc)
+            return {}  # partial map is invalid after rollback — don't pass stale IDs downstream
         return nf_id_map
 
     def _persist_finding_groups(
@@ -785,6 +904,7 @@ class SummarizationRunner:
             )
         except Exception as exc:
             logger.warning("[%s] DB: failed to persist finding groups: %s", pmcid, exc)
+            return {}
         return group_id_map
 
     def _persist_canonical_rules(
@@ -839,6 +959,7 @@ class SummarizationRunner:
             )
         except Exception as exc:
             logger.warning("[%s] DB: failed to persist canonical rules: %s", pmcid, exc)
+            return {}
         return cr_id_map
 
     def _persist_relations(

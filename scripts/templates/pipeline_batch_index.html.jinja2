@@ -49,6 +49,20 @@
 
   .warn-badges { display: flex; gap: 4px; flex-wrap: wrap; }
   .empty-row td { color: var(--text-dim); font-style: italic; text-align: center; padding: 24px; }
+
+  /* Corpus relations section */
+  .section-header { font-size: 1.0rem; font-weight: 600; color: var(--accent); margin: 36px 0 12px; border-top: 1px solid var(--border); padding-top: 20px; }
+  .corpus-stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .corpus-stat { background: var(--bg2); border: 1px solid var(--border); border-radius: 5px; padding: 8px 14px; font-size: 0.82rem; }
+  .corpus-stat .cs-num { font-size: 1.3rem; font-weight: 700; color: var(--accent); font-family: var(--font); display: block; }
+  .corpus-stat .cs-label { color: var(--text-dim); }
+  .corpus-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 4px; }
+  .corpus-table th { text-align: left; padding: 6px 10px; background: var(--bg2); color: var(--text-dim); font-weight: 600; border-bottom: 2px solid var(--border); cursor: pointer; white-space: nowrap; }
+  .corpus-table th:hover { color: var(--text); }
+  .corpus-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .corpus-table tr:hover td { background: var(--bg2); }
+  .corpus-table td.mono { font-family: var(--font); font-size: 0.78rem; }
+  .score { font-family: var(--font); font-size: 0.8rem; }
 </style>
 </head>
 <body>
@@ -114,6 +128,94 @@
   </tbody>
 </table>
 
+{% if corpus_data %}
+<div class="section-header">
+  Corpus Relations
+  <span style="color:var(--text-dim); font-size:0.8rem; font-weight:400; margin-left:10px;">
+    generated {{ corpus_data.generated_at[:19].replace('T',' ') if corpus_data.generated_at else '' }}
+    · run_selection={{ corpus_data.run_selection or '—' }}
+  </span>
+</div>
+
+<div class="corpus-stats">
+  <div class="corpus-stat"><span class="cs-num">{{ corpus_data.total_relations }}</span><span class="cs-label">total relations</span></div>
+  <div class="corpus-stat"><span class="cs-num">{{ corpus_data.cross_paper_count }}</span><span class="cs-label">cross-paper</span></div>
+  <div class="corpus-stat"><span class="cs-num">{{ corpus_data.intra_paper_count }}</span><span class="cs-label">intra-paper</span></div>
+  <div class="corpus-stat"><span class="cs-num">{{ corpus_data.pmcids_loaded | length }}</span><span class="cs-label">papers loaded</span></div>
+  <div class="corpus-stat"><span class="cs-num">{{ corpus_data.canonical_rules_loaded }}</span><span class="cs-label">canonical rules pooled</span></div>
+</div>
+
+<div class="controls" style="margin-bottom:12px;">
+  <input type="text" id="cr-search" placeholder="Search PMCID, entity, predicate…" oninput="filterCorpusRows()" style="width:260px;">
+  <select id="cr-scope" onchange="filterCorpusRows()">
+    <option value="">All scopes</option>
+    <option value="cross_paper">cross-paper</option>
+    <option value="intra_paper">intra-paper</option>
+  </select>
+  <select id="cr-type" onchange="filterCorpusRows()">
+    <option value="">All types</option>
+    <option value="CONTRADICT">CONTRADICT</option>
+    <option value="SUPPORT">SUPPORT</option>
+    <option value="SCOPE_QUALIFY">SCOPE_QUALIFY</option>
+    <option value="UNRELATED">UNRELATED</option>
+  </select>
+</div>
+
+{% if corpus_data.relations %}
+<table class="corpus-table" id="corpus-table">
+  <thead>
+    <tr>
+      <th onclick="sortCorpus('scope')">Scope ↕</th>
+      <th onclick="sortCorpus('type')">Type ↕</th>
+      <th onclick="sortCorpus('pmcid_a')">PMCID A ↕</th>
+      <th onclick="sortCorpus('pmcid_b')">PMCID B ↕</th>
+      <th>Subject</th>
+      <th>Outcome</th>
+      <th>Dir A / B</th>
+      <th onclick="sortCorpus('nli_ab')" style="text-align:right">NLI A→B ↕</th>
+      <th onclick="sortCorpus('nli_ba')" style="text-align:right">NLI B→A ↕</th>
+      <th>Predicate A</th>
+      <th>Predicate B</th>
+    </tr>
+  </thead>
+  <tbody id="corpus-body">
+  {% for rel in corpus_data.relations %}
+  <tr data-search="{{ (rel.pmcid_a ~ ' ' ~ rel.pmcid_b ~ ' ' ~ rel.subject_entity ~ ' ' ~ rel.outcome_entity ~ ' ' ~ rel.predicate_a ~ ' ' ~ rel.predicate_b)|lower }}"
+      data-scope="{{ rel.comparison_scope }}"
+      data-type="{{ rel.relation_type }}"
+      data-pmcid-a="{{ rel.pmcid_a }}"
+      data-pmcid-b="{{ rel.pmcid_b }}"
+      data-nli-ab="{{ rel.nli_score_a_to_b }}"
+      data-nli-ba="{{ rel.nli_score_b_to_a }}">
+    <td>
+      <span class="badge {% if rel.comparison_scope == 'cross_paper' %}badge-cyan{% else %}badge-gray{% endif %}">{{ rel.comparison_scope }}</span>
+    </td>
+    <td>
+      <span class="badge {% if rel.relation_type == 'CONTRADICT' %}badge-red{% elif rel.relation_type == 'SUPPORT' %}badge-green{% elif rel.relation_type == 'SCOPE_QUALIFY' %}badge-blue{% else %}badge-gray{% endif %}">{{ rel.relation_type }}</span>
+    </td>
+    <td class="mono">{{ rel.pmcid_a }}</td>
+    <td class="mono">{{ rel.pmcid_b }}</td>
+    <td>{{ rel.subject_entity }}</td>
+    <td>{{ rel.outcome_entity }}</td>
+    <td>
+      <span class="badge {% if rel.direction_a == 'positive' %}badge-green{% elif rel.direction_a == 'negative' %}badge-red{% else %}badge-gray{% endif %}">{{ rel.direction_a or '—' }}</span>
+      /
+      <span class="badge {% if rel.direction_b == 'positive' %}badge-green{% elif rel.direction_b == 'negative' %}badge-red{% else %}badge-gray{% endif %}">{{ rel.direction_b or '—' }}</span>
+    </td>
+    <td class="score" style="text-align:right">{{ '%.3f'|format(rel.nli_score_a_to_b) }}</td>
+    <td class="score" style="text-align:right">{{ '%.3f'|format(rel.nli_score_b_to_a) }}</td>
+    <td style="max-width:260px; font-size:0.78rem; color:var(--text-dim)">{{ rel.predicate_a }}</td>
+    <td style="max-width:260px; font-size:0.78rem; color:var(--text-dim)">{{ rel.predicate_b }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div style="color:var(--text-dim); font-style:italic; padding:16px 0;">No relations in corpus_relations.json.</div>
+{% endif %}
+
+{% endif %}{# /corpus_data #}
+
 <script>
 function filterRows() {
   const q = document.getElementById('search').value.toLowerCase();
@@ -140,6 +242,40 @@ function sortBy(col) {
       return _sortDir * (va - vb);
     }
     return _sortDir * va.localeCompare(vb);
+  });
+  rows.forEach(function(r) { tbody.appendChild(r); });
+}
+
+function filterCorpusRows() {
+  const q     = (document.getElementById('cr-search')?.value || '').toLowerCase();
+  const scope = document.getElementById('cr-scope')?.value || '';
+  const type  = document.getElementById('cr-type')?.value  || '';
+  document.querySelectorAll('#corpus-body tr').forEach(function(tr) {
+    let show = true;
+    if (q     && !(tr.dataset.search || '').includes(q))  show = false;
+    if (scope && tr.dataset.scope !== scope)               show = false;
+    if (type  && tr.dataset.type  !== type)                show = false;
+    tr.style.display = show ? '' : 'none';
+  });
+}
+
+let _corpusSortCol = null, _corpusSortDir = 1;
+function sortCorpus(col) {
+  _corpusSortDir = (_corpusSortCol === col) ? -_corpusSortDir : 1;
+  _corpusSortCol = col;
+  const tbody = document.getElementById('corpus-body');
+  if (!tbody) return;
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  rows.sort(function(a, b) {
+    let va, vb;
+    if (col === 'scope')   { va = a.dataset.scope || '';  vb = b.dataset.scope || ''; }
+    else if (col === 'type')    { va = a.dataset.type || '';   vb = b.dataset.type || ''; }
+    else if (col === 'pmcid_a') { va = a.dataset.pmcidA || ''; vb = b.dataset.pmcidA || ''; }
+    else if (col === 'pmcid_b') { va = a.dataset.pmcidB || ''; vb = b.dataset.pmcidB || ''; }
+    else if (col === 'nli_ab')  { va = parseFloat(a.dataset.nliAb) || 0; vb = parseFloat(b.dataset.nliAb) || 0; return _corpusSortDir * (va - vb); }
+    else if (col === 'nli_ba')  { va = parseFloat(a.dataset.nilBa) || 0; vb = parseFloat(b.dataset.nilBa) || 0; return _corpusSortDir * (va - vb); }
+    else { va = ''; vb = ''; }
+    return _corpusSortDir * va.localeCompare(vb);
   });
   rows.forEach(function(r) { tbody.appendChild(r); });
 }
