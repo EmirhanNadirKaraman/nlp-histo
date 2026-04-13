@@ -25,7 +25,7 @@ import logging
 from collections import defaultdict
 from pathlib import Path
 
-from .models import AssertionStatusEnum, Finding, FindingScope, NormalFinding, RelationTypeEnum, SourceSpan
+from .models import DirectionEnum, Finding, FindingScope, NormalFinding, RelationTypeEnum, SourceSpan
 
 logger = logging.getLogger(__name__)
 
@@ -318,23 +318,24 @@ _POSITIVE_TRIGGERS = (
 )
 
 
-def infer_assertion_status(claim: str) -> AssertionStatusEnum:
+def infer_direction(claim: str) -> DirectionEnum:
     """
-    Infer assertion polarity from claim text using ordered keyword matching.
+    Infer direction from claim text using ordered keyword matching.
 
     Negative triggers are checked before positive triggers so that phrases
     like "not expressed" correctly return negative rather than positive.
 
-    Returns AssertionStatusEnum.uncertain when no trigger matches.
+    Returns DirectionEnum.unclear when no trigger matches.
     """
     lower = claim.lower()
     for trigger in _NEGATIVE_TRIGGERS:
         if trigger in lower:
-            return AssertionStatusEnum.negative
+            return DirectionEnum.negative
     for trigger in _POSITIVE_TRIGGERS:
         if trigger in lower:
-            return AssertionStatusEnum.positive
-    return AssertionStatusEnum.uncertain
+            return DirectionEnum.positive
+    return DirectionEnum.unclear
+
 
 
 # ── Dedup key ──────────────────────────────────────────────────────────────────
@@ -497,18 +498,18 @@ class NormalizeStage:
                     except ValueError:
                         pass
 
-            # Only apply the keyword heuristic when the LLM returned uncertain —
-            # it may recover a clear polarity the LLM missed.  For confirmed /
-            # negated / positive / negative the LLM's judgment is preserved.
-            assertion = (
-                infer_assertion_status(f.claim)
-                if f.assertion_status == AssertionStatusEnum.uncertain
-                else f.assertion_status
+            # Apply the keyword heuristic when the LLM could not determine
+            # direction — it may recover a clear polarity the LLM missed.
+            # When the LLM supplied a concrete direction, preserve it.
+            direction = (
+                infer_direction(f.claim)
+                if (f.direction is None or f.direction == DirectionEnum.unclear)
+                else f.direction
             )
             normed = f.model_copy(update={
                 "subject_entity": self._norm(f.subject_entity),
                 "outcome_entity": self._norm(f.outcome_entity),
-                "assertion_status": assertion,
+                "direction": direction,
             })
             result.append((normed, te_id))
         return result
@@ -556,10 +557,10 @@ class NormalizeStage:
 
         unique_pmcids = sorted({s.pmcid for s in spans}) or [pmcid]
 
-        assertion = (
-            infer_assertion_status(rep.claim)
-            if rep.assertion_status == AssertionStatusEnum.uncertain
-            else rep.assertion_status
+        direction = (
+            infer_direction(rep.claim)
+            if (rep.direction is None or rep.direction == DirectionEnum.unclear)
+            else rep.direction
         )
         return NormalFinding(
             normal_id=_normal_id(pmcid, rep.subject_entity, rep.outcome_entity,
@@ -567,8 +568,7 @@ class NormalizeStage:
             subject_entity=rep.subject_entity,
             outcome_entity=rep.outcome_entity,
             relation_type=rep.relation_type,
-            direction=rep.direction,
-            assertion_status=assertion,
+            direction=direction,
             category=rep.category,
             predicate_text=rep.claim,
             scope=rep.scope or FindingScope(),
@@ -582,10 +582,10 @@ class NormalizeStage:
         spans = _spans_from_finding(f)
         te_ids = [s.text_element_id for s in spans]
         unique_pmcids = sorted({s.pmcid for s in spans}) or [pmcid]
-        assertion = (
-            infer_assertion_status(f.claim)
-            if f.assertion_status == AssertionStatusEnum.uncertain
-            else f.assertion_status
+        direction = (
+            infer_direction(f.claim)
+            if (f.direction is None or f.direction == DirectionEnum.unclear)
+            else f.direction
         )
         return NormalFinding(
             normal_id=_normal_id(pmcid, f.subject_entity, f.outcome_entity,
@@ -593,8 +593,7 @@ class NormalizeStage:
             subject_entity=f.subject_entity,
             outcome_entity=f.outcome_entity,
             relation_type=f.relation_type,
-            direction=f.direction,
-            assertion_status=assertion,
+            direction=direction,
             category=f.category,
             predicate_text=f.claim,
             scope=f.scope or FindingScope(),

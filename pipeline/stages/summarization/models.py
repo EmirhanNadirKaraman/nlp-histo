@@ -30,11 +30,6 @@ class RelationTypeEnum(str, Enum):
     unclear            = "unclear"            # relation type genuinely not inferable
 
 
-class AssertionStatusEnum(str, Enum):
-    positive  = "positive"   # claim asserts presence, expression, or positive association
-    negative  = "negative"   # claim asserts absence, non-expression, or negative finding
-    uncertain = "uncertain"  # polarity not determinable from surface form
-
 
 class FindingScope(BaseModel):
     disease_subtype:   str | None = None
@@ -61,7 +56,6 @@ class Finding(BaseModel):
     outcome_entity:    str | None               = None
     relation_type:     RelationTypeEnum         = RelationTypeEnum.unclear
     direction:         DirectionEnum | None     = None
-    assertion_status:  AssertionStatusEnum      = AssertionStatusEnum.uncertain
     scope:             FindingScope | None      = None
     grounding_score:   float | None             = None
 
@@ -211,7 +205,6 @@ class NormalFinding(BaseModel):
     outcome_entity:       str | None        # normalized; None if MAP did not extract
     relation_type:        RelationTypeEnum  # groupability key; unclear = non-groupable
     direction:            DirectionEnum | None
-    assertion_status:     AssertionStatusEnum  # deterministic; inferred from claim text
     category:             Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"]
     predicate_text:       str               # representative claim text
     scope:                FindingScope      # from the best-grounded source finding

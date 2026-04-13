@@ -53,7 +53,6 @@ def _minimal_rule(**overrides) -> dict:
         "predicate_text": "CEAN is a benign tumour",
         "relation_type": "has_feature",
         "direction": "positive",
-        "assertion_status": "confirmed",
         "category": "morphology",
         "final_score": 0.85,
         "mean_grounding_score": 0.9,
@@ -107,7 +106,6 @@ def _minimal_data(pmcid: str = "PMC1234567", run_id: str = "run-1") -> dict:
                             "claim": "CEAN is a benign tumour",
                             "relation_type": "has_feature",
                             "direction": "positive",
-                            "assertion_status": "confirmed",
                             "category": "morphology",
                             "confidence": "high",
                             "grounding_score": 0.9,
@@ -494,7 +492,6 @@ class TestEntityFlags:
         obj = {
             "subject_entity": "CEAN",
             "outcome_entity": "benign",
-            "assertion_status": "uncertain",
             "predicate_text": "no evidence of malignancy",
             "mean_grounding_score": 0.9,
         }
@@ -505,7 +502,6 @@ class TestEntityFlags:
         obj = {
             "subject_entity": "CEAN",
             "outcome_entity": "invasion",
-            "assertion_status": "uncertain",
             "predicate_text": "absent vascular invasion",
             "mean_grounding_score": 0.9,
         }
@@ -516,7 +512,6 @@ class TestEntityFlags:
         obj = {
             "subject_entity": "CEAN",
             "outcome_entity": "benign",
-            "assertion_status": "confirmed",
             "predicate_text": "no evidence of malignancy",
             "mean_grounding_score": 0.9,
         }
@@ -527,7 +522,6 @@ class TestEntityFlags:
         obj = {
             "subject_entity": "CEAN",
             "outcome_entity": "benign",
-            "assertion_status": "uncertain",
             "predicate_text": "CEAN may be a benign tumour",
             "mean_grounding_score": 0.9,
         }
@@ -705,7 +699,6 @@ class TestLowGsThreshold:
         data["final_rules"][0]["mean_grounding_score"] = gs
         # Keep entity clean so the only possible flag is low-grounding
         data["final_rules"][0]["subject_entity"] = "CEAN"
-        data["final_rules"][0]["assertion_status"] = "confirmed"
         data["final_rules"][0]["predicate_text"] = "CEAN is a benign tumour"
         return data
 
@@ -732,7 +725,6 @@ class TestLowGsThreshold:
         data = _minimal_data()
         data["final_rules"][0]["mean_grounding_score"] = 0.35
         data["final_rules"][0]["subject_entity"] = "CEAN"
-        data["final_rules"][0]["assertion_status"] = "confirmed"
         data["final_rules"][0]["predicate_text"] = "CEAN is a benign tumour"
 
         second = _minimal_rule(
@@ -742,7 +734,6 @@ class TestLowGsThreshold:
             predicate_text="CEAN has a low recurrence rate",
         )
         second["mean_grounding_score"] = 0.55
-        second["assertion_status"] = "confirmed"
         data["final_rules"].append(second)
 
         ctx_04 = build_context(data, low_gs_threshold=0.4)

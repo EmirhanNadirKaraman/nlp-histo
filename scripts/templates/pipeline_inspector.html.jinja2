@@ -336,8 +336,7 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json | safe }};
             <span style="color:var(--text-dim); font-size:0.8rem"> [{{ fr.relation_type }}]</span>
           </div>
           <div class="card-badges">
-            <span class="badge badge-{% if fr.direction == 'positive' %}green{% elif fr.direction == 'negative' %}red{% elif fr.direction == 'unclear' %}yellow{% else %}gray{% endif %}">{{ fr.direction or 'no dir' }}</span>
-            <span class="badge badge-{% if fr.assertion_status == 'confirmed' %}green{% elif fr.assertion_status == 'uncertain' %}yellow{% elif fr.assertion_status == 'negated' %}red{% else %}gray{% endif %}">{{ fr.assertion_status }}</span>
+            <span class="badge badge-{% if fr.direction == 'positive' %}green{% elif fr.direction == 'negative' %}red{% elif fr.direction == 'unclear' %}yellow{% else %}gray{% endif %}" title="{% if fr.direction == 'positive' %}The rule asserts a positive association or presence{% elif fr.direction == 'negative' %}The rule asserts a negative association or absence{% elif fr.direction == 'unclear' %}Direction not determinable — LLM could not identify the sign of this relationship{% elif fr.direction == 'partial' %}The rule asserts a partial or mixed association{% elif fr.direction == 'absent' %}The rule asserts absence of the outcome{% else %}No direction extracted{% endif %}">{% if fr.direction == 'unclear' %}unclear dir{% else %}{{ fr.direction or 'no dir' }}{% endif %}</span>
             <span class="badge badge-blue">{{ fr.category }}</span>
             <span class="badge badge-{% if fr.final_score >= 0.7 %}green{% elif fr.final_score >= 0.4 %}yellow{% else %}red{% endif %}">score {{ '%.3f'|format(fr.final_score) }}</span>
             {% for flag in flags %}<span class="badge badge-orange">{{ flag }}</span>{% endfor %}
@@ -466,7 +465,6 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json | safe }};
                 <div class="field-row"><span class="key">outcome: </span>
                   <span {% if mf.outcome_entity != fr.outcome_entity %}class="diff-highlight"{% endif %}>{{ mf.outcome_entity or '—' }}</span>
                 </div>
-                <div class="field-row"><span class="key">assertion: </span>{{ mf.assertion_status }}</div>
                 <div class="field-row"><span class="key">direction: </span>{{ mf.direction or '—' }}</div>
                 <div class="field-row"><span class="key">grounding: </span>{{ '%.3f'|format(mf.grounding_score) if mf.grounding_score is not none else '—' }}</div>
                 <div class="field-row"><span class="key">confidence: </span>{{ mf.confidence or '—' }}</div>
@@ -540,7 +538,7 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json | safe }};
             <span style="color:var(--text-dim); font-size:0.8rem"> [{{ cr.relation_type }}]</span>
           </div>
           <div class="card-badges">
-            <span class="badge badge-{% if cr.direction == 'positive' %}green{% elif cr.direction == 'negative' %}red{% elif cr.direction == 'unclear' %}yellow{% else %}gray{% endif %}">{{ cr.direction or 'no dir' }}</span>
+            <span class="badge badge-{% if cr.direction == 'positive' %}green{% elif cr.direction == 'negative' %}red{% elif cr.direction == 'unclear' %}yellow{% else %}gray{% endif %}" title="{% if cr.direction == 'positive' %}The rule asserts a positive association or presence{% elif cr.direction == 'negative' %}The rule asserts a negative association or absence{% elif cr.direction == 'unclear' %}The LLM extracted a relationship but could not determine its sign (positive/negative/absent/partial){% elif cr.direction == 'partial' %}The rule asserts a partial or mixed association{% elif cr.direction == 'absent' %}The rule asserts absence of the outcome{% else %}No direction extracted{% endif %}">{% if cr.direction == 'unclear' %}unclear dir{% else %}{{ cr.direction or 'no dir' }}{% endif %}</span>
             <span class="badge badge-blue">{{ cr.category }}</span>
             <span class="badge badge-gray">n={{ cr.finding_count }}</span>
             {% if cr.mean_grounding_score is not none %}<span class="badge badge-{% if cr.mean_grounding_score >= 0.7 %}green{% elif cr.mean_grounding_score >= 0.4 %}yellow{% else %}red{% endif %}">gs {{ '%.3f'|format(cr.mean_grounding_score) }}</span>{% endif %}
@@ -613,8 +611,7 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json | safe }};
               <span style="color:var(--text-dim); font-size:0.8rem"> [{{ f.relation_type }}]</span>
             </div>
             <div class="card-badges">
-              <span class="badge badge-{% if f.direction == 'positive' %}green{% elif f.direction == 'negative' %}red{% elif f.direction == 'unclear' %}yellow{% else %}gray{% endif %}">{{ f.direction or 'no dir' }}</span>
-              <span class="badge badge-{% if f.assertion_status == 'confirmed' %}green{% elif f.assertion_status == 'uncertain' %}yellow{% elif f.assertion_status == 'negated' %}red{% else %}gray{% endif %}">{{ f.assertion_status }}</span>
+              <span class="badge badge-{% if f.direction == 'positive' %}green{% elif f.direction == 'negative' %}red{% elif f.direction == 'unclear' %}yellow{% else %}gray{% endif %}" title="{% if f.direction == 'positive' %}The finding asserts a positive association or presence{% elif f.direction == 'negative' %}The finding asserts a negative association or absence{% elif f.direction == 'unclear' %}Direction not determinable — LLM could not identify the sign of this relationship{% elif f.direction == 'partial' %}The finding asserts a partial or mixed association{% elif f.direction == 'absent' %}The finding asserts absence of the outcome{% else %}No direction extracted{% endif %}">{% if f.direction == 'unclear' %}unclear dir{% else %}{{ f.direction or 'no dir' }}{% endif %}</span>
               <span class="badge badge-blue">{{ f.category }}</span>
               {% if f.grounding_score is not none %}<span class="badge badge-{% if f.grounding_score >= 0.7 %}green{% elif f.grounding_score >= 0.4 %}yellow{% else %}red{% endif %}">gs {{ '%.3f'|format(f.grounding_score) }}</span>{% endif %}
               <span class="badge badge-{% if f.confidence == 'high' %}green{% elif f.confidence == 'medium' %}yellow{% else %}gray{% endif %}">{{ f.confidence or '—' }}</span>
@@ -627,7 +624,6 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json | safe }};
               <tr><td>subject_entity</td><td>{{ f.subject_entity or '—' }}</td></tr>
               <tr><td>outcome_entity</td><td>{{ f.outcome_entity or '—' }}</td></tr>
               <tr><td>relation_type</td><td>{{ f.relation_type }}</td></tr>
-              <tr><td>assertion_status</td><td>{{ f.assertion_status }}</td></tr>
               <tr><td>direction</td><td>{{ f.direction or '—' }}</td></tr>
               <tr><td>confidence</td><td>{{ f.confidence or '—' }}</td></tr>
               <tr><td>grounding_score</td><td>{{ '%.4f'|format(f.grounding_score) if f.grounding_score is not none else '—' }}</td></tr>

@@ -375,7 +375,6 @@ class SumMapFinding(Base):
     outcome_entity          = Column(Text,        nullable=True)    # pre-normalization
     relation_type           = Column(String(50),  nullable=False)
     direction               = Column(String(20),  nullable=True)
-    assertion_status        = Column(String(20),  nullable=False)
     grounding_score         = Column(Float,       nullable=True)
     evidence_refs           = Column(ARRAY(Text), nullable=True)
     scope_disease_subtype   = Column(Text,    nullable=True)
@@ -412,7 +411,6 @@ class SumNormalFinding(Base):
     outcome_entity          = Column(Text,        nullable=True)
     relation_type           = Column(String(50),  nullable=False)
     direction               = Column(String(20),  nullable=True)
-    assertion_status        = Column(String(20),  nullable=False)
     category                = Column(String(50),  nullable=False)
     predicate_text          = Column(Text,        nullable=False)
     mean_grounding_score    = Column(Float,       nullable=True)

@@ -1,12 +1,11 @@
 """
-Phase A gate tests — assertion_status inference, expression marker gate,
+Phase A gate tests — direction inference, expression marker gate,
 and entity normalization.
 No LLM or NLI model required.
 """
 import pytest
 
 from pipeline.stages.summarization.models import (
-    AssertionStatusEnum,
     CanonicalRule,
     CanonicalScopeEnum,
     DirectionEnum,
@@ -14,7 +13,7 @@ from pipeline.stages.summarization.models import (
 )
 from pipeline.stages.summarization.normalize_stage import (
     NormalizeStage,
-    infer_assertion_status,
+    infer_direction,
     normalize_entity,
 )
 from pipeline.stages.summarization.relate_stage import (
@@ -24,28 +23,28 @@ from pipeline.stages.summarization.relate_stage import (
 )
 
 
-# ── infer_assertion_status ─────────────────────────────────────────────────────
+# ── infer_direction ────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("claim,expected", [
     # negative triggers
-    ("CD30 was not expressed",          AssertionStatusEnum.negative),
-    ("No cytologic atypia was observed", AssertionStatusEnum.negative),
-    ("Necrosis was absent",             AssertionStatusEnum.negative),
-    ("Mitoses were not seen",           AssertionStatusEnum.negative),
-    ("Staining was negative",           AssertionStatusEnum.negative),
+    ("CD30 was not expressed",          DirectionEnum.negative),
+    ("No cytologic atypia was observed", DirectionEnum.negative),
+    ("Necrosis was absent",             DirectionEnum.negative),
+    ("Mitoses were not seen",           DirectionEnum.negative),
+    ("Staining was negative",           DirectionEnum.negative),
     # positive triggers
-    ("CD30 was positive",               AssertionStatusEnum.positive),
-    ("Open vascular channels were present", AssertionStatusEnum.positive),
-    ("CD34 expression was detected",    AssertionStatusEnum.positive),
-    ("CD31 is expressed",               AssertionStatusEnum.positive),
-    # uncertain
-    ("Ki-67 index 80%",                 AssertionStatusEnum.uncertain),
-    ("Female predominance",             AssertionStatusEnum.uncertain),
+    ("CD30 was positive",               DirectionEnum.positive),
+    ("Open vascular channels were present", DirectionEnum.positive),
+    ("CD34 expression was detected",    DirectionEnum.positive),
+    ("CD31 is expressed",               DirectionEnum.positive),
+    # unclear
+    ("Ki-67 index 80%",                 DirectionEnum.unclear),
+    ("Female predominance",             DirectionEnum.unclear),
     # negative wins over positive when both keywords present
-    ("not expressed but reactive staining", AssertionStatusEnum.negative),
+    ("not expressed but reactive staining", DirectionEnum.negative),
 ])
-def test_infer_assertion_status(claim, expected):
-    assert infer_assertion_status(claim) == expected
+def test_infer_direction(claim, expected):
+    assert infer_direction(claim) == expected
 
 
 # ── _norm_outcome_expression ───────────────────────────────────────────────────

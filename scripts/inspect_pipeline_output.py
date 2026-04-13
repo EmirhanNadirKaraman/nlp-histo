@@ -59,7 +59,7 @@ _GENERIC_RE = re.compile(
     r"tumor|tumour|lesion|lesions|the patient)\s*$",
     re.I,
 )
-# Polarity words that imply the assertion_status shouldn't be "uncertain"
+# Polarity words that imply the direction shouldn't be "unclear"
 _POLARITY_RE = re.compile(
     r"\b(not|no |absent|negative|negated|present|expressed|increased|decreased|"
     r"elevated|reduced|no evidence|lack of|without)\b",
@@ -178,10 +178,10 @@ def _compute_flags(obj: dict, low_gs_threshold: float = 0.4) -> list[str]:
     outcome = obj.get("outcome_entity") or ""
     if not outcome.strip():
         flags.append("empty-outcome")
-    # assertion_status vs. claim polarity mismatch
-    status = obj.get("assertion_status", "")
-    claim  = obj.get("claim", "") or obj.get("predicate_text", "")
-    if status == "uncertain" and _POLARITY_RE.search(claim):
+    # direction vs. claim polarity mismatch
+    direction = obj.get("direction", "")
+    claim     = obj.get("claim", "") or obj.get("predicate_text", "")
+    if direction == "unclear" and _POLARITY_RE.search(claim):
         flags.append("polarity-mismatch")
     # low grounding score
     gs = obj.get("grounding_score") or obj.get("mean_grounding_score")
@@ -426,7 +426,6 @@ def build_data_from_db(pmcid: str, run_id: str, session) -> dict | None:
             "outcome_entity":  mf.outcome_entity,
             "relation_type":   mf.relation_type,
             "direction":       mf.direction,
-            "assertion_status": mf.assertion_status,
             "grounding_score": mf.grounding_score,
             "evidence":        list(mf.evidence_refs or []),
             "scope": {
@@ -806,7 +805,7 @@ def build_diff_context(
     findings_diff = _diff_items(
         _flat_findings(data_a),
         _flat_findings(data_b),
-        _finding_key, ["grounding_score", "direction", "assertion_status"],
+        _finding_key, ["grounding_score", "direction"],
     )
 
     # Summary stats
@@ -876,7 +875,6 @@ _CSV_COLUMNS = [
     "outcome_entity",
     "predicate_text",
     "direction",
-    "assertion_status",
     "grounding_score",
     "mean_grounding_score",
     "final_score",
@@ -926,7 +924,6 @@ def _rule_row(
         "outcome_entity": item.get("outcome_entity") or "",
         "predicate_text": (item.get("predicate_text") or item.get("claim") or "").replace("\n", " "),
         "direction": item.get("direction") or "",
-        "assertion_status": item.get("assertion_status") or "",
         "grounding_score": f"{gs:.4f}" if gs is not None else "",
         "mean_grounding_score": f"{mgs:.4f}" if mgs is not None else "",
         "final_score": f"{fs:.4f}" if fs is not None else "",
