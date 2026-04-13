@@ -142,6 +142,7 @@ class SummarizationRunner:
         db=None,
         force_rerun: bool = False,
         run_ner: bool = True,
+        run_reduce: bool = False,
     ) -> None:
         self._output_dir = output_dir
         self._summaries_dir = output_dir / "summaries"
@@ -174,6 +175,7 @@ class SummarizationRunner:
         self._db = db  # DatabaseConnection | None — persistence is fully optional
         self._force_rerun = force_rerun
         self._run_ner = run_ner
+        self._run_reduce = run_reduce
 
         self._trace_enabled = trace_enabled
         self.trace_dir: Path = trace_dir or (output_dir / "traces")
@@ -379,47 +381,53 @@ class SummarizationRunner:
                 pipeline_run_db_id, pmcid, self._final_rules[pmcid], _cr_db_id_map
             )
 
-            # 2. REDUCE (recursive tree collapse)
-            logger.info("[%s] REDUCE — %d chunks", pmcid, len(chunk_summaries))
-            t0 = time.perf_counter()
-            master: ConsolidatedSummary = self._reduce.reduce(
-                chunk_summaries, pmcid, cache=self._cache, collector=collector
-            )
-            logger.info("[%s] REDUCE done [%.1fs]", pmcid, time.perf_counter() - t0)
-
-            # 3. RULE EXTRACTION
-            logger.info("[%s] RULES", pmcid)
-            t0 = time.perf_counter()
-            rules: ExtractedRules = self._rules.extract(
-                master, pmcid, cache=self._cache, collector=collector
-            )
-            logger.info("[%s] RULES done [%.1fs] — %d rules",
-                        pmcid, time.perf_counter() - t0, len(rules.rules))
-
-            # 3a. Grounding filter — drop ungrounded rules
-            if self._grounding is not None:
-                rules_before = len(rules.rules)
-                logger.info("[%s] GROUNDING (rules) — %d rules", pmcid, rules_before)
-                t0 = time.perf_counter()
-                rules = self._grounding.filter_rules(rules)
-                rules_after = len(rules.rules)
-                logger.info("[%s] GROUNDING (rules) done [%.1fs] — %d/%d rules kept",
-                            pmcid, time.perf_counter() - t0, rules_after, rules_before)
-                if collector is not None:
-                    collector.record_grounding(
-                        stage="rules",
-                        items_before=rules_before,
-                        items_after=rules_after,
-                    )
-
-            # 4. Contradiction detection
+            # 2. REDUCE + RULES (optional — disabled by default)
+            master: ConsolidatedSummary | None = None
+            rules: ExtractedRules | None = None
             contradiction_report: ContradictionReport | None = None
-            if self._contradiction is not None:
-                logger.info("[%s] CONTRADICTION DETECTION", pmcid)
+
+            if self._run_reduce:
+                logger.info("[%s] REDUCE — %d chunks", pmcid, len(chunk_summaries))
                 t0 = time.perf_counter()
-                contradiction_report = self._contradiction.detect(rules)
-                logger.info("[%s] CONTRADICTION DETECTION done [%.1fs]",
-                            pmcid, time.perf_counter() - t0)
+                master = self._reduce.reduce(
+                    chunk_summaries, pmcid, cache=self._cache, collector=collector
+                )
+                logger.info("[%s] REDUCE done [%.1fs]", pmcid, time.perf_counter() - t0)
+
+                # 3. RULE EXTRACTION
+                logger.info("[%s] RULES", pmcid)
+                t0 = time.perf_counter()
+                rules = self._rules.extract(
+                    master, pmcid, cache=self._cache, collector=collector
+                )
+                logger.info("[%s] RULES done [%.1fs] — %d rules",
+                            pmcid, time.perf_counter() - t0, len(rules.rules))
+
+                # 3a. Grounding filter — drop ungrounded rules
+                if self._grounding is not None:
+                    rules_before = len(rules.rules)
+                    logger.info("[%s] GROUNDING (rules) — %d rules", pmcid, rules_before)
+                    t0 = time.perf_counter()
+                    rules = self._grounding.filter_rules(rules)
+                    rules_after = len(rules.rules)
+                    logger.info("[%s] GROUNDING (rules) done [%.1fs] — %d/%d rules kept",
+                                pmcid, time.perf_counter() - t0, rules_after, rules_before)
+                    if collector is not None:
+                        collector.record_grounding(
+                            stage="rules",
+                            items_before=rules_before,
+                            items_after=rules_after,
+                        )
+
+                # 4. Contradiction detection
+                if self._contradiction is not None:
+                    logger.info("[%s] CONTRADICTION DETECTION", pmcid)
+                    t0 = time.perf_counter()
+                    contradiction_report = self._contradiction.detect(rules)
+                    logger.info("[%s] CONTRADICTION DETECTION done [%.1fs]",
+                                pmcid, time.perf_counter() - t0)
+            else:
+                logger.info("[%s] REDUCE/RULES skipped (run_reduce=False)", pmcid)
 
             # NER + UMLS linking (optional)
             if self._run_ner and self._db is not None:
@@ -439,8 +447,8 @@ class SummarizationRunner:
                 "status": "success",
                 "run_id": run_id,
                 "pmcid": pmcid,
-                "summary": master.narrative_summary,
-                "rules": [r.model_dump() for r in rules.rules],
+                "summary": master.narrative_summary if master else None,
+                "rules": [r.model_dump() for r in rules.rules] if rules else [],
                 "contradiction_report": contradiction_report.model_dump() if contradiction_report else None,
                 # Phase 4–6 knowledge base
                 "canonical_rules": [
@@ -454,13 +462,13 @@ class SummarizationRunner:
                 ],
                 "audit_trail": {
                     "map_chunks": [cs.model_dump() for cs in chunk_summaries],
-                    "master_summary": master.model_dump(),
-                    "rules_provenance": rules.model_dump(),
+                    "master_summary": master.model_dump() if master else None,
+                    "rules_provenance": rules.model_dump() if rules else None,
                 },
             }
             self._finish_pipeline_run(
                 pipeline_run_db_id, "success",
-                narrative_summary=master.narrative_summary,
+                narrative_summary=master.narrative_summary if master else None,
             )
             self._save_result(result)
             self._cache.save()
