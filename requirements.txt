@@ -129,3 +129,4 @@ weasel==0.4.3
 wrapt==2.0.1
 xlsxwriter==3.2.9
 pulp
+flask>=3.0

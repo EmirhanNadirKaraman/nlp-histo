@@ -138,21 +138,30 @@ def _is_low_grounding(obj: dict, threshold: float = 0.4) -> bool:
 
 def _build_sentence_lookup(data: dict) -> dict[str, str]:
     """
-    Build a mapping from sentence reference token → verbatim sentence text.
+    Build a mapping from sentence reference token → source text.
 
     Evidence tokens look like: "S2|PMC10047158|5"
-    We mine two sources (without guessing or hallucinating text):
-      1. MAP findings: verbatim_support is paired with the first evidence token.
-      2. rules_provenance.rules[].evidence_chain[]: sentence_id + pmcid +
+    We mine three sources (without guessing or hallucinating text):
+      1. evidence_text_map: direct TextElement.text_content keyed by token
+         (only present when data was built from DB via build_data_from_db).
+      2. MAP findings: verbatim_support is paired with each evidence token.
+      3. rules_provenance.rules[].evidence_chain[]: sentence_id + pmcid +
          text_element_id together identify the token, verbatim is the text.
 
+    Source 1 has highest priority — it is the raw source paragraph, not the
+    LLM's extracted quote.  Sources 2 and 3 fill gaps when 1 is absent.
     Only tokens that actually appear in evidence lists are populated.
     """
     lookup: dict[str, str] = {}
 
+    # Source 1: direct TextElement content (DB mode — evidence_text_map)
+    for token, text in (data.get("evidence_text_map") or {}).items():
+        if token not in lookup and text:
+            lookup[token] = text
+
     audit = data.get("audit_trail") or {}
 
-    # Source 1: MAP finding verbatim_support paired with evidence tokens
+    # Source 2: MAP finding verbatim_support paired with evidence tokens
     for chunk in audit.get("map_chunks", []):
         for f in chunk.get("findings", []):
             vs = (f.get("verbatim_support") or "").strip()
@@ -163,7 +172,7 @@ def _build_sentence_lookup(data: dict) -> dict[str, str]:
                 if ev and ev not in lookup:
                     lookup[ev] = vs
 
-    # Source 2: rules_provenance evidence_chain verbatim
+    # Source 3: rules_provenance evidence_chain verbatim
     rp = audit.get("rules_provenance") or {}
     for rule in rp.get("rules") or []:
         for ec in rule.get("evidence_chain") or []:
@@ -232,11 +241,267 @@ def _build_lineage_index(data: dict) -> dict[str, Any]:
     return lineage
 
 
+# ── DB → data dict reconstruction ─────────────────────────────────────────────
+
+def build_data_from_db(pmcid: str, run_id: str, session) -> dict | None:
+    """
+    Reconstruct the pipeline output data dict from DB rows.
+
+    Returns a dict with the same shape as the JSON files written by runner.py,
+    or None if the run_id is not found.  Fields not stored in the DB
+    (rules_provenance, master_summary) are omitted — the remaining content
+    is sufficient for build_context() to produce a full inspector page.
+    """
+    from database.models import (  # noqa: PLC0415
+        PipelineRun, SumMapFinding, SumCanonicalRule,
+        SumRelation, SumFinalRule, SumNormalFinding, SumNormalFindingSpan,
+        TextElement,
+    )
+    from sqlalchemy.orm import aliased  # noqa: PLC0415
+
+    run: PipelineRun | None = (
+        session.query(PipelineRun)
+        .filter_by(run_id=run_id, pmcid=pmcid)
+        .first()
+    )
+    if run is None:
+        return None
+
+    db_id = run.id
+
+    # ── Final rules (joined with canonical rules for missing fields) ──────────
+    CRAlias = aliased(SumCanonicalRule)
+    fr_rows = (
+        session.query(SumFinalRule, CRAlias)
+        .outerjoin(CRAlias, SumFinalRule.canonical_rule_id == CRAlias.id)
+        .filter(SumFinalRule.pipeline_run_id == db_id)
+        .order_by(SumFinalRule.final_score.desc())
+        .all()
+    )
+    final_rules = []
+    for fr, cr in fr_rows:
+        final_rules.append({
+            "final_id":           fr.final_id,
+            "canonical_id":       fr.canonical_id,
+            "subject_entity":     fr.subject_entity,
+            "outcome_entity":     fr.outcome_entity,
+            "relation_type":      fr.relation_type,
+            "direction":          fr.direction,
+            "predicate_text":     fr.predicate_text,
+            "category":           fr.category,
+            "final_score":        fr.final_score,
+            "support_count":      fr.support_count,
+            "contradict_count":   fr.contradict_count,
+            "scope_qualify_count": fr.scope_qualify_count,
+            "is_contradicted":    fr.is_contradicted,
+            "contradicted_by":    list(fr.contradicted_by or []),
+            # From SumCanonicalRule (may be None if FK was null)
+            "mean_grounding_score": cr.mean_grounding_score if cr else None,
+            "finding_count":        cr.finding_count if cr else None,
+            "member_normal_ids":    list(cr.member_normal_ids or []) if cr else [],
+            "canonical_scope":      cr.canonical_scope if cr else None,
+            "supporting_pmcids":    list(cr.pmcids or []) if cr else [],
+            "group_id":             cr.group_id if cr else None,
+        })
+
+    # ── Canonical rules ───────────────────────────────────────────────────────
+    cr_rows = (
+        session.query(SumCanonicalRule)
+        .filter_by(pipeline_run_id=db_id)
+        .order_by(SumCanonicalRule.mean_grounding_score.desc())
+        .all()
+    )
+    canonical_rules = [
+        {
+            "canonical_id":       cr.canonical_id,
+            "group_id":           cr.group_id,
+            "subject_entity":     cr.subject_entity,
+            "outcome_entity":     cr.outcome_entity,
+            "relation_type":      cr.relation_type,
+            "direction":          cr.direction,
+            "predicate_text":     cr.predicate_text,
+            "canonical_scope":    cr.canonical_scope,
+            "category":           cr.category,
+            "supporting_pmcids":  list(cr.pmcids or []),
+            "member_normal_ids":  list(cr.member_normal_ids or []),
+            "mean_grounding_score": cr.mean_grounding_score,
+            "finding_count":      cr.finding_count,
+        }
+        for cr in cr_rows
+    ]
+
+    # ── Relations ─────────────────────────────────────────────────────────────
+    rel_rows = (
+        session.query(SumRelation)
+        .filter_by(pipeline_run_id=db_id)
+        .all()
+    )
+    relations = [
+        {
+            "rule_id_a":       r.rule_id_a,
+            "rule_id_b":       r.rule_id_b,
+            "relation_type":   r.relation_type,
+            "nli_score_a_to_b": r.nli_score_a_to_b,
+            "nli_score_b_to_a": r.nli_score_b_to_a,
+        }
+        for r in rel_rows
+    ]
+
+    # ── MAP findings (grouped into chunks) ────────────────────────────────────
+    mf_rows = (
+        session.query(SumMapFinding)
+        .filter_by(pipeline_run_id=db_id)
+        .order_by(SumMapFinding.chunk_id, SumMapFinding.position_in_chunk)
+        .all()
+    )
+    chunks_by_id: dict[str, list[dict]] = {}
+    for mf in mf_rows:
+        finding = {
+            "category":        mf.category,
+            "claim":           mf.claim,
+            "confidence":      mf.confidence,
+            "verbatim_support": mf.verbatim_support,
+            "subject_entity":  mf.subject_entity,
+            "outcome_entity":  mf.outcome_entity,
+            "relation_type":   mf.relation_type,
+            "direction":       mf.direction,
+            "assertion_status": mf.assertion_status,
+            "grounding_score": mf.grounding_score,
+            "evidence":        list(mf.evidence_refs or []),
+            "scope": {
+                "disease_subtype":  mf.scope_disease_subtype,
+                "cohort_n":         mf.scope_cohort_n,
+                "assay_method":     mf.scope_assay_method,
+                "biomarker_cutoff": mf.scope_biomarker_cutoff,
+                "tissue_site":      mf.scope_tissue_site,
+                "treatment_context": mf.scope_treatment_context,
+                "endpoint":         mf.scope_endpoint,
+                "study_design":     mf.scope_study_design,
+            },
+        }
+        chunks_by_id.setdefault(mf.chunk_id, []).append(finding)
+
+    map_chunks = [
+        {"chunk_id": chunk_id, "findings": findings}
+        for chunk_id, findings in sorted(
+            chunks_by_id.items(),
+            key=lambda kv: int(kv[0][1:]) if kv[0][1:].isdigit() else kv[0],
+        )
+    ]
+
+    # ── Normal findings + spans ───────────────────────────────────────────────
+    nf_rows = (
+        session.query(SumNormalFinding)
+        .filter_by(pipeline_run_id=db_id)
+        .all()
+    )
+    nf_ids = [nf.id for nf in nf_rows]
+    span_rows = (
+        session.query(SumNormalFindingSpan)
+        .filter(SumNormalFindingSpan.normal_finding_id.in_(nf_ids))
+        .all()
+    ) if nf_ids else []
+
+    # ── Collect all text_element_ids for a single batch query ─────────────
+    # From normal finding spans
+    te_ids_spans = {sp.text_element_id for sp in span_rows if sp.text_element_id}
+
+    # From MAP finding evidence tokens (format: S{sid}|{pmcid}|{te_id})
+    ev_token_to_te_id: dict[str, int] = {}
+    for mf in mf_rows:
+        for tok in (mf.evidence_refs or []):
+            parts = tok.split("|")
+            if len(parts) == 3 and parts[2].isdigit():
+                ev_token_to_te_id[tok] = int(parts[2])
+
+    all_te_ids = te_ids_spans | set(ev_token_to_te_id.values())
+    te_content: dict[int, str] = {}
+    if all_te_ids:
+        te_rows = session.query(TextElement.id, TextElement.text_content).filter(
+            TextElement.id.in_(all_te_ids)
+        ).all()
+        te_content = {row.id: row.text_content for row in te_rows}
+
+    # evidence_text_map: token → raw paragraph from source TextElement
+    evidence_text_map: dict[str, str] = {}
+    for tok, tid in ev_token_to_te_id.items():
+        text = te_content.get(tid, "")
+        if text:
+            evidence_text_map[tok] = text
+
+    spans_by_nf_id: dict[int, list[dict]] = {}
+    for sp in span_rows:
+        spans_by_nf_id.setdefault(sp.normal_finding_id, []).append({
+            "verbatim":         sp.verbatim,
+            "sentence_id":      sp.sentence_id,
+            "text_element_id":  sp.text_element_id,
+            "paragraph":        te_content.get(sp.text_element_id, "") if sp.text_element_id else "",
+        })
+
+    normal_findings_lookup: dict[str, dict] = {}
+    for nf in nf_rows:
+        normal_findings_lookup[nf.normal_id] = {
+            "predicate_text": nf.predicate_text,
+            "spans": spans_by_nf_id.get(nf.id, []),
+        }
+
+    return {
+        "pmcid":   pmcid,
+        "run_id":  run.run_id,
+        "status":  run.status,
+        "summary": run.narrative_summary or "",
+        "final_rules":      final_rules,
+        "canonical_rules":  canonical_rules,
+        "relations":        relations,
+        "audit_trail": {
+            "map_chunks": map_chunks,
+        },
+        "normal_findings_lookup": normal_findings_lookup,
+        "evidence_text_map":      evidence_text_map,
+    }
+
+
+def build_context_from_db(
+    pmcid: str,
+    run_id: str,
+    session,
+    low_gs_threshold: float = 0.4,
+    corpus_connections: dict[str, list[dict]] | None = None,
+) -> dict | None:
+    """
+    Build the template context dict directly from DB rows.
+
+    Returns None if the run is not found.  Otherwise identical to
+    build_context() called on the equivalent JSON file.
+    """
+    data = build_data_from_db(pmcid, run_id, session)
+    if data is None:
+        return None
+    return build_context(data, low_gs_threshold=low_gs_threshold,
+                         corpus_connections=corpus_connections)
+
+
 # ── Template context builders ──────────────────────────────────────────────────
 
-def _enrich_final_rule(fr: dict, lineage_index: dict, low_gs_threshold: float = 0.4) -> dict:
+def _enrich_final_rule(
+    fr: dict,
+    lineage_index: dict,
+    low_gs_threshold: float = 0.4,
+    normal_findings_lookup: dict | None = None,
+) -> dict:
     cid = fr.get("canonical_id", "")
-    lin = lineage_index.get(cid, {})
+    lin = dict(lineage_index.get(cid, {}))
+    # Attach source spans for each member NormalFinding
+    if normal_findings_lookup:
+        normal_with_spans = []
+        for nid in (fr.get("member_normal_ids") or []):
+            nf_info = normal_findings_lookup.get(nid, {})
+            normal_with_spans.append({
+                "normal_id": nid,
+                "predicate_text": nf_info.get("predicate_text", ""),
+                "spans": nf_info.get("spans", []),
+            })
+        lin["normal_findings"] = normal_with_spans
     return {
         **fr,
         "flags": _compute_flags(fr, low_gs_threshold),
@@ -280,6 +545,7 @@ def build_context(
 
     lineage_index = _build_lineage_index(data)
     sentence_lookup = _build_sentence_lookup(data)
+    normal_findings_lookup = data.get("normal_findings_lookup") or {}
 
     raw_final_rules    = data.get("final_rules", []) or []
     raw_canonical_rules = data.get("canonical_rules", []) or []
@@ -289,7 +555,7 @@ def build_context(
     raw_chunks = audit.get("map_chunks", []) or []
 
     # Enrich each layer
-    final_rules     = [_enrich_final_rule(fr, lineage_index, low_gs_threshold) for fr in raw_final_rules]
+    final_rules     = [_enrich_final_rule(fr, lineage_index, low_gs_threshold, normal_findings_lookup) for fr in raw_final_rules]
     canonical_rules = [_enrich_canonical_rule(cr, low_gs_threshold) for cr in raw_canonical_rules]
 
     # Inject cross-paper connections from corpus_relations.json (if provided)

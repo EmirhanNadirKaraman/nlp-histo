@@ -74,7 +74,64 @@ def build_llm():
     )
 
 
-# ── Runner factory ─────────────────────────────────────────────────────────────
+# ── Runner factories ───────────────────────────────────────────────────────────
+
+def build_batch_runners(
+    *,
+    skip_nli: bool,
+    no_canon: bool,
+    skip_ner: bool,
+):
+    """
+    Return (batch_runner, sync_runner).
+
+    batch_runner  — BatchSummarizationRunner using Claude Haiku 4.5 via the
+                    Anthropic batch API (no Vertex rate limits, 50 % cheaper).
+                    Handles the MAP phase for all papers simultaneously.
+
+    sync_runner   — Standard SummarizationRunner using Gemini Flash Lite for
+                    NORMALIZE → CANONICALIZE (a handful of LLM calls per paper,
+                    not subject to the per-minute rate limits that hurt MAP).
+                    Its MAP cache is pre-populated with the batch results so MAP
+                    is skipped entirely when process() is called.
+    """
+    from pipeline.stages.summarization.batch.runner import BatchSummarizationRunner
+    from pipeline.stages.summarization.batch.models import VoterBatchConfig
+    from pipeline.stages.summarization import SummarizationRunner
+    from database import get_db_connection
+
+    haiku  = VoterBatchConfig(model="claude-haiku-4-5-20251001",  provider="claude", max_tokens=4096)
+    sonnet = VoterBatchConfig(model="claude-sonnet-4-6-20251001", provider="claude", max_tokens=4096)
+    sync_llm = build_llm()  # Gemini Flash Lite — used for NORMALIZE/CANONICALIZE/REDUCE
+
+    batch_runner = BatchSummarizationRunner(
+        l1_voters=[haiku],
+        l2_voters=[haiku],
+        l3_model=sonnet,
+        escalation_llm=sync_llm,
+        theta=0.0,          # single voter → always KEEP, no escalation
+        chunk_size=10,
+        grounding_threshold=None if skip_nli else 0.3,
+        contradiction_similarity_threshold=None,
+        output_dir=Path("out/summaries"),
+    )
+    sync_runner = SummarizationRunner(
+        voter_llms=[sync_llm],
+        level2_voter_llms=[sync_llm],
+        escalation_llm=sync_llm,
+        theta=0.0,
+        chunk_size=10,
+        grounding_threshold=None if skip_nli else 0.3,
+        contradiction_similarity_threshold=None,
+        canonicalize_with_llm=not no_canon,
+        nli_entailment_threshold=0.50,
+        nli_contradiction_threshold=0.50,
+        output_dir=Path("out/summaries"),
+        db=get_db_connection(),
+        run_ner=not skip_ner,
+    )
+    return batch_runner, sync_runner
+
 
 def build_runner(
     *,
@@ -122,6 +179,92 @@ def _fetch_all_pmcids() -> list[str]:
             row.pmcid
             for row in session.query(Document.pmcid).order_by(Document.pmcid).all()
         ]
+
+
+def run_batch_mode(
+    pmcids: list[str],
+    args,
+) -> list[dict]:
+    """
+    Submit MAP for all pmcids in parallel via the Anthropic batch API, poll
+    until complete, then run NORMALIZE→RESOLVE synchronously for each paper.
+
+    Handles are persisted to out/summaries/batch_handles/{pmcid}.batch.json so
+    the process can be interrupted and resumed — restart with the same command
+    and the script picks up from where it left off.
+    """
+    import time
+    from pipeline.stages.summarization.batch.models import BatchPhase
+    from pipeline.stages.summarization.models import AuditableSummary
+
+    logger.info("Building batch runners (Claude Haiku 4.5 + Gemini Flash Lite)…")
+    batch_runner, sync_runner = build_batch_runners(
+        skip_nli=args.skip_nli,
+        no_canon=args.no_canon,
+        skip_ner=args.skip_ner,
+    )
+
+    # Load file data
+    file_data_map: dict[str, dict] = {}
+    for pmcid in pmcids:
+        logger.info("Loading %s from database…", pmcid)
+        try:
+            fd = sync_runner.load_paper_from_db(pmcid)
+            if args.chunks is not None:
+                cap = args.chunks * 10
+                fd = {**fd, "sentences_with_provenance": fd["sentences_with_provenance"][:cap]}
+                logger.info("[%s] Capped to first %d sentences", pmcid, cap)
+            file_data_map[pmcid] = fd
+        except ValueError as exc:
+            logger.error("%s", exc)
+
+    if not file_data_map:
+        logger.error("No papers loaded — aborting.")
+        return []
+
+    # Submit (or resume) all papers
+    handles: dict[str, object] = {}
+    for pmcid, fd in file_data_map.items():
+        handle = batch_runner.load_or_submit(fd)
+        handles[pmcid] = handle
+        logger.info("[%s] Phase: %s", pmcid, handle.phase.value)
+
+    # Poll until all COMPLETE
+    poll_interval = args.poll_interval
+    while True:
+        pending = [p for p, h in handles.items() if h.phase != BatchPhase.COMPLETE]
+        if not pending:
+            logger.info("All batch MAP phases complete.")
+            break
+        logger.info(
+            "%d paper(s) still in batch: %s — sleeping %ds "
+            "(Ctrl+C safe; handles on disk, restart to resume)",
+            len(pending), ", ".join(pending), poll_interval,
+        )
+        time.sleep(poll_interval)
+        for pmcid in pending:
+            handles[pmcid] = batch_runner.advance(handles[pmcid])
+            logger.info("[%s] Phase after advance: %s", pmcid, handles[pmcid].phase.value)
+
+    # Populate sync runner MAP cache and run NORMALIZE→RESOLVE for each paper
+    results: list[dict] = []
+    for pmcid, handle in handles.items():
+        logger.info("[%s] Populating MAP cache from batch results…", pmcid)
+        for chunk_id, sentences in handle.chunk_map.items():
+            if chunk_id in handle.finalized:
+                summary = AuditableSummary.model_validate(handle.finalized[chunk_id])
+                sync_runner._cache.set_map(sentences, summary)
+        sync_runner._cache.save()
+
+        logger.info("[%s] Running NORMALIZE → RESOLVE (MAP from cache)…", pmcid)
+        result = sync_runner.process(file_data_map[pmcid])
+        if result["status"] == "error":
+            logger.error("[%s] Pipeline failed: %s", pmcid, result.get("error"))
+        else:
+            _print_result(result)
+        results.append(result)
+
+    return results
 
 
 def list_pmcids() -> None:
@@ -220,6 +363,13 @@ def main() -> None:
                         help="Pick N random papers from the database (cannot be combined with pmcid args)")
     parser.add_argument("--seed",        type=int, default=42,
                         help="Random seed for --random (default: 42)")
+    parser.add_argument("--batch",       action="store_true",
+                        help="Use Anthropic batch API for MAP (no rate limits, 50%% cheaper). "
+                             "Requires ANTHROPIC_API_KEY. Polls until complete, then runs "
+                             "NORMALIZE→RESOLVE synchronously.")
+    parser.add_argument("--poll-interval", type=int, default=30, metavar="SECS",
+                        help="Seconds between batch status checks (default: 30). "
+                             "Only used with --batch.")
     args = parser.parse_args()
 
     if args.list_only:
@@ -240,40 +390,45 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
-    logger.info("Building single-model runner (Gemini 2.5 Flash Lite)…")
-    runner = build_runner(
-        trace=args.trace,
-        skip_nli=args.skip_nli,
-        no_canon=args.no_canon,
-        force_rerun=args.force_rerun,
-        skip_ner=args.skip_ner,
-    )
+    # ── Batch mode (Claude Haiku batch API for MAP) ────────────────────────────
+    if args.batch:
+        results = run_batch_mode(pmcids, args)
+        n_ok = sum(1 for r in results if r["status"] == "success")
+    else:
+        # ── Sync mode (Gemini Flash Lite, one paper at a time) ─────────────────
+        logger.info("Building single-model runner (Gemini 2.5 Flash Lite)…")
+        runner = build_runner(
+            trace=args.trace,
+            skip_nli=args.skip_nli,
+            no_canon=args.no_canon,
+            force_rerun=args.force_rerun,
+            skip_ner=args.skip_ner,
+        )
 
-    # ── Process each paper ─────────────────────────────────────────────────────
-    results = []
-    for pmcid in pmcids:
-        logger.info("Loading %s from database…", pmcid)
-        try:
-            file_data = runner.load_paper_from_db(pmcid)
-        except ValueError as exc:
-            logger.error("%s", exc)
-            continue
+        results = []
+        for pmcid in pmcids:
+            logger.info("Loading %s from database…", pmcid)
+            try:
+                file_data = runner.load_paper_from_db(pmcid)
+            except ValueError as exc:
+                logger.error("%s", exc)
+                continue
 
-        sentences = file_data["sentences_with_provenance"]
-        if args.chunks is not None:
-            cap = args.chunks * 10
-            sentences = sentences[:cap]
-            file_data = {**file_data, "sentences_with_provenance": sentences}
-            logger.info("Capped to first %d sentences (%d chunks)", cap, args.chunks)
+            sentences = file_data["sentences_with_provenance"]
+            if args.chunks is not None:
+                cap = args.chunks * 10
+                sentences = sentences[:cap]
+                file_data = {**file_data, "sentences_with_provenance": sentences}
+                logger.info("Capped to first %d sentences (%d chunks)", cap, args.chunks)
 
-        logger.info("Starting pipeline on %d sentences…", len(sentences))
-        result = runner.process(file_data)
+            logger.info("Starting pipeline on %d sentences…", len(sentences))
+            result = runner.process(file_data)
 
-        if result["status"] == "error":
-            logger.error("Pipeline failed for %s: %s", pmcid, result.get("error"))
-        else:
-            _print_result(result)
-        results.append(result)
+            if result["status"] == "error":
+                logger.error("Pipeline failed for %s: %s", pmcid, result.get("error"))
+            else:
+                _print_result(result)
+            results.append(result)
 
     n_ok = sum(1 for r in results if r["status"] == "success")
     if len(pmcids) > 1:
@@ -287,10 +442,8 @@ def main() -> None:
     if not args.no_corpus and not args.skip_nli and n_ok >= 2:
         logger.info("Running corpus-level relation stage…")
         try:
-            runner.corpus_relate(
-                source_dir=summaries_dir,
-                output_path=corpus_json,
-            )
+            from pipeline.stages.summarization.corpus_relate import CorpusRelateStage
+            CorpusRelateStage().relate_from_dir(summaries_dir, corpus_json)
             ran_corpus = True
         except Exception as exc:
             logger.warning("Corpus relate failed (non-fatal): %s", exc)

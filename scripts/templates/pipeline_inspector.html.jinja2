@@ -6,7 +6,7 @@
 <title>Pipeline Inspector — {{ pmcid }}</title>
 <!-- sentence_lookup is injected as a JS object for hover tooltips -->
 <script>
-const SENTENCE_LOOKUP = {{ sentence_lookup_json }};
+const SENTENCE_LOOKUP = {{ sentence_lookup_json | safe }};
 </script>
 <style>
   :root {
@@ -77,7 +77,7 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json }};
   .warn-red { color: var(--red); margin-right: 4px; }
 
   /* Cards */
-  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 10px; overflow: hidden; }
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 10px; overflow: visible; }
   .card.flagged { border-color: var(--orange); }
   .card.contradicted { border-color: var(--red); }
   .card-header { padding: 10px 14px; cursor: pointer; display: flex; align-items: flex-start; gap: 10px; user-select: none; background: var(--bg2); }
@@ -140,15 +140,13 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json }};
   /* Sticky section headers */
   .section-anchor { scroll-margin-top: 20px; }
 
-  /* Sentence hover tooltip */
-  .ev-tag { position: relative; cursor: help; }
-  .ev-tag .ev-tooltip {
+  /* Evidence badge hover + click */
+  .ev-tag { cursor: pointer; }
+  #ev-floating-tooltip {
     display: none;
-    position: absolute;
-    bottom: calc(100% + 6px);
-    left: 0;
+    position: fixed;
     min-width: 280px;
-    max-width: 420px;
+    max-width: 560px;
     background: #2a2d3e;
     border: 1px solid var(--accent);
     border-radius: 5px;
@@ -158,11 +156,53 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json }};
     font-family: var(--font-ui);
     line-height: 1.5;
     white-space: normal;
-    z-index: 100;
+    z-index: 9999;
     box-shadow: 0 4px 16px rgba(0,0,0,0.5);
     word-break: break-word;
+    pointer-events: none;
   }
-  .ev-tag:hover .ev-tooltip { display: block; }
+  /* Pinned source-text panel (click to open) */
+  #ev-pinned-panel {
+    display: none;
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    width: 480px;
+    max-height: 50vh;
+    overflow-y: auto;
+    background: #1a1d27;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 12px 14px;
+    font-size: 0.82rem;
+    color: var(--text);
+    font-family: var(--font-ui);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    z-index: 10000;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.6);
+    word-break: break-word;
+  }
+  #ev-pinned-panel .ev-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+  }
+  #ev-pinned-panel .ev-panel-close {
+    cursor: pointer;
+    color: var(--accent);
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0 2px;
+  }
+  #ev-pinned-panel .ev-panel-body {
+    font-style: italic;
+    border-left: 3px solid var(--accent2);
+    padding-left: 10px;
+  }
 
   /* Responsive tweaks */
   @media (max-width: 900px) {
@@ -176,6 +216,25 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json }};
   <!-- Sidebar nav -->
   <div class="sidebar">
     <div class="sidebar-title">Pipeline Inspector</div>
+    {% if live_mode is defined and live_mode %}
+    <div style="padding: 0 16px 12px;">
+      <a href="/" style="font-size:0.8rem; color:var(--text-dim);">← All papers</a>
+    </div>
+    {% if available_runs is defined and available_runs|length > 1 %}
+    <div style="padding: 0 16px 12px;">
+      <div style="font-size:0.75rem; color:var(--text-dim); margin-bottom:4px;">Run</div>
+      <select onchange="window.location='/paper/{{ pmcid }}/'+this.value"
+              style="width:100%; background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:5px 8px; border-radius:4px; font-size:0.82rem;">
+        {% for r in available_runs %}
+        <option value="{{ r.run_id }}" {% if r.run_id == current_run_id %}selected{% endif %}>
+          {{ r.started_at[:16] if r.started_at else r.run_id }}
+          {% if r.status != 'success' %}({{ r.status }}){% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+    {% endif %}
+    {% endif %}
     <nav>
       <a href="#overview">Overview</a>
       <a href="#final-rules">Final Rules ({{ final_rules|length }})</a>
@@ -332,7 +391,30 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json }};
                   — {{ fr.predicate_text[:120] }}{% if fr.predicate_text|length > 120 %}…{% endif %}
                 </div>
               </div>
-              <!-- Normal findings -->
+              <!-- Normal findings with source spans -->
+              {% set normal_findings = fr.lineage.normal_findings if fr.lineage else [] %}
+              {% for nf in normal_findings %}
+              <div class="lineage-connector"></div>
+              <div class="lineage-step">
+                <div class="step-label">NORMAL</div>
+                <div class="step-content">
+                  <code>{{ nf.normal_id }}</code>
+                  {% if nf.predicate_text %}<span style="color:var(--text-dim)"> — {{ nf.predicate_text[:120] }}{% if nf.predicate_text|length > 120 %}…{% endif %}</span>{% endif %}
+                  {% for span in nf.spans %}
+                  <div style="margin-top:6px; border-left:2px solid var(--border); padding-left:8px;">
+                    <div style="font-size:0.72rem; color:var(--text-dim); margin-bottom:2px;">
+                      {{ span.sentence_id }}{% if span.text_element_id %} · te:{{ span.text_element_id }}{% endif %}
+                    </div>
+                    <div class="verbatim"><strong>Sentence:</strong> {{ span.verbatim[:300] }}{% if span.verbatim|length > 300 %}…{% endif %}</div>
+                    {% if span.paragraph and span.paragraph != span.verbatim %}
+                    <div class="verbatim" style="margin-top:4px; color:var(--text-dim);"><strong>Paragraph:</strong> {{ span.paragraph[:600] }}{% if span.paragraph|length > 600 %}…{% endif %}</div>
+                    {% endif %}
+                  </div>
+                  {% endfor %}
+                </div>
+              </div>
+              {% endfor %}
+              {% if not normal_findings %}
               {% for nid in fr.member_normal_ids or [] %}
               <div class="lineage-connector"></div>
               <div class="lineage-step">
@@ -340,6 +422,7 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json }};
                 <div class="step-content"><code>{{ nid }}</code></div>
               </div>
               {% endfor %}
+              {% endif %}
               <!-- MAP findings (matched by subject/outcome) -->
               {% if fr.lineage.map_findings %}
               {% for mf in fr.lineage.map_findings %}
@@ -358,7 +441,7 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json }};
                   <div class="verbatim">{{ mf.verbatim_support[:300] }}{% if mf.verbatim_support|length > 300 %}…{% endif %}</div>
                   {% endif %}
                   {% if mf.evidence %}
-                  <div style="margin-top:4px;">{% for ev in mf.evidence %}<span class="tag ev-tag" data-ev="{{ ev }}">{{ ev }}<span class="ev-tooltip"></span></span>{% endfor %}</div>
+                  <div style="margin-top:4px;">{% for ev in mf.evidence %}<span class="tag ev-tag" data-ev="{{ ev }}">{{ ev }}</span>{% endfor %}</div>
                   {% endif %}
                 </div>
               </div>
@@ -548,7 +631,7 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json }};
               <tr><td>direction</td><td>{{ f.direction or '—' }}</td></tr>
               <tr><td>confidence</td><td>{{ f.confidence or '—' }}</td></tr>
               <tr><td>grounding_score</td><td>{{ '%.4f'|format(f.grounding_score) if f.grounding_score is not none else '—' }}</td></tr>
-              <tr><td>evidence</td><td>{% for ev in (f.evidence or []) %}<span class="tag ev-tag" data-ev="{{ ev }}">{{ ev }}<span class="ev-tooltip"></span></span>{% endfor %}</td></tr>
+              <tr><td>evidence</td><td>{% for ev in (f.evidence or []) %}<span class="tag ev-tag" data-ev="{{ ev }}">{{ ev }}</span>{% endfor %}</td></tr>
               {% if f.verbatim_support %}<tr><td>verbatim_support</td><td><div class="verbatim">{{ f.verbatim_support }}</div></td></tr>{% endif %}
               {% if f.scope %}
               <tr><td>scope</td><td>
@@ -654,20 +737,6 @@ const SENTENCE_LOOKUP = {{ sentence_lookup_json }};
       {% endif %}
     </div>
 
-    <!-- Phase 2 ideas -->
-    <div class="section" style="margin-top:60px; padding-top:20px; border-top:1px solid var(--border);">
-      <h2>Possible Phase 2 Improvements</h2>
-      <ul style="color:var(--text-dim); line-height:2; padding-left:20px;">
-        <li>DB-backed viewer — load runs directly from PostgreSQL, browse across papers</li>
-        <li>Cross-run diff view — compare two run_ids for the same PMCID side-by-side</li>
-        <li>Clickable rule lineage graph — DAG visualization (FINAL → CANONICAL → NORMAL → MAP)</li>
-        <li>Richer normalization anomaly detection — flag entity strings that look like taxonomy classes, procedures, or anatomical structures instead of conditions</li>
-        <li>Assertion polarity checker — NLI-based check: does assertion_status match claim sentiment?</li>
-        <li>Batch inspector — generate one HTML per run, with an index page linking all papers</li>
-        <li>Export flagged findings to CSV for human review queue</li>
-        <li>Sentence hover — show original sentence text when hovering over sentence IDs (e.g. S2|PMC10047158|5)</li>
-      </ul>
-    </div>
 
   </div><!-- /main -->
 </div><!-- /layout -->
@@ -706,17 +775,81 @@ function filterCards(prefix) {
   });
 }
 
-// Sentence hover — populate tooltip text from SENTENCE_LOOKUP
+// Evidence badge: hover = floating quick-look, click = pinned scrollable panel
 (function() {
+  // ── Floating hover tooltip (quick preview) ────────────────────────────
+  var tip = document.createElement('div');
+  tip.id = 'ev-floating-tooltip';
+  document.body.appendChild(tip);
+
+  function showTip(e) {
+    if (pinnedEv) return; // suppress hover while panel is open
+    var ev = this.dataset.ev;
+    var text = SENTENCE_LOOKUP[ev];
+    tip.textContent = text ? ('\u201c' + text + '\u201d') : '(no source text for ' + ev + ')';
+    tip.style.display = 'block';
+    moveTip(e);
+  }
+  function moveTip(e) {
+    if (pinnedEv) return;
+    var x = e.clientX + 14;
+    var y = e.clientY - tip.offsetHeight - 10;
+    if (y < 4) y = e.clientY + 18;
+    if (x + tip.offsetWidth > window.innerWidth - 4) x = e.clientX - tip.offsetWidth - 14;
+    tip.style.left = x + 'px';
+    tip.style.top  = y + 'px';
+  }
+  function hideTip() { tip.style.display = 'none'; }
+
+  // ── Pinned panel (click to open, scrollable) ──────────────────────────
+  var panel = document.createElement('div');
+  panel.id = 'ev-pinned-panel';
+  panel.innerHTML =
+    '<div class="ev-panel-header">' +
+      '<span id="ev-panel-token"></span>' +
+      '<span class="ev-panel-close" title="Close">\u00d7</span>' +
+    '</div>' +
+    '<div class="ev-panel-body" id="ev-panel-body"></div>';
+  document.body.appendChild(panel);
+
+  var pinnedEv = null;
+
+  panel.querySelector('.ev-panel-close').addEventListener('click', function() {
+    panel.style.display = 'none';
+    pinnedEv = null;
+  });
+
+  function openPanel(ev) {
+    var text = SENTENCE_LOOKUP[ev];
+    document.getElementById('ev-panel-token').textContent = ev;
+    document.getElementById('ev-panel-body').textContent =
+      text ? ('\u201c' + text + '\u201d') : '(no source text for ' + ev + ')';
+    panel.style.display = 'block';
+    panel.scrollTop = 0;
+    pinnedEv = ev;
+    hideTip();
+  }
+
   document.querySelectorAll('.ev-tag').forEach(function(tag) {
-    const ev = tag.dataset.ev;
-    const tooltip = tag.querySelector('.ev-tooltip');
-    if (!tooltip) return;
-    const text = SENTENCE_LOOKUP[ev];
-    if (text) {
-      tooltip.textContent = '\u201c' + text + '\u201d';
-    } else {
-      tooltip.textContent = '(sentence text unavailable for ' + ev + ')';
+    tag.addEventListener('mouseenter', showTip);
+    tag.addEventListener('mousemove',  moveTip);
+    tag.addEventListener('mouseleave', hideTip);
+    tag.addEventListener('click', function(e) {
+      e.stopPropagation();
+      if (pinnedEv === this.dataset.ev) {
+        panel.style.display = 'none';
+        pinnedEv = null;
+      } else {
+        openPanel(this.dataset.ev);
+      }
+    });
+  });
+
+  // Click outside panel closes it
+  document.addEventListener('click', function(e) {
+    if (pinnedEv && !panel.contains(e.target)) {
+      panel.style.display = 'none';
+      pinnedEv = null;
     }
   });
 })();

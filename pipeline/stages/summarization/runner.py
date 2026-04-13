@@ -452,7 +452,10 @@ class SummarizationRunner:
                     "rules_provenance": rules.model_dump(),
                 },
             }
-            self._finish_pipeline_run(pipeline_run_db_id, "success")
+            self._finish_pipeline_run(
+                pipeline_run_db_id, "success",
+                narrative_summary=master.narrative_summary,
+            )
             self._save_result(result)
             self._cache.save()
 
@@ -463,6 +466,12 @@ class SummarizationRunner:
 
             return result
 
+        except KeyboardInterrupt:
+            logger.warning("[%s] Pipeline interrupted (KeyboardInterrupt)", pmcid)
+            self._finish_pipeline_run(pipeline_run_db_id, "interrupted", error="KeyboardInterrupt")
+            if collector is not None:
+                flush_collector(collector, self.trace_dir, status="interrupted", error="KeyboardInterrupt")
+            raise
         except Exception as exc:
             logger.exception("[%s] Pipeline failed: %s", pmcid, exc)
             self._finish_pipeline_run(pipeline_run_db_id, "failed", error=str(exc))
@@ -648,6 +657,7 @@ class SummarizationRunner:
         db_id: int | None,
         status: str,
         error: str | None = None,
+        narrative_summary: str | None = None,
     ) -> None:
         """
         Update a pipeline_runs row to its final status.
@@ -665,6 +675,8 @@ class SummarizationRunner:
                     run.status = status
                     run.finished_at = datetime.now(tz=timezone.utc)
                     run.error = error
+                    if narrative_summary is not None:
+                        run.narrative_summary = narrative_summary
         except Exception as exc:
             logger.warning("DB: failed to update pipeline_run id=%s: %s", db_id, exc)
 

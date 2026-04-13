@@ -336,6 +336,9 @@ class PipelineRun(Base):
     # Set on failure
     error = Column(Text, nullable=True)
 
+    # Narrative summary produced by the REDUCE stage
+    narrative_summary = Column(Text, nullable=True)
+
     started_at = Column(TIMESTAMP, nullable=False, default=func.now())
     finished_at = Column(TIMESTAMP, nullable=True)
 
