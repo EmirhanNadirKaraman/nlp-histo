@@ -553,13 +553,17 @@ class SumCanonicalRule(Base):
     member_normal_ids    = Column(ARRAY(Text), nullable=True)
     mean_grounding_score = Column(Float,       nullable=True)
     finding_count        = Column(Integer,     nullable=False)
+    subject_cui          = Column(String(20),  nullable=True)   # UMLS CUI for subject_entity
+    outcome_cui          = Column(String(20),  nullable=True)   # UMLS CUI for outcome_entity
     created_at           = Column(TIMESTAMP,   server_default="now()")
 
     __table_args__ = (
-        Index("ix_scr_run",     "pipeline_run_id"),
-        Index("ix_scr_pmcid",   "pmcid"),
-        Index("ix_scr_subject", "subject_entity"),
-        Index("ix_scr_outcome", "outcome_entity"),
+        Index("ix_scr_run",          "pipeline_run_id"),
+        Index("ix_scr_pmcid",        "pmcid"),
+        Index("ix_scr_subject",      "subject_entity"),
+        Index("ix_scr_outcome",      "outcome_entity"),
+        Index("ix_scr_subject_cui",  "subject_cui"),
+        Index("ix_scr_outcome_cui",  "outcome_cui"),
         UniqueConstraint("pipeline_run_id", "canonical_id", name="uq_sum_canonical_rule"),
     )
 
@@ -622,4 +626,63 @@ class SumFinalRule(Base):
         Index("ix_sfr_subject", "subject_entity"),
         Index("ix_sfr_outcome", "outcome_entity"),
         UniqueConstraint("pipeline_run_id", "final_id", name="uq_sum_final_rule"),
+    )
+
+
+# ── Corpus-level relations (cross-paper / intra-paper graph) ──────────────────
+
+class SumCorpusRelation(Base):
+    """
+    One row per relation produced by CorpusRelateStage.
+
+    The table is replaced wholesale on each CorpusRelateStage run — there is
+    no per-paper FK since corpus relations span all papers.  corpus_run_id is
+    a YYYYMMDDTHHmmss timestamp string that identifies which run wrote the row.
+
+    comparison_scope: "cross_paper" | "intra_paper"
+    relation_type:    "SUPPORT" | "CONTRADICT" | "SCOPE_QUALIFY"
+    """
+    __tablename__ = "sum_corpus_relations"
+
+    id                   = Column(Integer,     primary_key=True, autoincrement=True)
+    corpus_run_id        = Column(String(20),  nullable=False, index=True)
+    relation_id          = Column(String(20),  nullable=False)      # COR_{sha8}
+    comparison_scope     = Column(String(20),  nullable=False)      # cross_paper | intra_paper
+    same_paper           = Column(Boolean,     nullable=False)
+    rule_id_a            = Column(String(100), nullable=False)
+    rule_id_b            = Column(String(100), nullable=False)
+    pmcid_a              = Column(String(50),  nullable=False)
+    pmcid_b              = Column(String(50),  nullable=False)
+    relation_type        = Column(String(20),  nullable=False)
+    nli_score_a_to_b     = Column(Float,       nullable=False)
+    nli_score_b_to_a     = Column(Float,       nullable=False)
+    subject_entity       = Column(Text,        nullable=False)
+    outcome_entity       = Column(Text,        nullable=False)
+    category             = Column(String(50),  nullable=False)
+    relation_type_structural = Column(String(50), nullable=False)
+    direction_a          = Column(String(20),  nullable=True)
+    direction_b          = Column(String(20),  nullable=True)
+    predicate_a          = Column(Text,        nullable=False)
+    predicate_b          = Column(Text,        nullable=False)
+    mean_grounding_a     = Column(Float,       nullable=True)
+    mean_grounding_b     = Column(Float,       nullable=True)
+    finding_count_a      = Column(Integer,     nullable=False)
+    finding_count_b      = Column(Integer,     nullable=False)
+    supporting_pmcids_a  = Column(ARRAY(Text), nullable=True)
+    supporting_pmcids_b  = Column(ARRAY(Text), nullable=True)
+    canonical_scope_a    = Column(String(30),  nullable=False)
+    canonical_scope_b    = Column(String(30),  nullable=False)
+    scope_check_result   = Column(String(30),  nullable=False, default="scope_unknown")
+    scope_note           = Column(Text,        nullable=True)
+    created_at           = Column(TIMESTAMP,   server_default="now()")
+
+    __table_args__ = (
+        Index("ix_screl_run",       "corpus_run_id"),
+        Index("ix_screl_scope",     "comparison_scope"),
+        Index("ix_screl_pmcid_a",   "pmcid_a"),
+        Index("ix_screl_pmcid_b",   "pmcid_b"),
+        Index("ix_screl_rule_a",    "rule_id_a"),
+        Index("ix_screl_rule_b",    "rule_id_b"),
+        Index("ix_screl_type",      "relation_type"),
+        UniqueConstraint("corpus_run_id", "relation_id", name="uq_sum_corpus_relation"),
     )

@@ -236,6 +236,7 @@ class RelateStage:
         self,
         rules: list[CanonicalRule],
         pmcid: str = "",
+        gate=None,
     ) -> list[Relation]:
         """
         Compare all eligible pairs of CanonicalRules and return non-UNRELATED
@@ -247,6 +248,11 @@ class RelateStage:
             Output of CanonicalizeStage.canonicalize().
         pmcid:
             For logging only.
+        gate:
+            Callable(a, b) -> (bool, str) used to filter pairs before NLI.
+            Defaults to _should_compare (strict: category + relation_type +
+            subject + outcome must all match).  Pass a looser function for
+            cross-paper mode where entity names differ across papers.
 
         Returns
         -------
@@ -255,15 +261,16 @@ class RelateStage:
         if len(rules) < 2:
             return []
 
+        _gate = gate if gate is not None else _should_compare
         pipe = _get_nli_pipe(self._model_name)
 
-        # Generate eligible pairs — strict gate
+        # Generate eligible pairs
         eligible: list[tuple[int, int]] = []
         rejection_counts: dict[str, int] = {}
         all_pairs = list(itertools.combinations(range(len(rules)), 2))
 
         for i, j in all_pairs:
-            ok, reason = _should_compare(rules[i], rules[j])
+            ok, reason = _gate(rules[i], rules[j])
             if ok:
                 eligible.append((i, j))
             else:

@@ -20,6 +20,7 @@ from .models import (
     SumCanonicalRule,
     SumRelation,
     SumFinalRule,
+    SumCorpusRelation,
     Base,
 )
 from .db_connection import (
@@ -47,6 +48,7 @@ __all__ = [
     'SumCanonicalRule',
     'SumRelation',
     'SumFinalRule',
+    'SumCorpusRelation',
     'Base',
     'DatabaseConnection',
     'get_db_connection',

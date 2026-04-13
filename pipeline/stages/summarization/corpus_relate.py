@@ -61,16 +61,18 @@ Via SummarizationRunner (after process_batch):
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import logging
 import re
+import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import CanonicalRule, CorpusRelation
-from .relate_stage import RelateStage
+from .relate_stage import RelateStage, _norm_outcome_expression
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,47 @@ def _run_id_ts(run_id: str) -> str:
     """Extract the YYYYMMDDTHHmmss suffix from run_id, or "" if absent."""
     m = _TS_RE.search(run_id or "")
     return m.group(1) if m else ""
+
+
+def _should_compare_cross_paper(
+    a: CanonicalRule, b: CanonicalRule
+) -> tuple[bool, str]:
+    """
+    Gate for cross-paper comparison.
+
+    Entity names for the same concept differ across papers ("MGA" vs
+    "microglandular adenosis"), so we cannot use exact string matching.
+
+    Priority:
+      1. category must match exactly.
+      2. relation_type must match exactly.
+      3. subject: if BOTH rules have a CUI, they must share it.
+         If either lacks a CUI, skip subject gating and let NLI decide.
+      4. For expression rules: outcome marker must match (CUI if available,
+         else normalized string) — prevents comparing unrelated markers.
+    """
+    from .models import RelationTypeEnum  # noqa: PLC0415
+
+    if a.category != b.category:
+        return False, "category_mismatch"
+    if a.relation_type != b.relation_type:
+        return False, "relation_type_mismatch"
+
+    # Subject CUI gate (only when both rules have been enriched)
+    if a.subject_cui and b.subject_cui:
+        if a.subject_cui != b.subject_cui:
+            return False, "subject_cui_mismatch"
+
+    # Outcome gate for expression rules
+    if a.relation_type == RelationTypeEnum.expression:
+        if a.outcome_cui and b.outcome_cui:
+            if a.outcome_cui != b.outcome_cui:
+                return False, "outcome_cui_incompatible"
+        else:
+            if _norm_outcome_expression(a.outcome_entity) != _norm_outcome_expression(b.outcome_entity):
+                return False, "outcome_incompatible"
+
+    return True, ""
 
 
 class CorpusRelateStage:
@@ -112,11 +155,13 @@ class CorpusRelateStage:
         self,
         entailment_threshold: float = 0.50,
         contradiction_threshold: float = 0.50,
+        db=None,
     ) -> None:
         self._relate = RelateStage(
             entailment_threshold=entailment_threshold,
             contradiction_threshold=contradiction_threshold,
         )
+        self._db = db  # optional DatabaseConnection for DB persistence
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -179,7 +224,7 @@ class CorpusRelateStage:
         rule_meta: dict[str, dict] = {}      # canonical_id → raw rule dict
         pmcids_loaded: list[str] = []
 
-        for pmcid, (_path, data) in selected.items():
+        for pmcid, (_, data) in selected.items():
             raw_rules = data.get("canonical_rules") or []
             pmcids_loaded.append(pmcid)
             for rd in raw_rules:
@@ -207,7 +252,9 @@ class CorpusRelateStage:
             )
             corpus_relations: list[CorpusRelation] = []
         else:
-            raw_relations = self._relate.relate(all_rules, pmcid="corpus")
+            raw_relations = self._relate.relate(
+                all_rules, pmcid="corpus", gate=_should_compare_cross_paper,
+            )
             logger.info(
                 "CORPUS RELATE: %d raw relations from pool of %d rules",
                 len(raw_relations), len(all_rules),
@@ -238,7 +285,234 @@ class CorpusRelateStage:
             "(%d intra-paper, %d cross-paper) → %s",
             len(corpus_relations), intra_count, cross_count, output_path,
         )
+
+        if self._db is not None:
+            self._persist_to_db(corpus_relations)
+
         return corpus_relations
+
+    # ── Incremental API ────────────────────────────────────────────────────────
+
+    def relate_incremental(
+        self,
+        new_pmcid: str,
+        new_rules: list[CanonicalRule],
+        db,
+    ) -> list[CorpusRelation]:
+        """
+        Update corpus relations for a newly processed paper without a full re-run.
+
+        Loads canonical rules for all other PMCIDs from the DB (latest run per
+        PMCID), compares them against new_rules using the cross-paper gate and
+        NLI, then replaces all corpus relations touching new_pmcid in DB.
+
+        No-ops (returns []) if new_rules is empty or no other PMCIDs exist in DB.
+        """
+        if not new_rules:
+            logger.info(
+                "CORPUS RELATE [%s]: no canonical rules — incremental skipped", new_pmcid,
+            )
+            return []
+
+        existing_rules, id_to_pmcid, rule_meta = self._load_rules_from_db(new_pmcid, db)
+
+        if not existing_rules:
+            logger.info(
+                "CORPUS RELATE [%s]: no other papers in DB — incremental skipped", new_pmcid,
+            )
+            return []
+
+        # Register new paper's rules in the lookup maps
+        for rule in new_rules:
+            id_to_pmcid[rule.canonical_id] = new_pmcid
+            rule_meta[rule.canonical_id] = rule.model_dump()
+
+        all_rules = new_rules + existing_rules
+
+        # Gate: only cross-paper pairs where exactly one rule is from new_pmcid
+        def _incremental_gate(
+            a: CanonicalRule, b: CanonicalRule
+        ) -> tuple[bool, str]:
+            a_new = id_to_pmcid.get(a.canonical_id) == new_pmcid
+            b_new = id_to_pmcid.get(b.canonical_id) == new_pmcid
+            if not (a_new ^ b_new):
+                return False, "not_incremental_pair"
+            return _should_compare_cross_paper(a, b)
+
+        logger.info(
+            "CORPUS RELATE [%s]: comparing %d new rules × %d existing rules",
+            new_pmcid, len(new_rules), len(existing_rules),
+        )
+        raw_relations = self._relate.relate(
+            all_rules, pmcid="corpus", gate=_incremental_gate,
+        )
+        logger.info(
+            "CORPUS RELATE [%s]: %d cross-paper relations found",
+            new_pmcid, len(raw_relations),
+        )
+
+        corpus_relations = self._enrich(raw_relations, id_to_pmcid, rule_meta)
+        self._replace_for_pmcid(new_pmcid, corpus_relations, db)
+        return corpus_relations
+
+    def _load_rules_from_db(
+        self,
+        exclude_pmcid: str,
+        db,
+    ) -> tuple[list[CanonicalRule], dict[str, str], dict[str, dict]]:
+        """
+        Load canonical rules from DB for all PMCIDs except exclude_pmcid.
+        Uses the latest pipeline_run_id per PMCID.
+        Returns (rules, id_to_pmcid, rule_meta).
+        """
+        from .models import (  # noqa: PLC0415
+            CanonicalScopeEnum, DirectionEnum, RelationTypeEnum,
+        )
+
+        rules: list[CanonicalRule] = []
+        id_to_pmcid: dict[str, str] = {}
+        rule_meta: dict[str, dict] = {}
+
+        try:
+            from database.models import SumCanonicalRule  # noqa: PLC0415
+            from sqlalchemy import func  # noqa: PLC0415
+
+            with db.session_scope() as session:
+                latest_run_subq = (
+                    session.query(
+                        SumCanonicalRule.pmcid,
+                        func.max(SumCanonicalRule.pipeline_run_id).label("max_run"),
+                    )
+                    .filter(SumCanonicalRule.pmcid != exclude_pmcid)
+                    .group_by(SumCanonicalRule.pmcid)
+                    .subquery()
+                )
+                rows = (
+                    session.query(SumCanonicalRule)
+                    .join(
+                        latest_run_subq,
+                        (SumCanonicalRule.pmcid == latest_run_subq.c.pmcid)
+                        & (SumCanonicalRule.pipeline_run_id == latest_run_subq.c.max_run),
+                    )
+                    .all()
+                )
+                for row in rows:
+                    try:
+                        rule = CanonicalRule(
+                            canonical_id         = row.canonical_id,
+                            group_id             = row.group_id,
+                            subject_entity       = row.subject_entity,
+                            outcome_entity       = row.outcome_entity,
+                            relation_type        = RelationTypeEnum(row.relation_type),
+                            direction            = DirectionEnum(row.direction) if row.direction else None,
+                            predicate_text       = row.predicate_text,
+                            canonical_scope      = CanonicalScopeEnum(row.canonical_scope),
+                            category             = row.category,
+                            supporting_pmcids    = row.pmcids or [],
+                            member_normal_ids    = row.member_normal_ids or [],
+                            mean_grounding_score = row.mean_grounding_score,
+                            finding_count        = row.finding_count,
+                            subject_cui          = row.subject_cui,
+                            outcome_cui          = row.outcome_cui,
+                        )
+                        rules.append(rule)
+                        id_to_pmcid[rule.canonical_id] = row.pmcid
+                        rule_meta[rule.canonical_id] = rule.model_dump()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "CORPUS RELATE: could not reconstruct rule %r from DB — %s",
+                            row.canonical_id, exc,
+                        )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("CORPUS RELATE: failed to load rules from DB: %s", exc)
+
+        return rules, id_to_pmcid, rule_meta
+
+    def _replace_for_pmcid(
+        self,
+        pmcid: str,
+        corpus_relations: list[CorpusRelation],
+        db,
+    ) -> None:
+        """Delete all corpus relations touching pmcid, then insert the new ones."""
+        try:
+            from database.models import SumCorpusRelation  # noqa: PLC0415
+            from sqlalchemy import or_  # noqa: PLC0415
+
+            corpus_run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            rows = self._to_db_rows(corpus_relations, corpus_run_id)
+            with db.session_scope() as session:
+                session.query(SumCorpusRelation).filter(
+                    or_(
+                        SumCorpusRelation.pmcid_a == pmcid,
+                        SumCorpusRelation.pmcid_b == pmcid,
+                    )
+                ).delete(synchronize_session=False)
+                session.bulk_save_objects(rows)
+            logger.info(
+                "CORPUS RELATE [%s]: %d relations written to DB (corpus_run_id=%s)",
+                pmcid, len(rows), corpus_run_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "CORPUS RELATE [%s]: DB replace failed: %s", pmcid, exc, exc_info=True,
+            )
+
+    def _to_db_rows(
+        self, corpus_relations: list[CorpusRelation], corpus_run_id: str
+    ) -> list:
+        """Convert CorpusRelation objects to SumCorpusRelation ORM rows."""
+        from database.models import SumCorpusRelation  # noqa: PLC0415
+        return [
+            SumCorpusRelation(
+                corpus_run_id            = corpus_run_id,
+                relation_id              = r.relation_id,
+                comparison_scope         = r.comparison_scope,
+                same_paper               = r.same_paper,
+                rule_id_a                = r.rule_id_a,
+                rule_id_b                = r.rule_id_b,
+                pmcid_a                  = r.pmcid_a,
+                pmcid_b                  = r.pmcid_b,
+                relation_type            = r.relation_type.value,
+                nli_score_a_to_b         = r.nli_score_a_to_b,
+                nli_score_b_to_a         = r.nli_score_b_to_a,
+                subject_entity           = r.subject_entity,
+                outcome_entity           = r.outcome_entity,
+                category                 = r.category,
+                relation_type_structural = r.relation_type_structural,
+                direction_a              = r.direction_a,
+                direction_b              = r.direction_b,
+                predicate_a              = r.predicate_a,
+                predicate_b              = r.predicate_b,
+                mean_grounding_a         = r.mean_grounding_a,
+                mean_grounding_b         = r.mean_grounding_b,
+                finding_count_a          = r.finding_count_a,
+                finding_count_b          = r.finding_count_b,
+                supporting_pmcids_a      = list(r.supporting_pmcids_a),
+                supporting_pmcids_b      = list(r.supporting_pmcids_b),
+                canonical_scope_a        = r.canonical_scope_a,
+                canonical_scope_b        = r.canonical_scope_b,
+                scope_check_result       = r.scope_check_result,
+                scope_note               = r.scope_note,
+            )
+            for r in corpus_relations
+        ]
+
+    def _persist_to_db(self, corpus_relations: list[CorpusRelation]) -> None:
+        """Replace ALL corpus relations in the DB (batch mode)."""
+        try:
+            from database.models import SumCorpusRelation  # noqa: PLC0415
+            corpus_run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            rows = self._to_db_rows(corpus_relations, corpus_run_id)
+            with self._db.session_scope() as session:
+                session.query(SumCorpusRelation).delete()
+                session.bulk_save_objects(rows)
+            logger.info(
+                "CORPUS RELATE: persisted %d relations to DB (corpus_run_id=%s)",
+                len(rows), corpus_run_id,
+            )
+        except Exception as exc:
+            logger.warning("CORPUS RELATE: DB persist failed: %s", exc, exc_info=True)
 
     # ── Run-selection ──────────────────────────────────────────────────────────
 
@@ -450,3 +724,96 @@ class CorpusRelateStage:
             result.append(corpus_rel)
 
         return result
+
+
+# ── CLI entry point ────────────────────────────────────────────────────────────
+
+def _main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    parser = argparse.ArgumentParser(
+        description="Run corpus-level NLI relation stage over per-paper JSON summaries.",
+    )
+    parser.add_argument(
+        "source_dir",
+        nargs="?",
+        default="out/summaries/summaries",
+        help="Directory containing per-paper JSON files (default: out/summaries/summaries)",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        default=None,
+        help="Output path for corpus_relations.json "
+             "(default: <source_dir>/../corpus_relations.json)",
+    )
+    parser.add_argument(
+        "--run-selection",
+        choices=["latest_per_pmcid", "all"],
+        default="latest_per_pmcid",
+        help="Which runs to include when a PMCID has multiple files (default: latest_per_pmcid)",
+    )
+    parser.add_argument(
+        "--entailment-threshold", type=float, default=0.50,
+        help="NLI entailment score threshold (default: 0.50)",
+    )
+    parser.add_argument(
+        "--contradiction-threshold", type=float, default=0.50,
+        help="NLI contradiction score threshold (default: 0.50)",
+    )
+    parser.add_argument(
+        "--no-save-to-db", action="store_true",
+        help="Skip PostgreSQL persistence (sum_corpus_relations table). "
+             "By default, all previous rows are deleted and replaced.",
+    )
+    args = parser.parse_args()
+
+    source_dir = Path(args.source_dir)
+    if not source_dir.exists():
+        print(f"ERROR: source_dir {source_dir!r} does not exist", file=sys.stderr)
+        sys.exit(1)
+
+    output_path = (
+        Path(args.output) if args.output
+        else source_dir.parent / "corpus_relations.json"
+    )
+
+    db = None
+    if not args.no_save_to_db:
+        _repo_root = Path(__file__).resolve().parents[4]
+        if str(_repo_root) not in sys.path:
+            sys.path.insert(0, str(_repo_root))
+        try:
+            from database import get_db_connection  # noqa: PLC0415
+            db = get_db_connection()
+            print("DB connection established for corpus relation persistence.")
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR: could not connect to DB: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    stage = CorpusRelateStage(
+        entailment_threshold=args.entailment_threshold,
+        contradiction_threshold=args.contradiction_threshold,
+        db=db,
+    )
+    relations = stage.relate_from_dir(
+        source_dir=source_dir,
+        output_path=output_path,
+        run_selection=args.run_selection,
+    )
+    print(f"Done. {len(relations)} relations written to {output_path}")
+    if db is not None:
+        print("Corpus relations persisted to PostgreSQL.")
+    else:
+        print("DB persistence skipped (--no-save-to-db).")
+
+
+if __name__ == "__main__":
+    # Allow running from project root without installing the package
+    _repo_root = Path(__file__).resolve().parents[4]
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+    _main()

@@ -46,12 +46,33 @@ sys.path.insert(0, str(_ROOT))
 from inspect_pipeline_output import (  # noqa: E402
     build_context_from_db,
     build_corpus_index,
+    build_corpus_index_from_db,
     _compute_flags,
     _is_low_grounding,
+    _load_corpus_relations,
 )
 
 app = Flask(__name__)
 _LOW_GS_THRESHOLD = 0.4
+
+# Corpus index built once at startup from corpus_relations.json (if found).
+# Reloaded via GET /admin/reload-corpus without restarting the server.
+_corpus_index: dict = {}
+
+
+def _load_corpus_index(path: Path | None) -> dict:
+    if path is None:
+        return {}
+    data = _load_corpus_relations(path)
+    if data is None:
+        return {}
+    n = data.get("total_relations", "?")
+    cp = data.get("cross_paper_count", "?")
+    print(f"Corpus relations loaded: {n} total, {cp} cross-paper from {path}")
+    return build_corpus_index(data)
+
+
+_CORPUS_RELATIONS_PATH: Path | None = None
 
 
 # ── Jinja2 env (reuse the same templates as the static generator) ─────────────
@@ -210,9 +231,12 @@ def paper_run(pmcid: str, run_id: str):
     """Per-paper inspector rendered live from DB."""
     db = _get_db()
     with db.session_scope() as session:
+        # Prefer DB corpus index; fall back to JSON-loaded index if DB is empty.
+        corpus_connections = build_corpus_index_from_db(session) or _corpus_index or None
         ctx = build_context_from_db(
             pmcid, run_id, session,
             low_gs_threshold=_LOW_GS_THRESHOLD,
+            corpus_connections=corpus_connections,
         )
 
     if ctx is None:
@@ -243,6 +267,25 @@ def paper_run(pmcid: str, run_id: str):
     template = env.get_template("pipeline_inspector.html.jinja2")
     html = template.render(**ctx, diff_mode=False)
     return Response(html, mimetype="text/html")
+
+
+@app.route("/admin/reload-corpus")
+def reload_corpus():
+    """Reload corpus_relations from DB (and JSON fallback) without restarting."""
+    global _corpus_index
+    _corpus_index = _load_corpus_index(_CORPUS_RELATIONS_PATH)
+    # Also check DB so next paper_run request gets fresh data
+    db = _get_db()
+    with db.session_scope() as session:
+        db_index = build_corpus_index_from_db(session)
+    n_db  = len(db_index)
+    n_json = len(_corpus_index)
+    return Response(
+        f"<p>Reloaded. DB: {n_db} canonical rule(s) with cross-paper connections. "
+        f"JSON fallback: {n_json}.</p>"
+        f'<a href="/">← Back to index</a>',
+        mimetype="text/html",
+    )
 
 
 # ── JSON API ───────────────────────────────────────────────────────────────────
@@ -306,6 +349,8 @@ def not_found(e):
 # ── CLI entry point ────────────────────────────────────────────────────────────
 
 def main() -> None:
+    global _corpus_index, _CORPUS_RELATIONS_PATH
+
     parser = argparse.ArgumentParser(
         description="Live pipeline inspector server (reads from PostgreSQL).",
     )
@@ -315,7 +360,31 @@ def main() -> None:
                         help="Port (default: 5000)")
     parser.add_argument("--debug", action="store_true",
                         help="Enable Flask debug mode (auto-reload on code changes)")
+    parser.add_argument("--corpus-relations", metavar="PATH",
+                        help="Path to corpus_relations.json for cross-paper connections. "
+                             "Auto-detected from out/summaries/ if not provided.")
     args = parser.parse_args()
+
+    # ── Resolve corpus_relations.json ─────────────────────────────────────
+    if args.corpus_relations:
+        _CORPUS_RELATIONS_PATH = Path(args.corpus_relations)
+    else:
+        # Auto-detect common locations relative to project root
+        candidates = [
+            _ROOT / "out" / "summaries" / "corpus_relations.json",
+            _ROOT / "out" / "summaries" / "summaries" / "corpus_relations.json",
+            _ROOT / "corpus_relations.json",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                _CORPUS_RELATIONS_PATH = candidate
+                break
+
+    if _CORPUS_RELATIONS_PATH:
+        _corpus_index = _load_corpus_index(_CORPUS_RELATIONS_PATH)
+    else:
+        print("No corpus_relations.json found — cross-paper connections disabled. "
+              "Pass --corpus-relations PATH to enable.")
 
     print(f"Starting viewer server at http://{args.host}:{args.port}")
     print("Press Ctrl+C to stop.")

@@ -296,6 +296,8 @@ class CanonicalRule(BaseModel):
     member_normal_ids:   List[str]             # NormalFinding.normal_id values in this bin
     mean_grounding_score: float | None
     finding_count:       int                   # number of NormalFindings in this bin
+    subject_cui:         str | None = None     # UMLS CUI for subject_entity (set post-canonicalize)
+    outcome_cui:         str | None = None     # UMLS CUI for outcome_entity (set post-canonicalize)
 
 
 # ── Phase 5: RELATE output ────────────────────────────────────────────────────

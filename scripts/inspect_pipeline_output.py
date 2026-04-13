@@ -96,6 +96,67 @@ def build_corpus_index(corpus_data: dict) -> dict[str, list[dict]]:
     return index
 
 
+def build_corpus_index_from_db(session) -> dict[str, list[dict]]:
+    """
+    Build a canonical_id → list[relation dict] index from the DB.
+
+    Reads the most recent corpus_run_id from sum_corpus_relations and indexes
+    only cross-paper relations (same logic as build_corpus_index).
+    Returns an empty dict if no rows exist.
+    """
+    try:
+        from database.models import SumCorpusRelation  # noqa: PLC0415
+
+        rows = (
+            session.query(SumCorpusRelation)
+            .filter_by(comparison_scope="cross_paper")
+            .all()
+        )
+
+        index: dict[str, list[dict]] = {}
+        for row in rows:
+            rel = {
+                "relation_id":              row.relation_id,
+                "comparison_scope":         row.comparison_scope,
+                "same_paper":               row.same_paper,
+                "rule_id_a":                row.rule_id_a,
+                "rule_id_b":                row.rule_id_b,
+                "pmcid_a":                  row.pmcid_a,
+                "pmcid_b":                  row.pmcid_b,
+                "relation_type":            row.relation_type,
+                "nli_score_a_to_b":         row.nli_score_a_to_b,
+                "nli_score_b_to_a":         row.nli_score_b_to_a,
+                "subject_entity":           row.subject_entity,
+                "outcome_entity":           row.outcome_entity,
+                "category":                 row.category,
+                "relation_type_structural": row.relation_type_structural,
+                "direction_a":              row.direction_a,
+                "direction_b":              row.direction_b,
+                "predicate_a":              row.predicate_a,
+                "predicate_b":              row.predicate_b,
+                "mean_grounding_a":         row.mean_grounding_a,
+                "mean_grounding_b":         row.mean_grounding_b,
+                "finding_count_a":          row.finding_count_a,
+                "finding_count_b":          row.finding_count_b,
+                "supporting_pmcids_a":      row.supporting_pmcids_a or [],
+                "supporting_pmcids_b":      row.supporting_pmcids_b or [],
+                "canonical_scope_a":        row.canonical_scope_a,
+                "canonical_scope_b":        row.canonical_scope_b,
+                "scope_check_result":       row.scope_check_result,
+                "scope_note":               row.scope_note,
+            }
+            for cid_key in ("rule_id_a", "rule_id_b"):
+                cid = rel.get(cid_key)
+                if cid:
+                    index.setdefault(cid, []).append(rel)
+
+        return index
+
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: could not load corpus index from DB: {exc}", file=sys.stderr)
+        return {}
+
+
 def _entity_flags(entity: str | None) -> list[str]:
     """Return warning labels for a suspicious entity string."""
     if not entity:

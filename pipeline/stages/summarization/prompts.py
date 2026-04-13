@@ -28,7 +28,14 @@ Assign each finding to exactly one: morphology | IHC | molecular_genetics | stag
 
 <FilterRules>
 SKIP: Author names, journal metadata, acknowledgments, funding, and generic boilerplate.
-ONLY extract from: methods, results, discussion, and case descriptions.
+SKIP: Patient-specific narratives — age/sex of individual patients, presenting symptoms,
+      clinical history of a single case (e.g. "46-year-old man presented with a nodule").
+      These are case vignettes, NOT generalizable facts.
+ONLY extract: generalizable medical facts — findings that apply to a disease entity,
+      population, or biomarker across cases. A valid claim is true for the entity in
+      general, not just for one patient in one visit.
+ONLY extract from: methods, results, discussion, and case descriptions
+      (but only the generalizable conclusions drawn from cases, not the case narrative itself).
 </FilterRules>
 
 <StructuredFields>
@@ -72,6 +79,15 @@ direction  (OPTIONAL polarity — output null when not applicable or not inferab
   absent   : explicitly not present / not seen / lacking / negative staining
   partial  : focal / patchy / heterogeneous / partial
   unclear  : indeterminate polarity
+
+BAD vs GOOD examples (claim field):
+
+  BAD  — patient narrative, not a generalizable fact:
+    "46-year-old man presented with asymptomatic, slowly growing erythematous nodule"
+    "The patient had a 5-month history of a lesion on the right back"
+  GOOD — generalizable histopathological fact:
+    "Granuloma annulare presents as erythematous papules or nodules"
+    "MGA shows no particular architectural pattern on H&E"
 
 Field mapping examples:
 

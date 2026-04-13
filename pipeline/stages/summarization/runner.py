@@ -340,9 +340,15 @@ class SummarizationRunner:
             )
             logger.info("[%s] CANONICALIZE done [%.1fs] — %d CanonicalRules",
                         pmcid, time.perf_counter() - t0, len(self._canonical_rules[pmcid]))
+
+            # Enrich canonical rules with UMLS CUIs for cross-paper entity matching.
+            # No-ops silently if scispacy is unavailable.
+            from .entity_linker import enrich_rules_with_cuis  # noqa: PLC0415
+            enrich_rules_with_cuis(self._canonical_rules[pmcid])
             _cr_db_id_map = self._persist_canonical_rules(
                 pipeline_run_db_id, pmcid, self._canonical_rules[pmcid], _fg_db_id_map
             )
+            self._corpus_relate_incremental(pmcid, self._canonical_rules[pmcid])
 
             # 1e. RELATE — CanonicalRule[] → Relation[]
             logger.info(
@@ -955,6 +961,8 @@ class SummarizationRunner:
                     member_normal_ids    = list(cr.member_normal_ids) if cr.member_normal_ids else [],
                     mean_grounding_score = cr.mean_grounding_score,
                     finding_count        = cr.finding_count,
+                    subject_cui          = cr.subject_cui,
+                    outcome_cui          = cr.outcome_cui,
                 )
                 rows.append(row)
             
@@ -973,6 +981,37 @@ class SummarizationRunner:
             logger.warning("[%s] DB: failed to persist canonical rules: %s", pmcid, exc)
             return {}
         return cr_id_map
+
+    def _corpus_relate_incremental(
+        self,
+        pmcid: str,
+        canonical_rules: list,
+    ) -> None:
+        """
+        Run incremental cross-paper corpus relate for a newly processed paper.
+
+        No-ops when DB is unavailable or when fewer than 2 PMCIDs exist in DB.
+        Errors are logged as warnings and never propagate — corpus relate is
+        analytical and must not block per-paper pipeline completion.
+        """
+        if self._db is None:
+            return
+        try:
+            from .corpus_relate import CorpusRelateStage  # noqa: PLC0415
+            stage = CorpusRelateStage(
+                entailment_threshold=self._relate._entailment_threshold,
+                contradiction_threshold=self._relate._contradiction_threshold,
+            )
+            relations = stage.relate_incremental(pmcid, canonical_rules, self._db)
+            logger.info(
+                "[%s] CORPUS RELATE incremental: %d cross-paper relations",
+                pmcid, len(relations),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] CORPUS RELATE incremental failed (non-fatal): %s", pmcid, exc,
+                exc_info=True,
+            )
 
     def _persist_relations(
         self,
