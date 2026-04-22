@@ -24,15 +24,6 @@ not the highest-scoring candidate regardless of quality.
 
 ## Medium-Impact Accuracy Risks
 
-### ACC-1 — NLI model in grounding filter is general-domain, not biomedical
-**Severity:** Medium  
-**File:** `grounding_filter.py:23` (`_DEFAULT_MODEL`)  
-**Symptom:** The grounding filter uses `cross-encoder/nli-deberta-v3-base`, trained on general
-text (MNLI). Biomedical phrasing is underscored, causing genuinely grounded findings to receive
-low scores and be dropped.  
-**Fix:** Replace with a biomedical NLI model such as `microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract`
-or a BioBERT-based cross-encoder. Recalibrate threshold after swap.
-
 ### ACC-2 — `_split_windows()` cuts at fixed character boundaries, not sentence boundaries
 **Severity:** Medium  
 **File:** `grounding_filter.py` (`_split_windows`)  
@@ -98,7 +89,6 @@ See iPad notes for more details.
 | ID | Severity | Stage | One-line description |
 |----|----------|-------|----------------------|
 | BUG-1 | High | NORMALIZE | UMLS junk check runs after top-scorer selection, not before |
-| ACC-1 | Medium | GROUNDING | NLI model general-domain — biomedical findings underscored |
 | ACC-2 | Medium | GROUNDING | `_split_windows()` char-boundary cuts produce incomplete clause fragments |
 | ACC-3 | Medium | CANONICALIZE | `select_predicate()` uses LLM — deterministic highest-grounding is sufficient |
 | ACC-4 | Medium | RELATE | Pair truncation is index-ordered, drops high-value Discussion/Conclusion rules |

@@ -182,27 +182,6 @@ only mode used, intra-paper corpus relations are permanently absent for all pape
 standard `_should_compare_cross_paper` gate (no XOR restriction) to produce intra-paper
 pairs, then include them in `_replace_for_pmcid`.
 
-### DES-3 — NLI model `cross-encoder/nli-deberta-v3-base` is wrong for rule-to-rule comparison
-**Severity:** Medium (no fix landed yet)  
-**File:** `relate_stage.py:44` (`_NLI_MODEL`)  
-**Symptom:** The model was trained on NLI sentence pairs (e.g. MNLI), not on clinical predicate
-pairs. It may fire CONTRADICT on two statements that are clinically co-occurring but lexically
-distinct. Wrong CONTRADICT labels feed directly into RESOLVE and silently lower final rule scores.  
-**Better model:** `MoritzLaurer/deberta-v3-large-zeroshot-v2.0` or a model fine-tuned on
-biomedical entailment. Would need threshold recalibration.
-
-### DES-4 — NLI model in grounding filter is general-domain, not biomedical
-**Severity:** Medium  
-**File:** `grounding_filter.py:23` (`_DEFAULT_MODEL`)  
-**Symptom:** The grounding filter uses the same `cross-encoder/nli-deberta-v3-base` (trained on
-MNLI/general text) to score `(verbatim_support, claim)` pairs. The use case here is different
-from RELATE's rule-to-rule comparison — it is claim grounding verification against a clinical
-source sentence. General-domain entailment may underfire on biomedical phrasing, causing
-genuinely grounded findings to receive low scores and be dropped.  
-**Fix:** Replace with a biomedical NLI model (e.g. `microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract`
-or a BioBERT-based cross-encoder). Threshold will need recalibration after swap. Fix is
-independent of DES-3 (different call site, different pair type).
-
 ### DES-5 — `_split_windows()` cuts at fixed character boundaries, not sentence boundaries
 **Severity:** Medium  
 **File:** `grounding_filter.py:185–197` (`_split_windows`)  
@@ -298,8 +277,6 @@ take the first non-None value across the cluster (or the majority value).
 | ACC-10 | Medium | CORPUS RELATE | Cross-paper gate skips outcome gating for non-expression rules |
 | ACC-11 | Medium | NORMALIZE | `infer_direction()` wrong on complex clinical negation |
 | DES-2 | Medium | CORPUS RELATE | Incremental mode never computes intra-paper corpus relations |
-| DES-3 | Medium | RELATE | NLI model general-domain, wrong CONTRADICT feeds into RESOLVE scoring |
-| DES-4 | Medium | GROUNDING | NLI model general-domain — first quality gate, biomedical underscoring risk |
 | DES-5 | Medium | GROUNDING | `_split_windows()` char-boundary cuts depress grounding scores at first gate |
 | ACC-12 | Low | RELATE | `_nli_scores()` lacks sliding window — rarely fires in practice |
 | DES-6 | Low | CANONICALIZE | `CanonicalScopeEnum` single value loses conflicted + multi_study combination |

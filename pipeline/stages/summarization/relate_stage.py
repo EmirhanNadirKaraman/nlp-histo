@@ -41,7 +41,7 @@ MAX_PAIRS = 500  # safety cap — increase if your rule sets are large
 # Delegates to the grounding_filter module-level cache so the same model
 # instance is shared with GroundingFilter (loaded once per process).
 
-_NLI_MODEL = "cross-encoder/nli-deberta-v3-base"
+_NLI_MODEL = "MoritzLaurer/deberta-v3-large-zeroshot-v2.0"
 
 
 def _get_nli_pipe(model_name: str = _NLI_MODEL, batch_size: int = 16, device: int | str | None = None):

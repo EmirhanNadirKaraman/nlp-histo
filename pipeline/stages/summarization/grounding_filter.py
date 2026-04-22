@@ -20,7 +20,7 @@ from .models import AuditableSummary, EvidenceChainItem, ExtractedRules, Finding
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "cross-encoder/nli-deberta-v3-base"
+_DEFAULT_MODEL = "MoritzLaurer/deberta-v3-large-zeroshot-v2.0"
 _DEFAULT_BATCH_SIZE = 16
 
 # Module-level NLI pipeline singleton — shared across all GroundingFilter
