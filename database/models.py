@@ -627,6 +627,86 @@ class SumFinalRule(Base):
     )
 
 
+# ── Rejection summary ────────────────────────────────────────────────────────
+
+class SumRejectionSummary(Base):
+    """
+    Aggregate rejection statistics for one pipeline run.
+
+    One row per pipeline run.  Covers two rejection points:
+      1. Grounding filter (MAP) — findings dropped because NLI entailment < threshold.
+      2. GROUP exclusion — NormalFindings excluded because subject/outcome entity is
+         missing or relation_type is unclear.
+
+    Detail rows live in sum_rejected_findings (FK sum_rejection_summary_id).
+    """
+    __tablename__ = "sum_rejection_summaries"
+
+    id                           = Column(Integer, primary_key=True, autoincrement=True)
+    pipeline_run_id              = Column(Integer, ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False, unique=True)
+    pmcid                        = Column(String(50),  nullable=False)
+    grounding_threshold          = Column(Float,       nullable=True)
+    map_findings_total           = Column(Integer,     nullable=False)
+    map_grounding_rejected       = Column(Integer,     nullable=False)
+    normal_findings_total        = Column(Integer,     nullable=False)
+    non_groupable_total          = Column(Integer,     nullable=False)
+    non_groupable_no_subject     = Column(Integer,     nullable=False)
+    non_groupable_no_outcome     = Column(Integer,     nullable=False)
+    non_groupable_unclear_relation = Column(Integer,   nullable=False)
+    grounding_rejection_rate     = Column(Float,       nullable=False)
+    non_groupable_rate           = Column(Float,       nullable=False)
+    grounding_rejected_by_category = Column(JSON,     nullable=True)
+    created_at                   = Column(TIMESTAMP,   server_default="now()")
+
+    rejected_findings = relationship(
+        "SumRejectedFinding",
+        back_populates="rejection_summary",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_srs_run",   "pipeline_run_id"),
+        Index("ix_srs_pmcid", "pmcid"),
+    )
+
+
+class SumRejectedFinding(Base):
+    """
+    One row per finding dropped or excluded during a pipeline run.
+
+    stage values:
+      "grounding_map"      — dropped by the NLI grounding filter after MAP.
+      "group_non_groupable"— excluded from GROUP because subject/outcome entity
+                             is None or relation_type is unclear.
+    """
+    __tablename__ = "sum_rejected_findings"
+
+    id                     = Column(Integer, primary_key=True, autoincrement=True)
+    pipeline_run_id        = Column(Integer, ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False)
+    rejection_summary_id   = Column(Integer, ForeignKey("sum_rejection_summaries.id", ondelete="CASCADE"), nullable=False)
+    pmcid                  = Column(String(50),  nullable=False)
+    stage                  = Column(String(30),  nullable=False)   # grounding_map | group_non_groupable
+    reason                 = Column(Text,        nullable=False)
+    claim                  = Column(Text,        nullable=False)
+    category               = Column(String(50),  nullable=False)
+    chunk_id               = Column(String(20),  nullable=True)    # set for grounding_map only
+    grounding_score        = Column(Float,       nullable=True)
+    subject_entity         = Column(Text,        nullable=True)
+    outcome_entity         = Column(Text,        nullable=True)
+    relation_type          = Column(String(50),  nullable=True)
+    created_at             = Column(TIMESTAMP,   server_default="now()")
+
+    rejection_summary = relationship("SumRejectionSummary", back_populates="rejected_findings")
+
+    __table_args__ = (
+        Index("ix_srf_run",      "pipeline_run_id"),
+        Index("ix_srf_summary",  "rejection_summary_id"),
+        Index("ix_srf_pmcid",    "pmcid"),
+        Index("ix_srf_stage",    "stage"),
+        Index("ix_srf_category", "category"),
+    )
+
+
 # ── Corpus-level relations (cross-paper / intra-paper graph) ──────────────────
 
 class SumCorpusRelation(Base):

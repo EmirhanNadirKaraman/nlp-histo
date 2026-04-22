@@ -14,6 +14,8 @@ from .models import (
     ConsolidatedSummary,
     ExtractedRules,
     Finding,
+    RejectedFinding,
+    RejectionSummary,
 )
 
 __all__ = [
@@ -26,6 +28,8 @@ __all__ = [
     "ConsolidatedSummary",
     "ExtractedRules",
     "Finding",
+    "RejectedFinding",
+    "RejectionSummary",
     "MapOutputScorer",
     "EmbeddingScorer",
     "CategoryJaccardScorer",

@@ -26,6 +26,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from .models import DirectionEnum, Finding, FindingScope, NormalFinding, RelationTypeEnum, SourceSpan
+from .umls_utils import UMLS_THRESHOLD as _UMLS_THRESHOLD, best_cui as _best_cui
 
 logger = logging.getLogger(__name__)
 
@@ -130,45 +131,6 @@ _SPACY_NLP = None
 _SPACY_LINKER = None
 _SPACY_AVAILABLE: bool | None = None   # None = not yet probed
 
-_UMLS_THRESHOLD = 0.85
-
-# UMLS semantic types that are never valid entity normalizations in a
-# histopathology / clinical text mining context.  A concept whose *only*
-# semantic types fall in this set is discarded regardless of linker score.
-_JUNK_SEMANTIC_TYPES = frozenset({
-    "T001",  # Organism
-    "T002",  # Plant
-    "T004",  # Fungus
-    "T005",  # Virus
-    "T007",  # Bacterium
-    "T008",  # Animal
-    "T009",  # Invertebrate
-    "T010",  # Vertebrate
-    "T011",  # Amphibian
-    "T012",  # Bird
-    "T013",  # Fish
-    "T014",  # Reptile
-    "T015",  # Mammal  ← Cetacea lives here
-    "T083",  # Geographic Area
-    "T093",  # Health Care Related Organization
-    "T097",  # Professional or Occupational Group
-})
-
-# Short all-caps tokens (≤5 chars) are acronyms; the linker almost always
-# maps them to the wrong concept via string similarity.
-import re as _re
-_ACRONYM_RE = _re.compile(r'^[A-Z]{2,5}$')
-
-
-def _is_junk_umls(canonical_name: str, types: list[str] | None, entity_text: str) -> bool:
-    """Return True if a UMLS hit should be discarded."""
-    type_set = set(types or [])
-    if type_set and type_set.issubset(_JUNK_SEMANTIC_TYPES):
-        return True
-    if _ACRONYM_RE.match(entity_text.strip()) and type_set & _JUNK_SEMANTIC_TYPES:
-        return True
-    return False
-
 
 def _probe_spacy() -> bool:
     """
@@ -228,25 +190,17 @@ def _umls_canonical(text: str) -> str | None:
 
     try:
         doc = _SPACY_NLP(text)  # type: ignore[arg-type]
-        best_cui: str | None = None
-        best_score: float = 0.0
 
         # Prefer entity spans; fall back to doc-level kb_ents
-        ents = doc.ents if doc.ents else [doc]
-        for span in ents:
-            kb_ents = getattr(span._, "kb_ents", [])
-            for cui, score in kb_ents:
-                if score > best_score:
-                    best_score = score
-                    best_cui = cui
+        spans = doc.ents if doc.ents else [doc]
+        kb_ents_by_span = [getattr(span._, "kb_ents", []) for span in spans]
+        cui = _best_cui(kb_ents_by_span, _SPACY_LINKER.kb, text)  # type: ignore[union-attr]
 
         canonical: str | None = None
-        if best_cui and best_score >= _UMLS_THRESHOLD:
-            concept = _SPACY_LINKER.kb.cui_to_entity.get(best_cui)  # type: ignore[union-attr]
+        if cui:
+            concept = _SPACY_LINKER.kb.cui_to_entity.get(cui)  # type: ignore[union-attr]
             if concept:
-                types = list(concept.types) if concept.types else []
-                if not _is_junk_umls(concept.canonical_name, types, text):
-                    canonical = concept.canonical_name
+                canonical = concept.canonical_name
 
         _UMLS_CACHE[text] = canonical  # type: ignore[assignment]  # cache None too
         return canonical

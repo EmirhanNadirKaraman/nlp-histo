@@ -21,6 +21,8 @@ from .models import (
     SumRelation,
     SumFinalRule,
     SumCorpusRelation,
+    SumRejectionSummary,
+    SumRejectedFinding,
     Base,
 )
 from .db_connection import (
@@ -49,6 +51,8 @@ __all__ = [
     'SumRelation',
     'SumFinalRule',
     'SumCorpusRelation',
+    'SumRejectionSummary',
+    'SumRejectedFinding',
     'Base',
     'DatabaseConnection',
     'get_db_connection',

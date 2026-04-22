@@ -390,3 +390,47 @@ class CorpusRelation(Relation):
     # scope_mismatch | scope_qualified.
     scope_check_result:       str = "scope_unknown"
     scope_note:               str = ""
+
+
+# ── Rejection summary ──────────────────────────────────────────────────────────
+
+class RejectedFinding(BaseModel):
+    """A finding dropped or excluded at a pipeline stage, with reason metadata."""
+    stage: Literal["grounding_map", "group_non_groupable"]
+    reason: str                       # e.g. "grounding_score=0.23 < threshold=0.50"
+    claim: str
+    category: str
+    chunk_id: str | None = None       # set for grounding_map stage
+    grounding_score: float | None = None
+    subject_entity: str | None = None
+    outcome_entity: str | None = None
+    relation_type: str | None = None
+
+
+class RejectionSummary(BaseModel):
+    """
+    Structured report of all findings rejected or excluded during one paper's run.
+
+    Attached to the pipeline result under the ``rejection_summary`` key.
+    Use this to audit filter calibration: high grounding_rejection_rate suggests
+    the threshold is too strict; high non_groupable_rate suggests the MAP prompt
+    is failing to extract entities.
+    """
+    pmcid: str
+    grounding_threshold: float | None
+    # Counts
+    map_findings_total: int
+    map_grounding_rejected: int
+    normal_findings_total: int
+    non_groupable_total: int
+    # Non-groupable breakdown (can overlap — a finding may fail multiple conditions)
+    non_groupable_no_subject: int
+    non_groupable_no_outcome: int
+    non_groupable_unclear_relation: int
+    # Rates
+    grounding_rejection_rate: float   # map_grounding_rejected / map_findings_total
+    non_groupable_rate: float         # non_groupable_total / normal_findings_total
+    # Per-category breakdown for grounding rejections
+    grounding_rejected_by_category: dict[str, int]
+    # Full item list
+    rejected: List[RejectedFinding]

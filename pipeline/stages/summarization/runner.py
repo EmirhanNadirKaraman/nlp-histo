@@ -48,7 +48,7 @@ from pathlib import Path
 from .cache import PipelineCache
 from .canonicalize_stage import CanonicalizeStage
 from .contradiction_detector import ContradictionDetector
-from .grounding_filter import GroundingFilter, score_findings
+from .grounding_filter import GroundingFilter
 from .group_stage import GroupStage, is_groupable
 from .map_stage import MapStage
 from .models import (
@@ -61,6 +61,9 @@ from .models import (
     FindingGroup,
     NormalFinding,
     Relation,
+    RejectedFinding,
+    RejectionSummary,
+    RelationTypeEnum,
 )
 from .normalize_stage import NormalizeStage
 from .observability import TraceCollector, flush_collector
@@ -271,18 +274,27 @@ class SummarizationRunner:
                     chunk_size=self._map.chunk_size,
                 )
 
-            # 1a. Grounding filter — drop ungrounded findings before REDUCE
+            # Track total MAP findings for rejection summary (before any filtering)
+            map_findings_total = sum(len(cs.findings) for cs in chunk_summaries)
+
+            # 1a. Grounding filter — score + drop ungrounded findings before REDUCE
+            grounding_rejected: list[tuple[str, Finding]] = []  # (chunk_id, finding)
             if self._grounding is not None:
-                findings_before = sum(len(cs.findings) for cs in chunk_summaries)
-                logger.info("[%s] GROUNDING (filter) — %d findings", pmcid, findings_before)
+                findings_before = map_findings_total
+                logger.info("[%s] GROUNDING (filter+score) — %d findings", pmcid, findings_before)
                 t0 = time.perf_counter()
-                chunk_summaries = [
-                    self._grounding.filter_findings(cs) for cs in chunk_summaries
-                ]
+                new_summaries = []
+                for cs in chunk_summaries:
+                    kept_cs, dropped = self._grounding.filter_findings_with_scores(cs)
+                    new_summaries.append(kept_cs)
+                    for f in dropped:
+                        grounding_rejected.append((cs.chunk_id, f))
+                chunk_summaries = new_summaries
                 findings_after = sum(len(cs.findings) for cs in chunk_summaries)
                 logger.info(
-                    "[%s] GROUNDING (filter) done [%.1fs] — %d/%d findings kept",
-                    pmcid, time.perf_counter() - t0, findings_after, findings_before,
+                    "[%s] GROUNDING done [%.1fs] — %d/%d findings kept (%d rejected)",
+                    pmcid, time.perf_counter() - t0,
+                    findings_after, findings_before, len(grounding_rejected),
                 )
                 if collector is not None:
                     collector.record_grounding(
@@ -291,14 +303,8 @@ class SummarizationRunner:
                         items_after=findings_after,
                     )
 
-                # Score all surviving findings in-place
-                logger.info("[%s] GROUNDING (score) — %d findings", pmcid, findings_after)
-                t0 = time.perf_counter()
                 all_findings = [f for cs in chunk_summaries for f in cs.findings]
-                score_findings(all_findings, nli_pipe=self._grounding._pipe)
                 self._scored_map_findings[pmcid] = all_findings
-                logger.info("[%s] GROUNDING (score) done [%.1fs]",
-                            pmcid, time.perf_counter() - t0)
                 logger.info("[%s] chunk_ids before persist: %s", pmcid, [cs.chunk_id for cs in chunk_summaries])
                 self._persist_map_findings(pipeline_run_db_id, pmcid, chunk_summaries)
 
@@ -315,13 +321,13 @@ class SummarizationRunner:
                 pipeline_run_db_id, pmcid, self._normal_findings[pmcid]
             )
 
-            # 1c. GROUP — bucket groupable NormalFindings by (subject, outcome, category)
+            # 1c. GROUP — bucket groupable NormalFindings by (subject, outcome, relation_type, category)
             all_normal = self._normal_findings[pmcid]
             groupable = [nf for nf in all_normal if is_groupable(nf)]
-            non_groupable_count = len(all_normal) - len(groupable)
+            non_groupable_nfs = [nf for nf in all_normal if not is_groupable(nf)]
             logger.info(
                 "[%s] GROUP — %d groupable, %d non-groupable",
-                pmcid, len(groupable), non_groupable_count,
+                pmcid, len(groupable), len(non_groupable_nfs),
             )
             t0 = time.perf_counter()
             self._finding_groups[pmcid] = self._group.group(groupable, pmcid)
@@ -443,6 +449,18 @@ class SummarizationRunner:
             logger.info("[%s] Pipeline complete [%.1fs total]",
                         pmcid, time.perf_counter() - t_total)
 
+            rejection_summary = _build_rejection_summary(
+                pmcid=pmcid,
+                grounding_threshold=(
+                    self._grounding.threshold if self._grounding is not None else None
+                ),
+                map_findings_total=map_findings_total,
+                grounding_rejected=grounding_rejected,
+                normal_findings=self._normal_findings.get(pmcid, []),
+                non_groupable_nfs=non_groupable_nfs,
+            )
+            self._persist_rejection_summary(pipeline_run_db_id, rejection_summary)
+
             result = {
                 "status": "success",
                 "run_id": run_id,
@@ -465,6 +483,7 @@ class SummarizationRunner:
                     "master_summary": master.model_dump() if master else None,
                     "rules_provenance": rules.model_dump() if rules else None,
                 },
+                "rejection_summary": rejection_summary.model_dump(),
             }
             self._finish_pipeline_run(
                 pipeline_run_db_id, "success",
@@ -1054,6 +1073,67 @@ class SummarizationRunner:
         except Exception as exc:
             logger.warning("[%s] DB: failed to persist relations: %s", pmcid, exc)
 
+    def _persist_rejection_summary(
+        self,
+        db_id: int | None,
+        rejection_summary: "RejectionSummary",
+    ) -> None:
+        """
+        Persist a RejectionSummary + its detail rows to sum_rejection_summaries /
+        sum_rejected_findings.  No-op when db_id is None.
+        """
+        if db_id is None:
+            return
+        try:
+            from database.models import SumRejectionSummary, SumRejectedFinding  # noqa: PLC0415
+            with self._db.session_scope() as session:
+                summary_row = SumRejectionSummary(
+                    pipeline_run_id                = db_id,
+                    pmcid                          = rejection_summary.pmcid,
+                    grounding_threshold            = rejection_summary.grounding_threshold,
+                    map_findings_total             = rejection_summary.map_findings_total,
+                    map_grounding_rejected         = rejection_summary.map_grounding_rejected,
+                    normal_findings_total          = rejection_summary.normal_findings_total,
+                    non_groupable_total            = rejection_summary.non_groupable_total,
+                    non_groupable_no_subject       = rejection_summary.non_groupable_no_subject,
+                    non_groupable_no_outcome       = rejection_summary.non_groupable_no_outcome,
+                    non_groupable_unclear_relation = rejection_summary.non_groupable_unclear_relation,
+                    grounding_rejection_rate       = rejection_summary.grounding_rejection_rate,
+                    non_groupable_rate             = rejection_summary.non_groupable_rate,
+                    grounding_rejected_by_category = rejection_summary.grounding_rejected_by_category,
+                )
+                session.add(summary_row)
+                session.flush()   # get summary_row.id before inserting detail rows
+
+                for item in rejection_summary.rejected:
+                    session.add(SumRejectedFinding(
+                        pipeline_run_id      = db_id,
+                        rejection_summary_id = summary_row.id,
+                        pmcid                = rejection_summary.pmcid,
+                        stage                = item.stage,
+                        reason               = item.reason,
+                        claim                = item.claim,
+                        category             = item.category,
+                        chunk_id             = item.chunk_id,
+                        grounding_score      = item.grounding_score,
+                        subject_entity       = item.subject_entity,
+                        outcome_entity       = item.outcome_entity,
+                        relation_type        = item.relation_type,
+                    ))
+
+            logger.info(
+                "[%s] DB: persisted rejection summary (%d grounding, %d non-groupable, run_id=%d)",
+                rejection_summary.pmcid,
+                rejection_summary.map_grounding_rejected,
+                rejection_summary.non_groupable_total,
+                db_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] DB: failed to persist rejection summary: %s",
+                rejection_summary.pmcid, exc, exc_info=True,
+            )
+
     def _persist_final_rules(
         self,
         db_id: int | None,
@@ -1118,3 +1198,94 @@ def _model_name(llm) -> str:
         if val:
             return str(val)
     return type(llm).__name__
+
+
+def _non_groupable_reason(nf: NormalFinding) -> str:
+    """Human-readable reason why a NormalFinding failed is_groupable()."""
+    parts = []
+    if nf.subject_entity is None:
+        parts.append("subject_entity=None")
+    if nf.outcome_entity is None:
+        parts.append("outcome_entity=None")
+    if nf.relation_type is RelationTypeEnum.unclear:
+        parts.append("relation_type=unclear")
+    return ", ".join(parts) if parts else "unknown"
+
+
+def _build_rejection_summary(
+    pmcid: str,
+    grounding_threshold: float | None,
+    map_findings_total: int,
+    grounding_rejected: list[tuple[str, Finding]],
+    normal_findings: list[NormalFinding],
+    non_groupable_nfs: list[NormalFinding],
+) -> RejectionSummary:
+    """Build a RejectionSummary from the collected rejection data for one paper."""
+    from collections import Counter  # noqa: PLC0415 — local import to avoid top-level cost
+
+    rejected_items: list[RejectedFinding] = []
+
+    # Grounding rejections
+    for chunk_id, f in grounding_rejected:
+        score = f.grounding_score
+        reason = (
+            f"grounding_score={score:.3f} < threshold={grounding_threshold}"
+            if score is not None and grounding_threshold is not None
+            else "grounding_score below threshold"
+        )
+        rejected_items.append(RejectedFinding(
+            stage="grounding_map",
+            reason=reason,
+            claim=f.claim,
+            category=f.category,
+            chunk_id=chunk_id,
+            grounding_score=score,
+            subject_entity=f.subject_entity,
+            outcome_entity=f.outcome_entity,
+            relation_type=f.relation_type.value if f.relation_type else None,
+        ))
+
+    # Non-groupable exclusions
+    for nf in non_groupable_nfs:
+        rejected_items.append(RejectedFinding(
+            stage="group_non_groupable",
+            reason=_non_groupable_reason(nf),
+            claim=nf.predicate_text,
+            category=nf.category,
+            grounding_score=nf.mean_grounding_score,
+            subject_entity=nf.subject_entity,
+            outcome_entity=nf.outcome_entity,
+            relation_type=nf.relation_type.value if nf.relation_type else None,
+        ))
+
+    n_total = map_findings_total
+    n_grounding = len(grounding_rejected)
+    n_normal = len(normal_findings)
+    n_non_groupable = len(non_groupable_nfs)
+
+    cat_counts: Counter[str] = Counter(
+        f.category for _, f in grounding_rejected
+    )
+
+    return RejectionSummary(
+        pmcid=pmcid,
+        grounding_threshold=grounding_threshold,
+        map_findings_total=n_total,
+        map_grounding_rejected=n_grounding,
+        normal_findings_total=n_normal,
+        non_groupable_total=n_non_groupable,
+        non_groupable_no_subject=sum(
+            1 for nf in non_groupable_nfs if nf.subject_entity is None
+        ),
+        non_groupable_no_outcome=sum(
+            1 for nf in non_groupable_nfs if nf.outcome_entity is None
+        ),
+        non_groupable_unclear_relation=sum(
+            1 for nf in non_groupable_nfs
+            if nf.relation_type is RelationTypeEnum.unclear
+        ),
+        grounding_rejection_rate=round(n_grounding / n_total, 4) if n_total else 0.0,
+        non_groupable_rate=round(n_non_groupable / n_normal, 4) if n_normal else 0.0,
+        grounding_rejected_by_category=dict(cat_counts),
+        rejected=rejected_items,
+    )

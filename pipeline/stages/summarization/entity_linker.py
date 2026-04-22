@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .models import CanonicalRule
 
+from .umls_utils import UMLS_THRESHOLD, best_cui as _best_cui
+
 logger = logging.getLogger(__name__)
 
 # Module-level singletons — loaded at most once per process.
@@ -38,7 +40,7 @@ def _load() -> bool:
         nlp.add_pipe("scispacy_linker", config={
             "resolve_abbreviations": True,
             "linker_name": "umls",
-            "threshold": 0.85,
+            "threshold": UMLS_THRESHOLD,
         })
         _nlp = nlp
         logger.info("Entity linker loaded for CUI enrichment")
@@ -50,19 +52,11 @@ def _load() -> bool:
         return False
 
 
-def _best_cui_from_doc(doc) -> str | None:
-    """Extract the highest-scoring CUI from a spacy Doc."""
-    best_cui: str | None = None
-    best_score = 0.0
-    for ent in doc.ents:
-        for cui, score in (getattr(ent._, "kb_ents", None) or []):
-            if score > best_score:
-                best_score, best_cui = score, cui
-    if best_cui is None:
-        for cui, score in (getattr(doc._, "kb_ents", None) or []):
-            if score > best_score:
-                best_score, best_cui = score, cui
-    return best_cui
+def _best_cui_from_doc(doc, kb) -> str | None:
+    """Extract the highest-scoring non-junk CUI from a spacy Doc."""
+    spans = doc.ents if doc.ents else [doc]
+    kb_ents_by_span = [getattr(span._, "kb_ents", None) or [] for span in spans]
+    return _best_cui(kb_ents_by_span, kb, doc.text)
 
 
 def enrich_rules_with_cuis(rules: list[CanonicalRule]) -> None:
@@ -86,10 +80,11 @@ def enrich_rules_with_cuis(rules: list[CanonicalRule]) -> None:
     if not texts:
         return
 
+    kb = _nlp.get_pipe("scispacy_linker").kb
     cui_map: dict[str, str | None] = {}
     try:
         for doc in _nlp.pipe(texts, batch_size=32):
-            cui_map[doc.text] = _best_cui_from_doc(doc)
+            cui_map[doc.text] = _best_cui_from_doc(doc, kb)
     except Exception as exc:
         logger.warning("CUI enrichment batch failed: %s", exc)
         return

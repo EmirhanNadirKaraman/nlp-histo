@@ -78,6 +78,34 @@ class GroundingFilter:
 
         return summary.model_copy(update={"findings": kept})
 
+    def filter_findings_with_scores(
+        self, summary: AuditableSummary
+    ) -> tuple[AuditableSummary, list[Finding]]:
+        """
+        Like filter_findings() but scores ALL findings in one NLI pass,
+        writing grounding_score in-place on every finding (kept and dropped),
+        and returns (kept_summary, dropped_findings).
+
+        Use this in the runner to replace the separate filter_findings() +
+        score_findings() two-step calls — one NLI batch instead of two.
+        """
+        if not summary.findings:
+            return summary, []
+
+        pairs = [(f.verbatim_support, f.claim) for f in summary.findings]
+        scores = _score_pairs(pairs, self._pipe)
+
+        kept: list[Finding] = []
+        dropped: list[Finding] = []
+        for finding, score in zip(summary.findings, scores):
+            finding.grounding_score = score
+            if score >= self.threshold:
+                kept.append(finding)
+            else:
+                dropped.append(finding)
+
+        return summary.model_copy(update={"findings": kept}), dropped
+
     def filter_rules(self, extracted: ExtractedRules) -> ExtractedRules:
         """
         For each rule:
