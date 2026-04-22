@@ -4,10 +4,10 @@ NORMALIZE stage: Finding[] → NormalFinding[]
 Two operations:
 1. Entity normalization — resolve surface-form variants to canonical names.
    Resolution order:
-     a. UMLS linker via scispaCy (en_core_sci_lg, threshold 0.7) — loaded
-        lazily and cached at module level; skipped if scispaCy unavailable.
-     b. Hand-curated synonym dictionary (_SYNONYMS) — covers rare entities
+     a. Hand-curated synonym dictionary (_SYNONYMS) — covers rare entities
         that UMLS does not link (CEAN, MGA, …).
+     b. UMLS linker via scispaCy (en_core_sci_lg, threshold 0.85) — loaded
+        lazily and cached at module level; skipped if scispaCy unavailable.
      c. Identity fallback — stripped input returned unchanged.
 
 2. Conditional dedup — findings that share the same

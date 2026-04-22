@@ -1,12 +1,14 @@
 """
 GROUP stage: NormalFinding[] → FindingGroup[]
 
-Accepts only groupable NormalFindings (subject_entity, outcome_entity, and
-direction all non-None).  Caller is responsible for filtering before calling
-group(); this module does not silently drop or convert ungroupable findings.
+Accepts only groupable NormalFindings (subject_entity and outcome_entity
+non-None, relation_type not unclear).  Caller is responsible for filtering
+before calling group(); this module does not silently drop or convert
+ungroupable findings.
 
-Groups by (subject_entity, outcome_entity, category).  Direction is NOT part
-of the grouping key — a group may contain findings with different directions.
+Groups by (subject_entity, outcome_entity, relation_type, category).
+Direction is NOT part of the grouping key — a group may contain findings
+with different directions.
 Opposing directions on the same entity pair surface as CONTRADICT/SCOPE_QUALIFY
 relations in Phase 5 RELATE, not as separate groups.
 
@@ -18,7 +20,7 @@ import hashlib
 import logging
 from collections import defaultdict
 
-from .models import DirectionEnum, FindingGroup, NormalFinding, RelationTypeEnum
+from .models import FindingGroup, NormalFinding, RelationTypeEnum
 
 logger = logging.getLogger(__name__)
 

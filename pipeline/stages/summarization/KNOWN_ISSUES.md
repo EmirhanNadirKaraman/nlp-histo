@@ -18,21 +18,7 @@ gets the old broken order.
 **Fix:** Flip the resolution order in `normalize_entity()` to match `_norm()`: dict lookup first,
 UMLS second, identity fallback.
 
-### BUG-2 — Module-level docstring in `normalize_stage.py` says UMLS-first
-**Severity:** Low (documentation only)  
-**File:** `normalize_stage.py:1–20`  
-**Symptom:** Docstring documents resolution order as "(a) UMLS, (b) dict, (c) identity" — the
-opposite of what the code does after the April fix.  
-**Fix:** Update docstring to match the actual order: dict → UMLS → identity.
-
-### BUG-3 — `group_stage.py` module docstring missing `relation_type` from grouping key
-**Severity:** Low (documentation only)  
-**File:** `group_stage.py:8`  
-**Symptom:** Docstring says the grouping key is `(subject_entity, outcome_entity, category)`.
-The actual key (post April fix) is `(subject_entity, outcome_entity, relation_type, category)`.  
-**Fix:** Update the module docstring.
-
-### BUG-4 — `_compute_scope()` reads group-level `direction_counts` after bin split
+### BUG-2 — `_compute_scope()` reads group-level `direction_counts` after bin split
 **Severity:** High  
 **File:** `canonicalize_stage.py:83–110` (`_compute_scope`)  
 **Symptom:** After `_split_by_direction` produces a positive-only bin, `_compute_scope` still
@@ -100,7 +86,7 @@ This depresses `mean_grounding_score` for genuinely grounded findings.
 - Or: run grounding against all sentences in the source chunk (not just the LLM quote) and
   take the max score.
 
-### ACC-5a — CUI enrichment runs post-canonicalize, cannot fix grouping errors
+### ACC-5 — CUI enrichment runs post-canonicalize, cannot fix grouping errors
 **Severity:** High  
 **File:** `entity_linker.py:62–97` (`enrich_rules_with_cuis`), `runner.py` (call site)  
 **Symptom:** `enrich_rules_with_cuis` assigns `subject_cui` / `outcome_cui` to `CanonicalRule`
@@ -112,7 +98,7 @@ for the same real-world concept.
 when available (falling back to normalized string only when CUI is None). This requires
 `normalize_entity()` to return `(canonical_name, cui)` instead of just `canonical_name`.
 
-### ACC-5 — `unclear` direction findings inflated into the largest direction bin in CANONICALIZE
+### ACC-6 — `unclear` direction findings inflated into the largest direction bin in CANONICALIZE
 **Severity:** High  
 **File:** `canonicalize_stage.py` (`_split_by_direction`)  
 **Symptom:** When a group has e.g. 3 positive + 1 negative + 2 unclear findings, all unclear go
@@ -126,7 +112,7 @@ negligible, and masks real directional ambiguity in the canonical rule.
 - Minimum: store `direction_counts` on `CanonicalRule` so downstream stages can see the raw
   split, not just the bin they were assigned to.
 
-### DES-1a — RESOLVE ignores cross-paper relations when scoring FinalRules
+### DES-1 — RESOLVE ignores cross-paper relations when scoring FinalRules
 **Severity:** High  
 **File:** `runner.py:381–388` (RESOLVE call), `resolve_stage.py`  
 **Symptom:** `corpus_relate_incremental` runs before per-paper RELATE and writes cross-paper
@@ -136,13 +122,13 @@ Cross-paper support is also ignored — a rule backed by 10 papers gets no score
 one backed by 1.  
 **Fix:** Pass corpus relations into RESOLVE alongside per-paper relations. Cross-paper
 CONTRADICTs should penalise the rule score; cross-paper SUPPORTs should boost it.
-Requires resolving DES-1 first (score scale mismatch between single-paper and multi-paper runs).
+Requires resolving DES-7 first (score scale mismatch between single-paper and multi-paper runs).
 
 ---
 
 ## Medium-Impact Accuracy Risks
 
-### ACC-6a — Unbounded candidate list sent to LLM in CANONICALIZE
+### ACC-7 — Unbounded candidate list sent to LLM in CANONICALIZE
 **Severity:** Medium  
 **File:** `canonicalize_stage.py:289–293` (`_select_predicate`)  
 **Symptom:** All findings in a direction bin are sent as candidates to the LLM — no cap. On
@@ -151,7 +137,7 @@ of candidates, causing unbounded token usage, latency, and cost per group.
 **Fix:** Cap at a configurable `max_candidates` (e.g. top-10 by grounding score). Findings
 are already sorted descending by score (line 230–234), so truncation is safe.
 
-### ACC-6b — Position bias in LLM predicate selection
+### ACC-8 — Position bias in LLM predicate selection
 **Severity:** Medium  
 **File:** `canonicalize_stage.py:289–293` (`_select_predicate`)  
 **Symptom:** Candidates are sorted descending by grounding score, so candidate #1 always has
@@ -164,7 +150,7 @@ fallback.
 - Or: remove score prefix from the prompt so the LLM cannot use rank as a signal.
 - Minimum: log how often the LLM picks candidate #1 vs others to measure actual bias.
 
-### ACC-6 — RELATE pair truncation is index-ordered, not importance-ordered
+### ACC-9 — RELATE pair truncation is index-ordered, not importance-ordered
 **Severity:** Medium  
 **File:** `relate_stage.py:294–299`  
 **Symptom:** When `len(eligible) > MAX_PAIRS (500)`, the first 500 by `itertools.combinations`
@@ -173,7 +159,7 @@ which carry high-confidence summary statements) are systematically dropped.
 **Fix:** Sort eligible pairs by `(rules[i].mean_grounding_score + rules[j].mean_grounding_score)`
 descending before truncating to `max_pairs`.
 
-### ACC-7 — Cross-paper gate does not check outcome for non-expression rules
+### ACC-10 — Cross-paper gate does not check outcome for non-expression rules
 **Severity:** Medium  
 **File:** `corpus_relate.py:93–131` (`_should_compare_cross_paper`)  
 **Symptom:** For non-expression rules: if either rule lacks a CUI, subject gating is skipped
@@ -183,7 +169,7 @@ pass the gate. NLI then runs on unrelated predicate texts and may fire spurious 
 **Fix:** For non-expression rules, also gate on outcome_entity when both rules have a CUI; and
 add a fallback `_norm_outcome()` string comparison for outcome when CUIs are absent.
 
-### ACC-8 — `infer_direction()` keyword heuristic incorrect for complex clinical negation
+### ACC-11 — `infer_direction()` keyword heuristic incorrect for complex clinical negation
 **Severity:** Medium  
 **File:** `normalize_stage.py:275–291` (`infer_direction`)  
 **Symptom:** The heuristic uses prefix/substring matching without syntax awareness.
@@ -196,7 +182,7 @@ Incorrect cases: "not uncommon" → negative (wrong; means positive), "no signif
   direction field without heuristic overriding.
 - The heuristic should only fire on `unclear` findings (it does today) — do not expand its scope.
 
-### DES-1b — Incremental corpus relate never computes intra-paper relations for the new paper
+### DES-2 — Incremental corpus relate never computes intra-paper relations for the new paper
 **Severity:** Medium  
 **File:** `corpus_relate.py:333–340` (`_incremental_gate`)  
 **Symptom:** The XOR gate rejects any pair where both rules come from the same paper. So when
@@ -207,7 +193,7 @@ only mode used, intra-paper corpus relations are permanently absent for all pape
 standard `_should_compare_cross_paper` gate (no XOR restriction) to produce intra-paper
 pairs, then include them in `_replace_for_pmcid`.
 
-### DES-2 — NLI model `cross-encoder/nli-deberta-v3-base` is wrong for rule-to-rule comparison
+### DES-3 — NLI model `cross-encoder/nli-deberta-v3-base` is wrong for rule-to-rule comparison
 **Severity:** Medium (no fix landed yet)  
 **File:** `relate_stage.py:44` (`_NLI_MODEL`)  
 **Symptom:** The model was trained on NLI sentence pairs (e.g. MNLI), not on clinical predicate
@@ -216,7 +202,7 @@ distinct. Wrong CONTRADICT labels feed directly into RESOLVE and silently lower 
 **Better model:** `MoritzLaurer/deberta-v3-large-zeroshot-v2.0` or a model fine-tuned on
 biomedical entailment. Would need threshold recalibration.
 
-### DES-2b — NLI model in grounding filter is general-domain, not biomedical
+### DES-4 — NLI model in grounding filter is general-domain, not biomedical
 **Severity:** Medium  
 **File:** `grounding_filter.py:23` (`_DEFAULT_MODEL`)  
 **Symptom:** The grounding filter uses the same `cross-encoder/nli-deberta-v3-base` (trained on
@@ -226,9 +212,9 @@ source sentence. General-domain entailment may underfire on biomedical phrasing,
 genuinely grounded findings to receive low scores and be dropped.  
 **Fix:** Replace with a biomedical NLI model (e.g. `microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract`
 or a BioBERT-based cross-encoder). Threshold will need recalibration after swap. Fix is
-independent of DES-2 (different call site, different pair type).
+independent of DES-3 (different call site, different pair type).
 
-### DES-4 — `_split_windows()` cuts at fixed character boundaries, not sentence boundaries
+### DES-5 — `_split_windows()` cuts at fixed character boundaries, not sentence boundaries
 **Severity:** Medium  
 **File:** `grounding_filter.py:185–197` (`_split_windows`)  
 **Symptom:** The current 400-char / 200-char-step sliding window cuts mid-sentence, so a
@@ -245,7 +231,7 @@ sees complete clauses.
 
 ## Lower-Impact / Design Choices
 
-### ACC-9 — `_nli_scores()` in RELATE does not use the sliding window
+### ACC-12 — `_nli_scores()` in RELATE does not use the sliding window
 **Severity:** Low (predicate text from CANONICALIZE is almost always short)  
 **File:** `relate_stage.py:62–73` (`_nli_scores`)  
 **Symptom:** Unlike `grounding_filter._score_pairs()`, the RELATE NLI function does not split
@@ -256,7 +242,7 @@ multi-clause clinical statement), it will be silently truncated at 512 tokens.
 is shared, consider moving `_split_windows` and `_score_pairs` to a shared utilities module and
 importing from both.
 
-### DES-0 — `CanonicalScopeEnum` is a single value — cannot express conflicted + multi_study
+### DES-6 — `CanonicalScopeEnum` is a single value — cannot express conflicted + multi_study
 **Severity:** Low  
 **File:** `canonicalize_stage.py:83–110` (`_compute_scope`), `models.py:265–270` (`CanonicalScopeEnum`)  
 **Symptom:** A rule supported by mixed-direction evidence across multiple papers is both
@@ -266,7 +252,7 @@ discarding the PMCID coverage information entirely.
 `is_conflicted: bool` and `study_coverage: Literal["single_study", "multi_study", "unknown"]`.
 This is a schema change requiring a migration.
 
-### DES-1 — RESOLVE two-mode scoring produces non-comparable scales
+### DES-7 — RESOLVE two-mode scoring produces non-comparable scales
 **Severity:** Low  
 **File:** `resolve_stage.py`  
 **Symptom:** Single-paper runs always use the absent-relations formula (grounding weight 0.80);
@@ -276,7 +262,7 @@ applied uniformly across both types is miscalibrated.
 **Fix:** Document the two modes clearly in output JSON and add a `scoring_mode` field to
 `FinalRule`. Consider normalizing scores to a common range post-hoc when merging outputs.
 
-### DES-2a — RESOLVE scoring weights are hand-tuned, not empirically validated
+### DES-8 — RESOLVE scoring weights are hand-tuned, not empirically validated
 **Severity:** Low  
 **File:** `resolve_stage.py:48–63` (constants)  
 **Symptom:** Weights (`_GROUNDING_WEIGHT=0.60`, `_SUPPORT_BOOST_PER_REL=0.08`,
@@ -294,7 +280,7 @@ finding_count, and canonical_scope. Weights could then be fit to minimise rankin
 **Fix:** Build a small gold set using one of the above proxies and run a grid search or
 linear regression over the weight constants.
 
-### DES-3 — `_best_scope()` uses scope from highest-grounding finding only
+### DES-9 — `_best_scope()` uses scope from highest-grounding finding only
 **Severity:** Low  
 **File:** `normalize_stage.py:358–364` (`_best_scope`)  
 **Symptom:** When merging a cluster of findings, the representative scope is taken from the
@@ -310,27 +296,25 @@ take the first non-None value across the cluster (or the majority value).
 | ID | Severity | Stage | One-line description |
 |----|----------|-------|----------------------|
 | BUG-1 | High | NORMALIZE | `normalize_entity()` uses UMLS-first (old broken order) |
-| BUG-2 | Low | NORMALIZE | Module docstring says UMLS-first (stale) |
-| BUG-3 | Low | GROUP | Module docstring missing `relation_type` in key |
-| BUG-4 | High | CANONICALIZE | `_compute_scope` reads group-level direction_counts on a direction-split bin |
+| BUG-2 | High | CANONICALIZE | `_compute_scope` reads group-level direction_counts on a direction-split bin |
 | ACC-1 | High | MAP | Chunk boundary findings lost — no overlap |
 | ACC-2 | High | MAP/GROUP | `relation_type` variance splits same fact into different groups |
 | ACC-3 | High | RELATE | Subject exact-match drops normalization-near-miss pairs |
 | ACC-4 | High | MAP/GROUNDING | `verbatim_support` is LLM paraphrase, depresses real grounding scores |
-| ACC-5 | High | CANONICALIZE | `unclear` direction findings inflated into largest bin |
-| ACC-5a | High | CANONICALIZE/GROUP | CUI enrichment post-canonicalize cannot fix grouping errors |
-| DES-1a | High | RESOLVE | Cross-paper relations ignored in FinalRule scoring — defeats cross-paper feature |
-| ACC-6 | Medium | RELATE | Pair truncation is index-ordered, not importance-ordered |
-| ACC-6a | Medium | CANONICALIZE | Unbounded candidate list sent to LLM — expensive with cross-paper pooling |
-| ACC-6b | Medium | CANONICALIZE | Position bias from grounding-score ordering in LLM predicate selection |
-| ACC-7 | Medium | CORPUS RELATE | Cross-paper gate skips outcome gating for non-expression rules |
-| ACC-8 | Medium | NORMALIZE | `infer_direction()` wrong on complex clinical negation |
-| DES-1b | Medium | CORPUS RELATE | Incremental mode never computes intra-paper corpus relations |
-| DES-2 | Medium | RELATE | NLI model general-domain, wrong CONTRADICT feeds into RESOLVE scoring |
-| DES-2b | Medium | GROUNDING | NLI model general-domain — first quality gate, biomedical underscoring risk |
-| DES-4 | Medium | GROUNDING | `_split_windows()` char-boundary cuts depress grounding scores at first gate |
-| ACC-9 | Low | RELATE | `_nli_scores()` lacks sliding window — rarely fires in practice |
-| DES-0 | Low | CANONICALIZE | `CanonicalScopeEnum` single value loses conflicted + multi_study combination |
-| DES-1 | Low | RESOLVE | Two scoring modes produce non-comparable final score scales |
-| DES-2a | Low | RESOLVE | Scoring weights hand-tuned, not empirically validated — no gold dataset |
-| DES-3 | Low | NORMALIZE | `_best_scope()` ignores scope from lower-grounding findings |
+| ACC-5 | High | CANONICALIZE/GROUP | CUI enrichment post-canonicalize cannot fix grouping errors |
+| ACC-6 | High | CANONICALIZE | `unclear` direction findings inflated into largest bin |
+| DES-1 | High | RESOLVE | Cross-paper relations ignored in FinalRule scoring — defeats cross-paper feature |
+| ACC-7 | Medium | CANONICALIZE | Unbounded candidate list sent to LLM — expensive with cross-paper pooling |
+| ACC-8 | Medium | CANONICALIZE | Position bias from grounding-score ordering in LLM predicate selection |
+| ACC-9 | Medium | RELATE | Pair truncation is index-ordered, not importance-ordered |
+| ACC-10 | Medium | CORPUS RELATE | Cross-paper gate skips outcome gating for non-expression rules |
+| ACC-11 | Medium | NORMALIZE | `infer_direction()` wrong on complex clinical negation |
+| DES-2 | Medium | CORPUS RELATE | Incremental mode never computes intra-paper corpus relations |
+| DES-3 | Medium | RELATE | NLI model general-domain, wrong CONTRADICT feeds into RESOLVE scoring |
+| DES-4 | Medium | GROUNDING | NLI model general-domain — first quality gate, biomedical underscoring risk |
+| DES-5 | Medium | GROUNDING | `_split_windows()` char-boundary cuts depress grounding scores at first gate |
+| ACC-12 | Low | RELATE | `_nli_scores()` lacks sliding window — rarely fires in practice |
+| DES-6 | Low | CANONICALIZE | `CanonicalScopeEnum` single value loses conflicted + multi_study combination |
+| DES-7 | Low | RESOLVE | Two scoring modes produce non-comparable final score scales |
+| DES-8 | Low | RESOLVE | Scoring weights hand-tuned, not empirically validated — no gold dataset |
+| DES-9 | Low | NORMALIZE | `_best_scope()` ignores scope from lower-grounding findings |

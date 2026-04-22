@@ -1,6 +1,7 @@
 """
-SummarizationRunner — orchestrates MAP → REDUCE → RULES → NORMALIZE → GROUP
+SummarizationRunner — orchestrates MAP → GROUNDING → NORMALIZE → GROUP
 → CANONICALIZE → RELATE → RESOLVE with ABC cascading.
+REDUCE → RULES is an optional secondary block (disabled by default).
 
 Usage example
 -------------
@@ -82,7 +83,8 @@ logger = logging.getLogger(__name__)
 
 class SummarizationRunner:
     """
-    Full pipeline runner: MAP (with ABC cascade) → REDUCE → RULES.
+    Full pipeline runner: MAP → GROUNDING → NORMALIZE → GROUP → CANONICALIZE
+    → RELATE → RESOLVE.  REDUCE → RULES is an optional secondary block.
 
     Parameters
     ----------
@@ -123,6 +125,24 @@ class SummarizationRunner:
     trace_dir:
         Directory for JSONL trace files.  Defaults to ``output_dir/traces``.
         Files: ``runs.jsonl``, ``chunks.jsonl``.
+    canonicalize_with_llm:
+        When True, passes the escalation LLM to CanonicalizeStage for predicate
+        selection.  When False, deterministic fallback is used instead.
+    nli_entailment_threshold:
+        NLI score above which a rule pair is classified as entailment in RELATE.
+    nli_contradiction_threshold:
+        NLI score above which a rule pair is classified as contradiction in RELATE.
+    db:
+        DatabaseConnection instance for persisting pipeline outputs.  All DB
+        writes are no-ops when None.
+    force_rerun:
+        When True, ignores any cached result on disk and re-runs the full pipeline.
+    run_ner:
+        When True and db is not None, runs scispaCy NER + UMLS linking after the
+        pipeline completes.
+    run_reduce:
+        When True, runs the optional REDUCE → RULES → contradiction-detection
+        block after RESOLVE.  Disabled by default.
     """
 
     def __init__(
@@ -183,8 +203,8 @@ class SummarizationRunner:
         self._trace_enabled = trace_enabled
         self.trace_dir: Path = trace_dir or (output_dir / "traces")
 
-        # Stores all post-MAP findings with grounding_score written in-place,
-        # mirroring exactly what flows into REDUCE. NORMALIZE reads this.
+        # Stores post-MAP findings (post-grounding when enabled, raw otherwise).
+        # NORMALIZE reads this.
         self._scored_map_findings: dict[str, list[Finding]] = {}
         # Stores NORMALIZE output per pmcid. Input to GROUP.
         self._normal_findings: dict[str, list[NormalFinding]] = {}
@@ -221,9 +241,10 @@ class SummarizationRunner:
         keys: pmcid, sentences_with_provenance (list of dicts).
 
         Returns a result dict with keys:
-            status, pmcid, summary, rules, audit_trail
+            status, run_id, pmcid, summary, rules, contradiction_report,
+            canonical_rules, relations, final_rules, audit_trail, rejection_summary
         or on failure:
-            status='error', pmcid, error
+            status='error', run_id, pmcid, error
         """
         pmcid = file_data["pmcid"]
 
@@ -277,7 +298,7 @@ class SummarizationRunner:
             # Track total MAP findings for rejection summary (before any filtering)
             map_findings_total = sum(len(cs.findings) for cs in chunk_summaries)
 
-            # 1a. Grounding filter — score + drop ungrounded findings before REDUCE
+            # 1a. Grounding filter — score + drop ungrounded findings before NORMALIZE
             grounding_rejected: list[tuple[str, Finding]] = []  # (chunk_id, finding)
             if self._grounding is not None:
                 findings_before = map_findings_total
@@ -307,6 +328,11 @@ class SummarizationRunner:
                 self._scored_map_findings[pmcid] = all_findings
                 logger.info("[%s] chunk_ids before persist: %s", pmcid, [cs.chunk_id for cs in chunk_summaries])
                 self._persist_map_findings(pipeline_run_db_id, pmcid, chunk_summaries)
+            else:
+                # Grounding disabled — still populate so NORMALIZE receives MAP findings.
+                self._scored_map_findings[pmcid] = [
+                    f for cs in chunk_summaries for f in cs.findings
+                ]
 
             # 1b. NORMALIZE — entity normalization + conditional dedup
             n_scored = len(self._scored_map_findings.get(pmcid, []))
@@ -551,8 +577,8 @@ class SummarizationRunner:
         same paper.
 
         This is a post-hoc analytical step.  It does NOT modify any per-paper
-        output and does NOT affect ResolveStage scoring (which continues to use
-        the per-paper ``relations`` key).
+        output and does NOT currently affect ResolveStage scoring, which only
+        receives per-paper relations (see DES-1a in KNOWN_ISSUES.md).
 
         Parameters
         ----------
