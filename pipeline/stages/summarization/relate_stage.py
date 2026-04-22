@@ -44,14 +44,19 @@ MAX_PAIRS = 500  # safety cap — increase if your rule sets are large
 _NLI_MODEL = "cross-encoder/nli-deberta-v3-base"
 
 
-def _get_nli_pipe(model_name: str = _NLI_MODEL):
+def _get_nli_pipe(model_name: str = _NLI_MODEL, batch_size: int = 16, device: int | str | None = None):
     """Return cached NLI pipeline, sharing the grounding_filter singleton."""
-    from .grounding_filter import _NLI_PIPE_CACHE
+    from .grounding_filter import _NLI_PIPE_CACHE, _get_device
     if model_name not in _NLI_PIPE_CACHE:
         from transformers import pipeline  # type: ignore
-        logger.info("RELATE: loading NLI model %r (singleton)", model_name)
+        resolved_device = device if device is not None else _get_device()
+        logger.info(
+            "RELATE: loading NLI model %r on device=%r batch_size=%d",
+            model_name, resolved_device, batch_size,
+        )
         _NLI_PIPE_CACHE[model_name] = pipeline(
-            "text-classification", model=model_name, top_k=None
+            "text-classification", model=model_name, top_k=None,
+            device=resolved_device, batch_size=batch_size,
         )
     return _NLI_PIPE_CACHE[model_name]
 
@@ -226,11 +231,15 @@ class RelateStage:
         entailment_threshold: float = 0.55,
         contradiction_threshold: float = 0.65,
         max_pairs: int = MAX_PAIRS,
+        batch_size: int = 16,
+        device: int | str | None = None,
     ) -> None:
         self._model_name = model_name
         self._entailment_threshold = entailment_threshold
         self._contradiction_threshold = contradiction_threshold
         self._max_pairs = max_pairs
+        self._batch_size = batch_size
+        self._device = device
 
     def relate(
         self,
@@ -262,7 +271,7 @@ class RelateStage:
             return []
 
         _gate = gate if gate is not None else _should_compare
-        pipe = _get_nli_pipe(self._model_name)
+        pipe = _get_nli_pipe(self._model_name, self._batch_size, self._device)
 
         # Generate eligible pairs
         eligible: list[tuple[int, int]] = []

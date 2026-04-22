@@ -21,11 +21,25 @@ from .models import AuditableSummary, EvidenceChainItem, ExtractedRules, Finding
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "cross-encoder/nli-deberta-v3-base"
+_DEFAULT_BATCH_SIZE = 16
 
 # Module-level NLI pipeline singleton — shared across all GroundingFilter
 # instances and reused by RelateStage via relate_stage._get_nli_pipe().
 # Avoids reloading the model on each GroundingFilter instantiation.
 _NLI_PIPE_CACHE: dict[str, object] = {}
+
+
+def _get_device() -> int | str:
+    """Return the best available device: CUDA GPU, MPS (Apple Silicon), or CPU."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return 0
+        if torch.backends.mps.is_available():
+            return "mps"
+    except ImportError:
+        pass
+    return -1
 
 
 class GroundingFilter:
@@ -40,15 +54,25 @@ class GroundingFilter:
     model_name:
         HuggingFace model for text-classification NLI.
         Must expose labels including "entailment".
+    batch_size:
+        Number of (premise, hypothesis) pairs per model forward pass.
+        Larger values improve GPU/MPS throughput. Default 16.
+    device:
+        Device for inference. None = auto-detect (CUDA → MPS → CPU).
+        Pass 0 for CUDA, "mps" for Apple Silicon, -1 to force CPU.
     """
 
     def __init__(
         self,
         threshold: float = 0.5,
         model_name: str = _DEFAULT_MODEL,
+        batch_size: int = _DEFAULT_BATCH_SIZE,
+        device: int | str | None = None,
     ) -> None:
         self.threshold = threshold
         self._model_name = model_name
+        self._batch_size = batch_size
+        self._device = device if device is not None else _get_device()
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -154,11 +178,16 @@ class GroundingFilter:
         global _NLI_PIPE_CACHE
         if self._model_name not in _NLI_PIPE_CACHE:
             from transformers import pipeline  # optional dep
-            logger.info("GroundingFilter: loading NLI model %r (singleton)", self._model_name)
+            logger.info(
+                "GroundingFilter: loading NLI model %r on device=%r batch_size=%d",
+                self._model_name, self._device, self._batch_size,
+            )
             _NLI_PIPE_CACHE[self._model_name] = pipeline(
                 "text-classification",
                 model=self._model_name,
                 top_k=None,
+                device=self._device,
+                batch_size=self._batch_size,
             )
         return _NLI_PIPE_CACHE[self._model_name]
 
