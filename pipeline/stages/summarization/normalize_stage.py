@@ -209,24 +209,31 @@ def _umls_canonical(text: str) -> str | None:
         return None
 
 
-def normalize_entity(name: str | None) -> str | None:
+def _resolve_entity(name: str | None, synonyms: dict[str, str]) -> str | None:
     """
-    Return the canonical form of an entity name, or None if input is None.
+    Canonical resolution core shared by `normalize_entity` and `NormalizeStage._norm`.
 
     Resolution order:
-      1. UMLS linker (scispaCy) — preferred name from UMLS knowledge base.
-      2. Hand-curated _SYNONYMS dict — covers rare/unlinked entities.
+      1. synonyms dict — domain knowledge takes priority; covers acronyms the
+         UMLS linker gets wrong (e.g. CEAN→Cetacea).
+      2. UMLS linker (scispaCy singleton).
       3. Identity — stripped input returned unchanged.
     """
     if name is None:
         return None
     stripped = name.strip()
-    # 1. UMLS
+    from_dict = synonyms.get(stripped.lower())
+    if from_dict is not None:
+        return from_dict
     umls = _umls_canonical(stripped)
     if umls:
         return umls
-    # 2. Dict
-    return _SYNONYMS.get(stripped.lower(), stripped)
+    return stripped
+
+
+def normalize_entity(name: str | None) -> str | None:
+    """Return the canonical form of an entity name using the built-in synonym dict."""
+    return _resolve_entity(name, _SYNONYMS)
 
 
 # ── Assertion status inference ─────────────────────────────────────────────────
@@ -469,28 +476,8 @@ class NormalizeStage:
         return result
 
     def _norm(self, name: str | None) -> str | None:
-        """
-        Resolve an entity name to its canonical form.
-
-        Resolution order:
-          1. Instance synonym dict (built-in + extra_synonyms) — domain
-             knowledge takes priority; covers acronyms the linker gets wrong.
-          2. UMLS linker (module-level scispaCy singleton).
-          3. Identity fallback — stripped input returned unchanged.
-        """
-        if name is None:
-            return None
-        stripped = name.strip()
-        # 1. Instance dict (includes extra_synonyms)
-        from_dict = self._synonyms.get(stripped.lower())
-        if from_dict is not None:
-            return from_dict
-        # 2. UMLS
-        umls = _umls_canonical(stripped)
-        if umls:
-            return umls
-        # 3. Identity
-        return stripped
+        """Resolve an entity name using the instance synonym dict (built-in + extra_synonyms)."""
+        return _resolve_entity(name, self._synonyms)
 
     def _merge(self, group: list[Finding], pmcid: str) -> NormalFinding:
         # Representative finding: highest grounding_score

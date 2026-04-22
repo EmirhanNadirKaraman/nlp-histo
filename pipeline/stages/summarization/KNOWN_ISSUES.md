@@ -7,18 +7,7 @@ Each issue has a **severity**, the **file:location** to touch, a description, an
 
 ## Bugs (code is wrong today)
 
-### BUG-1 — `normalize_entity()` function uses UMLS-first order
-**Severity:** High  
-**File:** `normalize_stage.py:212–229` (`normalize_entity`)  
-**Symptom:** CEAN→Cetacea normalization bug re-introduced for any caller of this standalone function.  
-The April 2026 fix corrected `NormalizeStage._norm()` to dict-first, but the module-level
-`normalize_entity()` export was never updated — it still runs UMLS before the synonym dict.
-Any code path calling `normalize_entity()` directly (e.g. `entity_linker.py`, external scripts)
-gets the old broken order.  
-**Fix:** Flip the resolution order in `normalize_entity()` to match `_norm()`: dict lookup first,
-UMLS second, identity fallback.
-
-### BUG-2 — `_compute_scope()` reads group-level `direction_counts` after bin split
+### BUG-1 — `_compute_scope()` reads group-level `direction_counts` after bin split
 **Severity:** High  
 **File:** `canonicalize_stage.py:83–110` (`_compute_scope`)  
 **Symptom:** After `_split_by_direction` produces a positive-only bin, `_compute_scope` still
@@ -295,8 +284,7 @@ take the first non-None value across the cluster (or the majority value).
 
 | ID | Severity | Stage | One-line description |
 |----|----------|-------|----------------------|
-| BUG-1 | High | NORMALIZE | `normalize_entity()` uses UMLS-first (old broken order) |
-| BUG-2 | High | CANONICALIZE | `_compute_scope` reads group-level direction_counts on a direction-split bin |
+| BUG-1 | High | CANONICALIZE | `_compute_scope` reads group-level direction_counts on a direction-split bin |
 | ACC-1 | High | MAP | Chunk boundary findings lost — no overlap |
 | ACC-2 | High | MAP/GROUP | `relation_type` variance splits same fact into different groups |
 | ACC-3 | High | RELATE | Subject exact-match drops normalization-near-miss pairs |
