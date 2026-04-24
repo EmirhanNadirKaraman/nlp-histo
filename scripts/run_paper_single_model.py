@@ -31,7 +31,6 @@ Options
 --trace        Write JSONL traces to out/summaries/traces/.
 --skip-nli     Disable NLI grounding filter and RELATE stage (faster, no GPU needed).
 --chunks N     Limit to the first N×10 sentences (default: all).
---no-canon     Skip CANONICALIZE LLM call; use deterministic (highest score) fallback.
 --list-only    Print available PMCIDs from the database and exit.
 --force-rerun  Ignore cached result JSON and reprocess from scratch.
 --no-corpus    Skip corpus-level relation stage (only relevant when ≥2 papers are run).
@@ -79,7 +78,6 @@ def build_llm():
 def build_batch_runners(
     *,
     skip_nli: bool,
-    no_canon: bool,
     skip_ner: bool,
 ):
     """
@@ -123,7 +121,6 @@ def build_batch_runners(
         chunk_size=10,
         grounding_threshold=None if skip_nli else 0.3,
         contradiction_similarity_threshold=None,
-        canonicalize_with_llm=not no_canon,
         nli_entailment_threshold=0.50,
         nli_contradiction_threshold=0.50,
         output_dir=Path("out/summaries"),
@@ -137,7 +134,6 @@ def build_runner(
     *,
     trace: bool,
     skip_nli: bool,
-    no_canon: bool,
     force_rerun: bool = False,
     skip_ner: bool = False,
 ) -> "SummarizationRunner":
@@ -156,7 +152,6 @@ def build_runner(
         chunk_size=10,
         grounding_threshold=0.3 if not skip_nli else None,
         contradiction_similarity_threshold=None,   # skip pairwise contradiction detection
-        canonicalize_with_llm=not no_canon,
         nli_entailment_threshold=0.50,
         nli_contradiction_threshold=0.50,
         output_dir=Path("out/summaries"),
@@ -200,7 +195,6 @@ def run_batch_mode(
     logger.info("Building batch runners (Claude Haiku 4.5 + Gemini Flash Lite)…")
     batch_runner, sync_runner = build_batch_runners(
         skip_nli=args.skip_nli,
-        no_canon=args.no_canon,
         skip_ner=args.skip_ner,
     )
 
@@ -350,7 +344,6 @@ def main() -> None:
     parser.add_argument("pmcid", nargs="*", help="PubMed Central ID(s), e.g. PMC10047158 PMC222")
     parser.add_argument("--trace",       action="store_true", help="Write JSONL traces")
     parser.add_argument("--skip-nli",    action="store_true", help="Disable NLI (faster)")
-    parser.add_argument("--no-canon",    action="store_true", help="Skip CANONICALIZE LLM call")
     parser.add_argument("--chunks",      type=int, default=None,
                         help="Limit to first N chunks (each chunk = 10 sentences)")
     parser.add_argument("--list-only",   action="store_true", help="Print available PMCIDs and exit")
@@ -400,7 +393,6 @@ def main() -> None:
         runner = build_runner(
             trace=args.trace,
             skip_nli=args.skip_nli,
-            no_canon=args.no_canon,
             force_rerun=args.force_rerun,
             skip_ner=args.skip_ner,
         )

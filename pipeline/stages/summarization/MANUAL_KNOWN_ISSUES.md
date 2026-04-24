@@ -15,14 +15,6 @@ Each issue has a **severity**, the **file:location** to touch, a description, an
 
 ## Medium-Impact Accuracy Risks
 
-### ACC-3 — `select_predicate()` sends all candidates to LLM unnecessarily
-**Severity:** Medium  
-**File:** `canonicalize_stage.py` (`_select_predicate`)  
-**Symptom:** All findings in a direction bin are sent to an LLM to pick a representative
-predicate, adding latency and cost. The LLM selection is not demonstrably better than
-deterministic selection.  
-**Fix:** Just select the finding with the highest grounding score. Remove the LLM call.
-
 ### ACC-4 — RELATE pair truncation discards high-value pairs
 **Severity:** Medium  
 **File:** `relate_stage.py:294–299`  
@@ -101,7 +93,6 @@ See iPad notes for more details.
 |----|----------|-------|----------------------|
 | BUG-2 | Medium | GROUNDING | `filter_findings` never writes `grounding_score` — downstream sees `None` |
 | BUG-3 | Low | GROUNDING | `_NLI_PIPE_CACHE` key ignores `batch_size` and `device` |
-| ACC-3 | Medium | CANONICALIZE | `select_predicate()` uses LLM — deterministic highest-grounding is sufficient |
 | ACC-4 | Medium | RELATE | Pair truncation is index-ordered, drops high-value Discussion/Conclusion rules |
 | DES-1 | Medium | CORPUS RELATE | Intra-paper corpus relations not recomputed on reprocess |
 | DES-2 | Low | CANONICALIZE | `compute_scope()` single enum loses conflicted + multi_study combination |

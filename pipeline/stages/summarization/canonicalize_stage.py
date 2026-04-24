@@ -2,9 +2,8 @@
 CANONICALIZE stage: FindingGroup[] → CanonicalRule[]
 
 For each FindingGroup:
-  1. Pick a canonical predicate text — LLM selects the best-grounded claim from
-     member predicate_text values, with a deterministic fallback (highest
-     mean_grounding_score) when the LLM is unavailable or fails.
+  1. Pick a canonical predicate text — selects the finding with the highest
+     mean_grounding_score (deterministic, no LLM call).
   2. Compute a CanonicalScope (4-state: single_study, multi_study, conflicted,
      unknown) based on direction_counts and cross-paper PMCID coverage.
   3. Groups with mixed directions (e.g. both "positive" and "negative") are
@@ -18,9 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import List
-
-from langchain_core.prompts import ChatPromptTemplate
 
 from .models import (
     CanonicalRule,
@@ -31,43 +27,6 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ── Prompt ─────────────────────────────────────────────────────────────────────
-
-_CANONICALIZE_SYSTEM = """You are a medical knowledge editor.
-You will be given a group of related histopathology claims that all describe the
-same (subject, outcome, relation) triple.  Your task is to select the single
-best predicate text from the provided candidates.
-
-Selection criteria (in priority order):
-1. Highest clinical informativeness — concrete, specific, quantified if possible.
-2. Grammatically correct and complete sentence.
-3. Widest scope (covers the finding without over-claiming).
-4. Avoid hedging words like "may", "might", "possibly" unless the uncertainty is real.
-
-Return ONLY the chosen predicate text string, verbatim from the candidates list.
-Do NOT paraphrase or combine candidates."""
-
-_CANONICALIZE_USER = """Subject entity  : {subject}
-Outcome entity  : {outcome}
-Relation type   : {relation_type}
-Direction       : {direction}
-
-Candidate predicate texts (one per line, prefixed with rank by grounding score):
-{candidates}
-
-Which candidate best represents this finding?"""
-
-
-def _build_canonicalize_chain(llm):
-    """Return a plain (str) output chain — no structured output needed here."""
-    from langchain_core.output_parsers import StrOutputParser
-    prompt = ChatPromptTemplate([
-        ("system", _CANONICALIZE_SYSTEM),
-        ("user", _CANONICALIZE_USER),
-    ])
-    return prompt | llm | StrOutputParser()
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -162,19 +121,10 @@ def _split_by_direction(
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 class CanonicalizeStage:
-    """
-    CANONICALIZE stage: FindingGroup[] → CanonicalRule[].
+    """CANONICALIZE stage: FindingGroup[] → CanonicalRule[]."""
 
-    Parameters
-    ----------
-    llm:
-        LangChain chat model used to select canonical predicate text.
-        Pass None to always use the deterministic fallback.
-    """
-
-    def __init__(self, llm=None) -> None:
-        self._llm = llm
-        self._chain = _build_canonicalize_chain(llm) if llm is not None else None
+    def __init__(self) -> None:
+        pass
 
     def canonicalize(
         self,
@@ -281,43 +231,4 @@ class CanonicalizeStage:
         direction: str,
         pmcid: str,
     ) -> str:
-        """
-        Use LLM to pick the best predicate text, falling back deterministically.
-        """
-        if self._chain is None or len(candidates) == 1:
-            return _pick_best_predicate_deterministic(candidates)
-
-        # Build numbered candidate list for the prompt
-        candidate_str = "\n".join(
-            f"{i+1}. [{score:.3f}] {text}"
-            for i, (score, text) in enumerate(candidates)
-        )
-
-        try:
-            result: str = self._chain.invoke({
-                "subject": group.subject_entity,
-                "outcome": group.outcome_entity,
-                "relation_type": group.relation_type.value,
-                "direction": direction,
-                "candidates": candidate_str,
-            })
-            result = result.strip()
-
-            # Validate: the returned text must be in our candidate set
-            valid_texts = {text for _, text in candidates}
-            if result in valid_texts:
-                return result
-
-            # LLM returned something not in the candidates — log and fall back
-            logger.warning(
-                "[%s] CANONICALIZE LLM returned text not in candidates for group %s "
-                "(got %r). Using deterministic fallback.",
-                pmcid, group.group_id, result[:80],
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[%s] CANONICALIZE LLM failed for group %s (%s). Falling back.",
-                pmcid, group.group_id, exc,
-            )
-
         return _pick_best_predicate_deterministic(candidates)

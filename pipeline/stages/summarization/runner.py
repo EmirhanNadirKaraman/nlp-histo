@@ -125,9 +125,6 @@ class SummarizationRunner:
     trace_dir:
         Directory for JSONL trace files.  Defaults to ``output_dir/traces``.
         Files: ``runs.jsonl``, ``chunks.jsonl``.
-    canonicalize_with_llm:
-        When True, passes the escalation LLM to CanonicalizeStage for predicate
-        selection.  When False, deterministic fallback is used instead.
     nli_entailment_threshold:
         NLI score above which a rule pair is classified as entailment in RELATE.
     nli_contradiction_threshold:
@@ -155,7 +152,6 @@ class SummarizationRunner:
         scorer: MapOutputScorer | None = None,
         grounding_threshold: float | None = 0.5,
         contradiction_similarity_threshold: float | None = 0.7,
-        canonicalize_with_llm: bool = True,
         nli_entailment_threshold: float = 0.50,
         nli_contradiction_threshold: float = 0.50,
         output_dir: Path = Path("langchain-summarization/summarization_results"),
@@ -177,9 +173,7 @@ class SummarizationRunner:
         self._map = MapStage(voter_llms, level2_voter_llms, escalation_llm, theta=theta, chunk_size=chunk_size, scorer=scorer)
         self._normalize = NormalizeStage()
         self._group = GroupStage()
-        self._canonicalize = CanonicalizeStage(
-            llm=escalation_llm if canonicalize_with_llm else None
-        )
+        self._canonicalize = CanonicalizeStage()
         self._relate = RelateStage(
             entailment_threshold=nli_entailment_threshold,
             contradiction_threshold=nli_contradiction_threshold,
