@@ -24,15 +24,9 @@ not the highest-scoring candidate regardless of quality.
 
 ## Medium-Impact Accuracy Risks
 
-### ACC-2 — `_split_windows()` cuts at fixed character boundaries, not sentence boundaries
-**Severity:** Medium  
-**File:** `grounding_filter.py` (`_split_windows`)  
-**Symptom:** Current config: `WINDOW_CHARS = 400`, `STEP_CHARS = 200` (50% overlap). Windows
-cut mid-sentence, producing incomplete clause fragments that mislead NLI scoring.  
-**Fix:**
-- Split premise into sentences.
-- Pack sentences into windows under a token budget (≤450 tokens).
-- Add sentence-level overlap between adjacent windows.
+### ~~ACC-2~~ — RESOLVED
+`_split_windows()` now uses spaCy sentencizer + greedy packing (≤1800 chars ≈ 450 tokens)
+with 1-sentence overlap. Oversized sentences split further by `;` then `,`.
 
 ### ACC-3 — `select_predicate()` sends all candidates to LLM unnecessarily
 **Severity:** Medium  
@@ -89,7 +83,7 @@ See iPad notes for more details.
 | ID | Severity | Stage | One-line description |
 |----|----------|-------|----------------------|
 | BUG-1 | High | NORMALIZE | UMLS junk check runs after top-scorer selection, not before |
-| ACC-2 | Medium | GROUNDING | `_split_windows()` char-boundary cuts produce incomplete clause fragments |
+| ~~ACC-2~~ | ~~Medium~~ | GROUNDING | RESOLVED — sentence-aware windowing with ; , fallback |
 | ACC-3 | Medium | CANONICALIZE | `select_predicate()` uses LLM — deterministic highest-grounding is sufficient |
 | ACC-4 | Medium | RELATE | Pair truncation is index-ordered, drops high-value Discussion/Conclusion rules |
 | DES-1 | Medium | CORPUS RELATE | Intra-paper corpus relations not recomputed on reprocess |

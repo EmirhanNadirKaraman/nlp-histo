@@ -14,6 +14,7 @@ entailed by its cited verbatim source text.  Applied at two points:
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 
 from .models import AuditableSummary, EvidenceChainItem, ExtractedRules, Finding, Rule, RuleAuditSummary, RuleCounts
@@ -202,27 +203,152 @@ class GroundingFilter:
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-# cross-encoder/nli-deberta-v3-base has a 512-token limit.  A long
-# verbatim_support paragraph can exceed this and get silently truncated,
-# making the entailment check unreliable.  We split the premise into
-# overlapping windows of ~400 chars (well inside 512 tokens for English)
-# and take the max entailment score across windows.
-_WINDOW_CHARS = 400
-_STEP_CHARS   = 200   # 50 % overlap so a sentence split across a boundary is covered
+# DeBERTa-v3 has a 512-token limit shared between premise and hypothesis.
+# _compute_premise_budget() derives the per-call budget from the actual
+# hypothesis length so the joint sequence never exceeds the model limit.
+_MODEL_MAX_TOKENS = 512  # hard cap; model_max_length can be unreliable (1e30)
+_PREMISE_BUDGET_FLOOR = 64  # never allocate less than this, even for huge hypotheses
+
+_SENTENCIZER = None  # lazy-loaded spaCy pipeline (module-level singleton)
 
 
-def _split_windows(text: str) -> list[str]:
+def _get_sentencizer():
+    global _SENTENCIZER
+    if _SENTENCIZER is None:
+        import spacy  # available via scispacy
+        # Rule-based sentencizer; fast but fragile on "et al.", "Fig.", decimals.
+        # Mis-splits create smaller windows; max() across windows recovers.
+        nlp = spacy.blank("en")
+        nlp.add_pipe("sentencizer")
+        _SENTENCIZER = nlp
+    return _SENTENCIZER
+
+
+def _token_len(text: str, tokenizer) -> int:
+    return len(tokenizer(text, add_special_tokens=False)["input_ids"])
+
+
+def _compute_premise_budget(hyp: str, tokenizer) -> int:
     """
-    Split *text* into overlapping character windows.
-    Returns the original text as a single window if it is short enough.
+    Derive a safe premise token budget for one hypothesis.
+
+    The HF pipeline tokenizes (premise, hyp) together as:
+        [CLS] premise [SEP] hyp [SEP]
+    so special tokens consume tokenizer.num_special_tokens_to_add(pair=True)
+    slots (3 for DeBERTa-v3).  We subtract hypothesis tokens + specials from
+    the model limit and clamp to a minimum floor.
     """
-    if len(text) <= _WINDOW_CHARS:
+    try:
+        model_max = min(tokenizer.model_max_length, _MODEL_MAX_TOKENS)
+    except AttributeError:
+        model_max = _MODEL_MAX_TOKENS
+
+    try:
+        n_special = tokenizer.num_special_tokens_to_add(pair=True)
+    except Exception:
+        n_special = 3  # [CLS] + 2x [SEP]
+
+    hyp_tokens = _token_len(hyp, tokenizer)
+    budget = model_max - hyp_tokens - n_special
+    return max(budget, _PREMISE_BUDGET_FLOOR)
+
+
+def _truncate_to_budget(text: str, budget: int, tokenizer) -> str:
+    """Truncate *text* to at most *budget* tokens using the tokenizer vocab."""
+    ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+    if len(ids) <= budget:
+        return text
+    return tokenizer.decode(ids[:budget], skip_special_tokens=True)
+
+
+def _split_on_sep(text: str, sep: str) -> list[str]:
+    """Split *text* on *sep*, keeping the separator attached to each chunk."""
+    if sep not in text:
         return [text]
+    pattern = rf"[^{re.escape(sep)}]+(?:{re.escape(sep)}|$)"
+    parts = [m.strip() for m in re.findall(pattern, text) if m.strip()]
+    return parts or [text]
+
+
+def _split_oversized(sent: str, budget: int, tokenizer) -> list[str]:
+    """
+    Split *sent* by ';' then ',' until every piece is ≤ budget tokens.
+    Falls back to tokenizer-level truncation if no separator helps.
+    """
+    n = _token_len(sent, tokenizer)
+    if n <= budget:
+        return [sent]
+
+    for sep in (";", ","):
+        parts = _split_on_sep(sent, sep)
+        if len(parts) > 1:
+            result: list[str] = []
+            for p in parts:
+                result.extend(_split_oversized(p, budget, tokenizer))
+            return result
+
+    # No separator helped — truncate via tokenizer as last resort.
+    logger.warning(
+        "_split_oversized: unsplittable clause (%d tokens > budget %d) — truncating",
+        n, budget,
+    )
+    return [_truncate_to_budget(sent, budget, tokenizer)]
+
+
+def _split_windows(text: str, hyp: str, tokenizer, overlap: bool = True) -> list[str]:
+    """
+    Split *text* into windows that fit within the per-hypothesis token budget.
+
+    The budget is derived from *hyp* so the joined (premise, hyp) sequence
+    never exceeds the model's 512-token limit.
+
+    Strategy:
+    1. If the full text fits, return it as a single window.
+    2. Sentencize with spaCy; split oversized sentences by ';' / ',' / truncate.
+    3. Greedily pack chunks; flush when the exact joined token count would
+       exceed the budget.  With overlap=True, the last chunk of each window is
+       repeated as the first chunk of the next so boundary sentences appear with
+       context in at least one window.
+    """
+    budget = _compute_premise_budget(hyp, tokenizer)
+
+    if _token_len(text, tokenizer) <= budget:
+        return [text]
+
+    sentences = [s.text.strip() for s in _get_sentencizer()(text).sents if s.text.strip()]
+    if not sentences:
+        return [_truncate_to_budget(text, budget, tokenizer)]
+
+    chunks: list[str] = []
+    for sent in sentences:
+        chunks.extend(_split_oversized(sent, budget, tokenizer))
+
     windows: list[str] = []
-    start = 0
-    while start < len(text):
-        windows.append(text[start: start + _WINDOW_CHARS])
-        start += _STEP_CHARS
+    current: list[str] = []
+
+    for chunk in chunks:
+        candidate = " ".join(current + [chunk]) if current else chunk
+        if current and _token_len(candidate, tokenizer) > budget:
+            # Flush the current window.
+            windows.append(" ".join(current))
+
+            if overlap:
+                # Repeat the last chunk of the previous window for boundary context.
+                overlap_chunk = current[-1]
+                overlap_candidate = f"{overlap_chunk} {chunk}"
+                if _token_len(overlap_candidate, tokenizer) <= budget:
+                    current = [overlap_chunk, chunk]
+                else:
+                    # Overlap alone would exhaust the budget; skip it.
+                    current = [chunk]
+            else:
+                current = [chunk]
+        else:
+            current.append(chunk)
+
+    if current:
+        windows.append(" ".join(current))
+
     return windows
 
 
@@ -231,12 +357,11 @@ def _score_pairs(pairs: list[tuple[str, str]], nli_pipe) -> list[float]:
     Run NLI on a batch of (premise, hypothesis) pairs.
     Returns a float list of entailment scores in [0, 1].
 
-    Long premises are split into overlapping windows; the maximum entailment
-    score across windows is returned so that a supporting sentence in the
-    second half of a paragraph is not missed due to token-limit truncation.
-    Empty-string premises score 0.0 without hitting the model.
+    Long premises are split into sentence-boundary windows (budget computed per
+    hypothesis so the shared 512-token limit is never exceeded).  The maximum
+    entailment score across windows is returned so a supporting sentence at a
+    boundary is not missed.  Empty-string premises score 0.0.
     """
-    # Build a flat list of (pair_index, window_text, hyp) inputs
     flat_inputs: list[dict] = []
     flat_pair_indices: list[int] = []
 
@@ -245,18 +370,17 @@ def _score_pairs(pairs: list[tuple[str, str]], nli_pipe) -> list[float]:
     for i, (premise, hyp) in enumerate(pairs):
         if not premise.strip():
             continue
-        for window in _split_windows(premise):
+        for window in _split_windows(premise, hyp, nli_pipe.tokenizer):
             flat_inputs.append({"text": window, "text_pair": hyp})
             flat_pair_indices.append(i)
 
     if flat_inputs:
-        batch_results = nli_pipe(flat_inputs)
+        batch_results = nli_pipe(flat_inputs, truncation=True)
         for pair_idx, result in zip(flat_pair_indices, batch_results):
             window_score = next(
                 (s["score"] for s in result if s["label"].lower() == "entailment"),
                 0.0,
             )
-            # Keep the best window score for this pair
             if window_score > scores[pair_idx]:
                 scores[pair_idx] = window_score
 
