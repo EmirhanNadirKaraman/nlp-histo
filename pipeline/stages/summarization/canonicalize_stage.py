@@ -80,22 +80,23 @@ def _canonical_rule_id(group_id: str, direction: str) -> str:
     return f"CR_{_sha8(group_id)}_{direction}"
 
 
-def _compute_scope(group: FindingGroup, member_nfs: list[NormalFinding]) -> CanonicalScopeEnum:
+def _compute_scope(member_nfs: list[NormalFinding]) -> CanonicalScopeEnum:
     """
-    Determine canonical scope from group direction_counts and PMCID coverage.
+    Determine canonical scope from bin-level direction counts and PMCID coverage.
 
     Rules:
-      - If direction_counts has ≥2 non-'unclear' directions with count≥1 → conflicted
-      - Else if unique PMCIDs across members ≥ 2              → multi_study
-      - Else if unique PMCIDs == 1                            → single_study
-      - Else                                                  → unknown
+      - If bin has ≥2 non-'unclear' directions with count≥1 → conflicted
+      - Else if unique PMCIDs across members ≥ 2            → multi_study
+      - Else if unique PMCIDs == 1                          → single_study
+      - Else                                                → unknown
     """
-    # Count distinct non-unclear direction values
-    non_unclear_dirs = {
-        d: c for d, c in group.direction_counts.items()
-        if d not in ("unclear", "None") and c > 0
-    }
-    if len(non_unclear_dirs) >= 2:
+    # Count distinct non-unclear directions from the bin, not the group
+    bin_directions: set[str] = set()
+    for nf in member_nfs:
+        d = nf.direction.value if nf.direction is not None else "unclear"
+        if d not in ("unclear", "None"):
+            bin_directions.add(d)
+    if len(bin_directions) >= 2:
         return CanonicalScopeEnum.conflicted
 
     # Count unique PMCIDs across member NormalFindings
@@ -238,7 +239,7 @@ class CanonicalizeStage:
                     candidates, group, direction, pmcid
                 )
 
-                scope = _compute_scope(group, bin_nfs)
+                scope = _compute_scope(bin_nfs)
 
                 # Aggregate evidence and PMCID lists
                 all_pmcids: list[str] = sorted(

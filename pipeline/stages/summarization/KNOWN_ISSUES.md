@@ -7,17 +7,6 @@ Each issue has a **severity**, the **file:location** to touch, a description, an
 
 ## Bugs (code is wrong today)
 
-### BUG-1 — `_compute_scope()` reads group-level `direction_counts` after bin split
-**Severity:** High  
-**File:** `canonicalize_stage.py:83–110` (`_compute_scope`)  
-**Symptom:** After `_split_by_direction` produces a positive-only bin, `_compute_scope` still
-reads `group.direction_counts` — the group-level tally that includes negative/unclear findings.
-If the original group had mixed directions, `conflicted` fires for every bin, even bins that
-are internally direction-consistent. A positive-only bin from a positive+negative group is
-always marked `conflicted`.  
-**Fix:** Pass bin-level `member_nfs` direction counts into `_compute_scope` instead of relying
-on `group.direction_counts`. Compute conflicted from the bin, not the group.
-
 ---
 
 ## High-Impact Accuracy Risks
@@ -182,22 +171,32 @@ only mode used, intra-paper corpus relations are permanently absent for all pape
 standard `_should_compare_cross_paper` gate (no XOR restriction) to produce intra-paper
 pairs, then include them in `_replace_for_pmcid`.
 
-### DES-5 — `_split_windows()` cuts at fixed character boundaries, not sentence boundaries
-**Severity:** Medium  
-**File:** `grounding_filter.py:185–197` (`_split_windows`)  
-**Symptom:** The current 400-char / 200-char-step sliding window cuts mid-sentence, so a
-premise window may begin or end with an incomplete sentence fragment. This can produce
-misleading NLI scores when the entailment-supporting clause is split across two windows.  
-**Fix:** Replace character-based windowing with sentence-aware packing:
-1. Split premise into sentences (e.g. spaCy sentencizer or simple regex).
-2. Pack sentences into windows under a token budget (≤450 tokens).
-3. Add 1–2 sentence overlap between adjacent windows (analogous to current step overlap).
-This ensures every window starts and ends on a sentence boundary and the NLI model always
-sees complete clauses.
+### ~~DES-5~~ — RESOLVED
+`_split_windows()` now uses spaCy sentencizer + greedy packing under a dynamic per-hypothesis
+token budget with 1-sentence overlap. Oversized sentences split further by `;` then `,`;
+truly unsplittable clauses are truncated at the tokenizer level.
 
 ---
 
 ## Lower-Impact / Design Choices
+
+### BUG-2 — `filter_findings` does not write `grounding_score` back onto findings
+**Severity:** Medium  
+**File:** `grounding_filter.py` (`filter_findings`)  
+**Symptom:** `filter_findings` runs NLI and drops low-scoring findings but never writes
+`grounding_score` onto the kept ones. Any downstream code that reads `grounding_score` will
+see `None`. `filter_findings_with_scores` is the correct replacement (the runner comment
+says to use it), but `filter_findings` remains callable.  
+**Fix:** Remove `filter_findings` or delegate it to `filter_findings_with_scores` and discard
+the dropped list.
+
+### BUG-3 — `_NLI_PIPE_CACHE` key ignores `batch_size` and `device`
+**Severity:** Low  
+**File:** `grounding_filter.py` (`GroundingFilter._pipe`)  
+**Symptom:** The module-level cache is keyed only on `model_name`. Two `GroundingFilter`
+instances with different `batch_size` or `device` settings share the first instance's pipeline
+silently.  
+**Fix:** Key the cache on `(model_name, device, batch_size)`.
 
 ### ACC-12 — `_nli_scores()` in RELATE does not use the sliding window
 **Severity:** Low (predicate text from CANONICALIZE is almost always short)  
@@ -263,7 +262,6 @@ take the first non-None value across the cluster (or the majority value).
 
 | ID | Severity | Stage | One-line description |
 |----|----------|-------|----------------------|
-| BUG-1 | High | CANONICALIZE | `_compute_scope` reads group-level direction_counts on a direction-split bin |
 | ACC-1 | High | MAP | Chunk boundary findings lost — no overlap |
 | ACC-2 | High | MAP/GROUP | `relation_type` variance splits same fact into different groups |
 | ACC-3 | High | RELATE | Subject exact-match drops normalization-near-miss pairs |
@@ -271,13 +269,15 @@ take the first non-None value across the cluster (or the majority value).
 | ACC-5 | High | CANONICALIZE/GROUP | CUI enrichment post-canonicalize cannot fix grouping errors |
 | ACC-6 | High | CANONICALIZE | `unclear` direction findings inflated into largest bin |
 | DES-1 | High | RESOLVE | Cross-paper relations ignored in FinalRule scoring — defeats cross-paper feature |
+| BUG-2 | Medium | GROUNDING | `filter_findings` never writes `grounding_score` — downstream sees `None` |
 | ACC-7 | Medium | CANONICALIZE | Unbounded candidate list sent to LLM — expensive with cross-paper pooling |
 | ACC-8 | Medium | CANONICALIZE | Position bias from grounding-score ordering in LLM predicate selection |
 | ACC-9 | Medium | RELATE | Pair truncation is index-ordered, not importance-ordered |
 | ACC-10 | Medium | CORPUS RELATE | Cross-paper gate skips outcome gating for non-expression rules |
 | ACC-11 | Medium | NORMALIZE | `infer_direction()` wrong on complex clinical negation |
 | DES-2 | Medium | CORPUS RELATE | Incremental mode never computes intra-paper corpus relations |
-| DES-5 | Medium | GROUNDING | `_split_windows()` char-boundary cuts depress grounding scores at first gate |
+| ~~DES-5~~ | ~~Medium~~ | GROUNDING | RESOLVED — sentence-aware windowing with dynamic budget |
+| BUG-3 | Low | GROUNDING | `_NLI_PIPE_CACHE` key ignores `batch_size` and `device` |
 | ACC-12 | Low | RELATE | `_nli_scores()` lacks sliding window — rarely fires in practice |
 | DES-6 | Low | CANONICALIZE | `CanonicalScopeEnum` single value loses conflicted + multi_study combination |
 | DES-7 | Low | RESOLVE | Two scoring modes produce non-comparable final score scales |
