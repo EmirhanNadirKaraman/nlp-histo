@@ -37,7 +37,8 @@ def _minimal_canonical_rule(**overrides) -> dict:
         "relation_type": "has_feature",
         "direction": "positive",
         "predicate_text": "CEAN is a benign vascular tumour",
-        "canonical_scope": "single_study",
+        "is_conflicted": False,
+        "study_coverage": "single_study",
         "category": "morphology",
         "supporting_pmcids": ["PMC111"],
         "member_normal_ids": ["NF1"],
@@ -92,7 +93,8 @@ class TestCorpusRelationModel:
             "mean_grounding_a", "mean_grounding_b",
             "finding_count_a", "finding_count_b",
             "supporting_pmcids_a", "supporting_pmcids_b",
-            "canonical_scope_a", "canonical_scope_b",
+            "is_conflicted_a", "study_coverage_a",
+            "is_conflicted_b", "study_coverage_b",
             "scope_check_result", "scope_note",
         ]:
             # rule_id_a / rule_id_b are the Relation base names
@@ -114,7 +116,8 @@ class TestCorpusRelationModel:
             mean_grounding_a=0.9, mean_grounding_b=0.8,
             finding_count_a=2, finding_count_b=1,
             supporting_pmcids_a=["PMC1"], supporting_pmcids_b=["PMC2"],
-            canonical_scope_a="single_study", canonical_scope_b="single_study",
+            is_conflicted_a=False, study_coverage_a="single_study",
+            is_conflicted_b=False, study_coverage_b="single_study",
         )
         assert cr.scope_check_result == "scope_unknown"
         assert cr.scope_note == ""

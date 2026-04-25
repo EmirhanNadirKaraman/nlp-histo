@@ -262,13 +262,6 @@ class AtomicFinding(BaseModel):
 
 # ── Phase 4: CANONICALIZE output ──────────────────────────────────────────────
 
-class CanonicalScopeEnum(str, Enum):
-    single_study  = "single_study"   # only one PMCID supports this rule
-    multi_study   = "multi_study"    # ≥2 distinct PMCIDs support this rule
-    conflicted    = "conflicted"     # ≥2 opposing directions within the group
-    unknown       = "unknown"        # no PMCID information available
-
-
 class CanonicalRule(BaseModel):
     """
     Output of the CANONICALIZE stage for one direction-bin of a FindingGroup.
@@ -283,7 +276,8 @@ class CanonicalRule(BaseModel):
     relation_type:       RelationTypeEnum
     direction:           DirectionEnum | None  # dominant direction for this bin
     predicate_text:      str                   # LLM-selected or best-score fallback
-    canonical_scope:     CanonicalScopeEnum
+    is_conflicted:       bool                  # True if ≥2 non-unclear opposing directions in bin
+    study_coverage:      Literal["single_study", "multi_study", "unknown"]
     category:            Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"]
     supporting_pmcids:   List[str]             # unique PMCIDs across member NFs
     member_normal_ids:   List[str]             # NormalFinding.normal_id values in this bin
@@ -333,7 +327,8 @@ class FinalRule(BaseModel):
     relation_type:         RelationTypeEnum
     direction:             DirectionEnum | None
     predicate_text:        str
-    canonical_scope:       CanonicalScopeEnum
+    is_conflicted:         bool
+    study_coverage:        Literal["single_study", "multi_study", "unknown"]
     category:              Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"]
     supporting_pmcids:     List[str]
     member_normal_ids:     List[str]
@@ -383,8 +378,10 @@ class CorpusRelation(Relation):
     finding_count_b:          int
     supporting_pmcids_a:      List[str]
     supporting_pmcids_b:      List[str]
-    canonical_scope_a:        str
-    canonical_scope_b:        str
+    is_conflicted_a:          bool
+    study_coverage_a:         Literal["single_study", "multi_study", "unknown"]
+    is_conflicted_b:          bool
+    study_coverage_b:         Literal["single_study", "multi_study", "unknown"]
     # Scope qualifier check — "scope_unknown" until FindingScope is carried on
     # CanonicalRule (v2 work).  Values: scope_unknown | scope_compatible |
     # scope_mismatch | scope_qualified.

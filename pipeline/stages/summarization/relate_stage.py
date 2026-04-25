@@ -47,18 +47,19 @@ _NLI_MODEL = "MoritzLaurer/deberta-v3-large-zeroshot-v2.0"
 def _get_nli_pipe(model_name: str = _NLI_MODEL, batch_size: int = 16, device: int | str | None = None):
     """Return cached NLI pipeline, sharing the grounding_filter singleton."""
     from .grounding_filter import _NLI_PIPE_CACHE, _get_device
-    if model_name not in _NLI_PIPE_CACHE:
+    resolved_device = device if device is not None else _get_device()
+    cache_key = (model_name, resolved_device, batch_size)
+    if cache_key not in _NLI_PIPE_CACHE:
         from transformers import pipeline  # type: ignore
-        resolved_device = device if device is not None else _get_device()
         logger.info(
             "RELATE: loading NLI model %r on device=%r batch_size=%d",
             model_name, resolved_device, batch_size,
         )
-        _NLI_PIPE_CACHE[model_name] = pipeline(
+        _NLI_PIPE_CACHE[cache_key] = pipeline(
             "text-classification", model=model_name, top_k=None,
             device=resolved_device, batch_size=batch_size,
         )
-    return _NLI_PIPE_CACHE[model_name]
+    return _NLI_PIPE_CACHE[cache_key]
 
 
 
@@ -302,8 +303,11 @@ class RelateStage:
 
         if len(eligible) > self._max_pairs:
             logger.warning(
-                "[%s] RELATE: %d eligible pairs exceeds cap %d — truncating.",
+                "[%s] RELATE: %d eligible pairs exceeds cap %d — truncating by grounding score.",
                 pmcid, len(eligible), self._max_pairs,
+            )
+            eligible.sort(
+                key=lambda p: -((rules[p[0]].mean_grounding_score or 0.0) + (rules[p[1]].mean_grounding_score or 0.0))
             )
             eligible = eligible[: self._max_pairs]
 

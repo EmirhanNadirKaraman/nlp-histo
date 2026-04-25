@@ -27,7 +27,7 @@ _DEFAULT_BATCH_SIZE = 16
 # Module-level NLI pipeline singleton — shared across all GroundingFilter
 # instances and reused by RelateStage via relate_stage._get_nli_pipe().
 # Avoids reloading the model on each GroundingFilter instantiation.
-_NLI_PIPE_CACHE: dict[str, object] = {}
+_NLI_PIPE_CACHE: dict[tuple[str, str | int, int], object] = {}
 
 
 def _get_device() -> int | str:
@@ -78,30 +78,9 @@ class GroundingFilter:
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def filter_findings(self, summary: AuditableSummary) -> AuditableSummary:
-        """
-        Drop findings whose verbatim_support does not entail the claim.
-        Returns a new AuditableSummary with only supported findings.
-        """
-        if not summary.findings:
-            return summary
-
-        pairs = [(f.verbatim_support, f.claim) for f in summary.findings]
-        supported_mask = self._entailment_mask(pairs)
-
-        kept, dropped = [], []
-        for finding, supported in zip(summary.findings, supported_mask):
-            if supported:
-                kept.append(finding)
-            else:
-                dropped.append(finding.claim)
-
-        if dropped:
-            logger.debug(
-                "Chunk %s: grounding dropped %d/%d findings: %s",
-                summary.chunk_id, len(dropped), len(summary.findings), dropped,
-            )
-
-        return summary.model_copy(update={"findings": kept})
+        """Delegates to filter_findings_with_scores; discards the dropped list."""
+        kept, _ = self.filter_findings_with_scores(summary)
+        return kept
 
     def filter_findings_with_scores(
         self, summary: AuditableSummary
@@ -177,20 +156,21 @@ class GroundingFilter:
     def _pipe(self):
         """Return the NLI pipeline, loading it if not already cached."""
         global _NLI_PIPE_CACHE
-        if self._model_name not in _NLI_PIPE_CACHE:
+        cache_key = (self._model_name, self._device, self._batch_size)
+        if cache_key not in _NLI_PIPE_CACHE:
             from transformers import pipeline  # optional dep
             logger.info(
                 "GroundingFilter: loading NLI model %r on device=%r batch_size=%d",
                 self._model_name, self._device, self._batch_size,
             )
-            _NLI_PIPE_CACHE[self._model_name] = pipeline(
+            _NLI_PIPE_CACHE[cache_key] = pipeline(
                 "text-classification",
                 model=self._model_name,
                 top_k=None,
                 device=self._device,
                 batch_size=self._batch_size,
             )
-        return _NLI_PIPE_CACHE[self._model_name]
+        return _NLI_PIPE_CACHE[cache_key]
 
     def _entailment_mask(self, pairs: list[tuple[str, str]]) -> list[bool]:
         """

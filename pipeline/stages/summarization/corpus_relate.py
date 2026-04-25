@@ -343,15 +343,26 @@ class CorpusRelateStage:
             "CORPUS RELATE [%s]: comparing %d new rules × %d existing rules",
             new_pmcid, len(new_rules), len(existing_rules),
         )
-        raw_relations = self._relate.relate(
+        raw_cross = self._relate.relate(
             all_rules, pmcid="corpus", gate=_incremental_gate,
         )
+
+        # Second pass: intra-paper pairs from new_rules only.
+        # The XOR gate above blocks same-paper pairs, so they are never computed
+        # on reprocess.  Run RelateStage directly on new_rules (all same PMCID)
+        # to produce the intra-paper neighborhood for the reprocessed paper.
+        raw_intra: list = []
+        if len(new_rules) >= 2:
+            raw_intra = self._relate.relate(
+                new_rules, pmcid="corpus_intra", gate=_should_compare_cross_paper,
+            )
+
         logger.info(
-            "CORPUS RELATE [%s]: %d cross-paper relations found",
-            new_pmcid, len(raw_relations),
+            "CORPUS RELATE [%s]: %d cross-paper + %d intra-paper relations found",
+            new_pmcid, len(raw_cross), len(raw_intra),
         )
 
-        corpus_relations = self._enrich(raw_relations, id_to_pmcid, rule_meta)
+        corpus_relations = self._enrich(raw_cross + raw_intra, id_to_pmcid, rule_meta)
         self._replace_for_pmcid(new_pmcid, corpus_relations, db)
         return corpus_relations
 
@@ -366,7 +377,7 @@ class CorpusRelateStage:
         Returns (rules, id_to_pmcid, rule_meta).
         """
         from .models import (  # noqa: PLC0415
-            CanonicalScopeEnum, DirectionEnum, RelationTypeEnum,
+            DirectionEnum, RelationTypeEnum,
         )
 
         rules: list[CanonicalRule] = []
@@ -406,7 +417,8 @@ class CorpusRelateStage:
                             relation_type        = RelationTypeEnum(row.relation_type),
                             direction            = DirectionEnum(row.direction) if row.direction else None,
                             predicate_text       = row.predicate_text,
-                            canonical_scope      = CanonicalScopeEnum(row.canonical_scope),
+                            is_conflicted        = row.is_conflicted,
+                            study_coverage       = row.study_coverage,
                             category             = row.category,
                             supporting_pmcids    = row.pmcids or [],
                             member_normal_ids    = row.member_normal_ids or [],
@@ -490,8 +502,10 @@ class CorpusRelateStage:
                 finding_count_b          = r.finding_count_b,
                 supporting_pmcids_a      = list(r.supporting_pmcids_a),
                 supporting_pmcids_b      = list(r.supporting_pmcids_b),
-                canonical_scope_a        = r.canonical_scope_a,
-                canonical_scope_b        = r.canonical_scope_b,
+                is_conflicted_a          = r.is_conflicted_a,
+                study_coverage_a         = r.study_coverage_a,
+                is_conflicted_b          = r.is_conflicted_b,
+                study_coverage_b         = r.study_coverage_b,
                 scope_check_result       = r.scope_check_result,
                 scope_note               = r.scope_note,
             )
@@ -715,8 +729,10 @@ class CorpusRelateStage:
                 finding_count_b=meta_b.get("finding_count") or 0,
                 supporting_pmcids_a=meta_a.get("supporting_pmcids") or [],
                 supporting_pmcids_b=meta_b.get("supporting_pmcids") or [],
-                canonical_scope_a=meta_a.get("canonical_scope") or "unknown",
-                canonical_scope_b=meta_b.get("canonical_scope") or "unknown",
+                is_conflicted_a=meta_a.get("is_conflicted") or False,
+                study_coverage_a=meta_a.get("study_coverage") or "unknown",
+                is_conflicted_b=meta_b.get("is_conflicted") or False,
+                study_coverage_b=meta_b.get("study_coverage") or "unknown",
                 # ── scope qualifier check (v1: not yet implemented) ────────────
                 scope_check_result="scope_unknown",
                 scope_note="",

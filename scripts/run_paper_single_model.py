@@ -316,7 +316,7 @@ def _print_result(result: dict) -> None:
                 f"{fr['subject_entity']} → {fr['outcome_entity']} "
                 f"[{fr['relation_type']}] [{fr.get('direction') or '?'}]\n"
                 f"    \"{fr['predicate_text'][:100]}\"\n"
-                f"    scope={fr['canonical_scope']}  "
+                f"    conflicted={fr.get('is_conflicted')} coverage={fr.get('study_coverage')}  "
                 f"pmcids={fr['supporting_pmcids']}\n"
             )
 

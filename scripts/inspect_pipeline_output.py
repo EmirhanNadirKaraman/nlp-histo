@@ -140,8 +140,10 @@ def build_corpus_index_from_db(session) -> dict[str, list[dict]]:
                 "finding_count_b":          row.finding_count_b,
                 "supporting_pmcids_a":      row.supporting_pmcids_a or [],
                 "supporting_pmcids_b":      row.supporting_pmcids_b or [],
-                "canonical_scope_a":        row.canonical_scope_a,
-                "canonical_scope_b":        row.canonical_scope_b,
+                "is_conflicted_a":          row.is_conflicted_a,
+                "study_coverage_a":         row.study_coverage_a,
+                "is_conflicted_b":          row.is_conflicted_b,
+                "study_coverage_b":         row.study_coverage_b,
                 "scope_check_result":       row.scope_check_result,
                 "scope_note":               row.scope_note,
             }
@@ -360,7 +362,8 @@ def build_data_from_db(pmcid: str, run_id: str, session) -> dict | None:
             "mean_grounding_score": cr.mean_grounding_score if cr else None,
             "finding_count":        cr.finding_count if cr else None,
             "member_normal_ids":    list(cr.member_normal_ids or []) if cr else [],
-            "canonical_scope":      cr.canonical_scope if cr else None,
+            "is_conflicted":        cr.is_conflicted if cr else None,
+            "study_coverage":       cr.study_coverage if cr else None,
             "supporting_pmcids":    list(cr.pmcids or []) if cr else [],
             "group_id":             cr.group_id if cr else None,
         })
@@ -381,7 +384,8 @@ def build_data_from_db(pmcid: str, run_id: str, session) -> dict | None:
             "relation_type":      cr.relation_type,
             "direction":          cr.direction,
             "predicate_text":     cr.predicate_text,
-            "canonical_scope":    cr.canonical_scope,
+            "is_conflicted":      cr.is_conflicted,
+            "study_coverage":     cr.study_coverage,
             "category":           cr.category,
             "supporting_pmcids":  list(cr.pmcids or []),
             "member_normal_ids":  list(cr.member_normal_ids or []),
@@ -712,7 +716,7 @@ _RULE_DIFF_FIELDS = [
 
 _CANONICAL_DIFF_FIELDS = [
     "direction", "category", "relation_type",
-    "mean_grounding_score", "finding_count", "canonical_scope",
+    "mean_grounding_score", "finding_count", "is_conflicted", "study_coverage",
 ]
 
 

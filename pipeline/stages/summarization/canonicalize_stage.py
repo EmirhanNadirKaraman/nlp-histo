@@ -4,8 +4,8 @@ CANONICALIZE stage: FindingGroup[] → CanonicalRule[]
 For each FindingGroup:
   1. Pick a canonical predicate text — selects the finding with the highest
      mean_grounding_score (deterministic, no LLM call).
-  2. Compute a CanonicalScope (4-state: single_study, multi_study, conflicted,
-     unknown) based on direction_counts and cross-paper PMCID coverage.
+  2. Compute two scope fields: is_conflicted (bool) and study_coverage
+     (single_study | multi_study | unknown) from direction counts and PMCID coverage.
   3. Groups with mixed directions (e.g. both "positive" and "negative") are
      split into separate CanonicalRules, one per majority direction.
 
@@ -20,7 +20,6 @@ import logging
 
 from .models import (
     CanonicalRule,
-    CanonicalScopeEnum,
     DirectionEnum,
     FindingGroup,
     NormalFinding,
@@ -39,35 +38,38 @@ def _canonical_rule_id(group_id: str, direction: str) -> str:
     return f"CR_{_sha8(group_id)}_{direction}"
 
 
-def _compute_scope(member_nfs: list[NormalFinding]) -> CanonicalScopeEnum:
+def _compute_scope_fields(
+    member_nfs: list[NormalFinding],
+) -> tuple[bool, str]:
     """
-    Determine canonical scope from bin-level direction counts and PMCID coverage.
+    Compute the two scope fields for a direction-bin.
 
-    Rules:
-      - If bin has ≥2 non-'unclear' directions with count≥1 → conflicted
-      - Else if unique PMCIDs across members ≥ 2            → multi_study
-      - Else if unique PMCIDs == 1                          → single_study
-      - Else                                                → unknown
+    Returns
+    -------
+    (is_conflicted, study_coverage) where:
+      is_conflicted  — True if the bin contains ≥2 distinct non-'unclear' directions.
+      study_coverage — "single_study" | "multi_study" | "unknown" based on PMCID coverage,
+                       computed independently of is_conflicted so both signals are preserved.
     """
-    # Count distinct non-unclear directions from the bin, not the group
     bin_directions: set[str] = set()
     for nf in member_nfs:
         d = nf.direction.value if nf.direction is not None else "unclear"
         if d not in ("unclear", "None"):
             bin_directions.add(d)
-    if len(bin_directions) >= 2:
-        return CanonicalScopeEnum.conflicted
+    is_conflicted = len(bin_directions) >= 2
 
-    # Count unique PMCIDs across member NormalFindings
     all_pmcids: set[str] = set()
     for nf in member_nfs:
         all_pmcids.update(nf.pmcids)
 
     if len(all_pmcids) >= 2:
-        return CanonicalScopeEnum.multi_study
+        study_coverage = "multi_study"
     elif len(all_pmcids) == 1:
-        return CanonicalScopeEnum.single_study
-    return CanonicalScopeEnum.unknown
+        study_coverage = "single_study"
+    else:
+        study_coverage = "unknown"
+
+    return is_conflicted, study_coverage
 
 
 def _pick_best_predicate_deterministic(
@@ -189,7 +191,7 @@ class CanonicalizeStage:
                     candidates, group, direction, pmcid
                 )
 
-                scope = _compute_scope(bin_nfs)
+                is_conflicted, study_coverage = _compute_scope_fields(bin_nfs)
 
                 # Aggregate evidence and PMCID lists
                 all_pmcids: list[str] = sorted(
@@ -209,7 +211,8 @@ class CanonicalizeStage:
                     relation_type=group.relation_type,
                     direction=DirectionEnum(direction) if direction in DirectionEnum._value2member_map_ else None,
                     predicate_text=predicate_text,
-                    canonical_scope=scope,
+                    is_conflicted=is_conflicted,
+                    study_coverage=study_coverage,
                     category=group.category,
                     supporting_pmcids=all_pmcids,
                     member_normal_ids=all_member_ids,

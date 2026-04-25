@@ -7,7 +7,6 @@ import pytest
 
 from pipeline.stages.summarization.models import (
     CanonicalRule,
-    CanonicalScopeEnum,
     DirectionEnum,
     RelationTypeEnum,
 )
@@ -78,7 +77,8 @@ def _make_rule(
         relation_type=relation_type,
         direction=DirectionEnum.positive,
         predicate_text=predicate_text,
-        canonical_scope=CanonicalScopeEnum.single_study,
+        is_conflicted=False,
+        study_coverage="single_study",
         category=category,  # type: ignore[arg-type]
         supporting_pmcids=["PMC10047158"],
         member_normal_ids=[],

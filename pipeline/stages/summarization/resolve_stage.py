@@ -11,7 +11,7 @@ Two modes depending on whether the RELATE stage produced any relations:
     base          = mean_grounding_score * 0.60   (range 0–0.60; default 0.30 if unknown)
     finding_bonus = min(finding_count / 5, 1.0) * 0.10   (up to +0.10 for ≥5 findings)
     support_bonus = min(support_count * 0.08, 0.20)       (up to +0.20)
-    single_study_pen = 0.10 if canonical_scope == single_study else 0.0  (−0.10)
+    single_study_pen = 0.10 if study_coverage == "single_study" else 0.0  (−0.10)
     contradict_pen   = min(contradict_count * 0.15, 0.30)  (up to −0.30)
 
   relations_absent (no RELATE output, e.g. single-paper run or NLI skipped):
@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import logging
 
-from .models import CanonicalRule, CanonicalScopeEnum, FinalRule, Relation, RelationTypeLabel
+from .models import CanonicalRule, FinalRule, Relation, RelationTypeLabel
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +148,7 @@ class ResolveStage:
                 support_bonus  = min(len(supports) * _SUPPORT_BOOST_PER_REL, _SUPPORT_BOOST_CAP)
                 single_study_pen = (
                     _SINGLE_STUDY_PEN
-                    if rule.canonical_scope == CanonicalScopeEnum.single_study
+                    if rule.study_coverage == "single_study"
                     else 0.0
                 )
                 contradict_pen = min(len(contradicts) * _CONTRADICT_PEN_PER_REL, _CONTRADICT_PEN_CAP)
@@ -158,7 +158,7 @@ class ResolveStage:
                 support_bonus  = 0.0
                 single_study_pen = (
                     _NO_REL_SINGLE_STUDY_PEN
-                    if rule.canonical_scope == CanonicalScopeEnum.single_study
+                    if rule.study_coverage == "single_study"
                     else 0.0
                 )
                 contradict_pen = 0.0
@@ -183,7 +183,8 @@ class ResolveStage:
                 relation_type=rule.relation_type,
                 direction=rule.direction,
                 predicate_text=rule.predicate_text,
-                canonical_scope=rule.canonical_scope,
+                is_conflicted=rule.is_conflicted,
+                study_coverage=rule.study_coverage,
                 category=rule.category,
                 supporting_pmcids=rule.supporting_pmcids,
                 member_normal_ids=rule.member_normal_ids,
