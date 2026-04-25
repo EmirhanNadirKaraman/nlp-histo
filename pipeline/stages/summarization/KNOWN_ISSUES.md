@@ -25,19 +25,6 @@ different `FindingGroup` → never deduplicated or compared in RELATE.
 - Minimum: count how often the same `(subject, outcome)` pair appears in both `has_feature`
   and `expression` groups in a typical paper output.
 
-### ACC-3 — RELATE subject exact-match rejects normalization-near-misses
-**Severity:** High  
-**File:** `relate_stage.py:168` (`_should_compare`), line `191` for the subject comparison  
-**Symptom:** After normalization, surface differences that survive (e.g. "ALK-positive ALCL"
-vs "ALK+ ALCL") cause `subject_mismatch` rejection and the pair never reaches NLI.
-`_norm_outcome()` was applied to outcome comparison but not to subject comparison.  
-**Fix:** Apply `_norm_outcome()` (lowercase + strip) to subject comparison too:
-```python
-if a.subject_entity.strip().lower() != b.subject_entity.strip().lower():
-    return False, "subject_mismatch"
-```
-Longer term: apply the same synonym dict normalization used in `NormalizeStage._norm()`.
-
 ### ACC-4 — `verbatim_support` is LLM-generated, often a paraphrase
 **Severity:** High  
 **File:** `prompts.py` (MAP prompt), `grounding_filter.py:200–272`  
@@ -176,7 +163,6 @@ take the first non-None value across the cluster (or the majority value).
 | ID | Severity | Stage | One-line description |
 |----|----------|-------|----------------------|
 | ACC-2 | High | MAP/GROUP | `relation_type` variance splits same fact into different groups |
-| ACC-3 | High | RELATE | Subject exact-match drops normalization-near-miss pairs |
 | ACC-4 | High | MAP/GROUNDING | `verbatim_support` is LLM paraphrase, depresses real grounding scores |
 | ACC-5 | High | CANONICALIZE/GROUP | CUI enrichment post-canonicalize cannot fix grouping errors |
 | ACC-6 | High | CANONICALIZE | `unclear` direction findings inflated into largest bin |

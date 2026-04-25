@@ -149,6 +149,16 @@ def _classify_pair(
 
 # ── Pruning ────────────────────────────────────────────────────────────────────
 
+def _norm_subject(entity: str) -> str:
+    """
+    Synonym-dict normalization + lowercase for subject gate comparison.
+    Uses the same synonym resolution as NormalizeStage so that surface variants
+    that survived NORMALIZE (e.g. "ALK-positive ALCL" vs "ALK+ ALCL") still match.
+    """
+    from .normalize_stage import normalize_entity
+    return (normalize_entity(entity) or "").strip().lower()
+
+
 def _norm_outcome(entity: str) -> str:
     """
     Lowercase + strip for outcome gate comparison.
@@ -194,7 +204,7 @@ def _should_compare(a: CanonicalRule, b: CanonicalRule) -> tuple[bool, str]:
         return False, "category_mismatch"
     if a.relation_type != b.relation_type:
         return False, "relation_type_mismatch"
-    if a.subject_entity != b.subject_entity:
+    if _norm_subject(a.subject_entity) != _norm_subject(b.subject_entity):
         return False, "subject_mismatch"
     # Outcome comparison — stricter normalization for expression rules
     if a.relation_type == RelationTypeEnum.expression:
