@@ -85,10 +85,11 @@ class TraceCollector:
             te_count=te_count,
         )
 
-    def record_chunking(self, total_chunks: int, chunk_size: int) -> None:
+    def record_chunking(self, total_chunks: int, chunk_size: int, chunk_overlap: int = 0) -> None:
         self._chunking = ChunkingTrace(
             total_chunks=total_chunks,
             chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
         )
 
     def add_chunk_trace(self, trace: ChunkTrace) -> None:

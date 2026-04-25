@@ -123,6 +123,7 @@ class IngestionTrace:
 class ChunkingTrace:
     total_chunks: int
     chunk_size: int            # configured sentences-per-chunk
+    chunk_overlap: int = 0     # sentences shared between adjacent chunks
 
 
 @dataclass

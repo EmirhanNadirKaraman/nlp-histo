@@ -78,7 +78,7 @@ def export_run_summary_csv(runs_jsonl: Path, out_csv: Path) -> int:
         # Ingestion
         "sentence_count", "te_count",
         # Chunking
-        "total_chunks", "chunk_size",
+        "total_chunks", "chunk_size", "chunk_overlap",
         # MAP stage
         "cache_hits", "cache_misses", "escalations", "keeps", "rejects",
         "map_findings_out",
@@ -252,6 +252,7 @@ def _flatten_run(r: dict[str, Any]) -> dict[str, Any]:
         "te_count": _g(r, "ingestion", "te_count"),
         "total_chunks": _g(r, "chunking", "total_chunks"),
         "chunk_size": _g(r, "chunking", "chunk_size"),
+        "chunk_overlap": _g(r, "chunking", "chunk_overlap"),
         "cache_hits": _g(r, "map_stage", "cache_hits"),
         "cache_misses": _g(r, "map_stage", "cache_misses"),
         "escalations": _g(r, "map_stage", "escalations"),

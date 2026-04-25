@@ -72,6 +72,9 @@ class MapStage:
         Agreement threshold in [0, 1].  Higher = more escalations.
     chunk_size:
         Number of sentences per chunk.
+    chunk_overlap:
+        Number of sentences shared between adjacent chunks.  Must be >= 0 and
+        < chunk_size.  Default 0 preserves the original disjoint behaviour.
     scorer:
         MapOutputScorer used to score voter agreement.  Defaults to
         EmbeddingScorer.  Pass CascadedCompositeScorer for embedding +
@@ -86,6 +89,7 @@ class MapStage:
         escalation_llm,
         theta: float = 0.7,
         chunk_size: int = 10,
+        chunk_overlap: int = 0,
         scorer: MapOutputScorer | None = None,
         router: MapOutputRouter | None = None,
         routing_collector: RoutingDataset | None = None,
@@ -94,6 +98,10 @@ class MapStage:
             raise ValueError("voter_llms must contain at least one LLM.")
         if not level2_voter_llms:
             raise ValueError("level2_voter_llms must contain at least one LLM.")
+        if chunk_overlap < 0:
+            raise ValueError("chunk_overlap must be >= 0")
+        if chunk_overlap >= chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size")
         self._voter_chains = [build_map_chain(llm) for llm in voter_llms]
         self._level2_voter_chains = [build_map_chain(llm) for llm in level2_voter_llms]
         self._escalation_chain = build_map_chain(escalation_llm)
@@ -101,6 +109,7 @@ class MapStage:
         self._router = router
         self._routing_collector = routing_collector
         self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -581,7 +590,25 @@ class MapStage:
     # ── Helpers ────────────────────────────────────────────────────────────────
 
     def _make_chunks(self, sentences: list[dict]) -> list[list[dict]]:
-        return [
+        """Split sentences into overlapping fixed-size chunks.
+
+        With chunk_overlap=0 (default) behaviour is identical to the original
+        disjoint split.  With overlap > 0, adjacent chunks share that many
+        sentences so findings that span a boundary are seen in full context by
+        at least one chunk.
+        """
+        if not sentences:
+            return []
+        stride = self.chunk_size - self.chunk_overlap
+        chunks = [
             sentences[i : i + self.chunk_size]
-            for i in range(0, len(sentences), self.chunk_size)
+            for i in range(0, len(sentences), stride)
         ]
+        if self.chunk_overlap > 0:
+            logger.debug(
+                "_make_chunks: %d sentences → %d chunks "
+                "(chunk_size=%d, overlap=%d, stride=%d)",
+                len(sentences), len(chunks),
+                self.chunk_size, self.chunk_overlap, stride,
+            )
+        return chunks

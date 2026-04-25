@@ -103,6 +103,8 @@ class SummarizationRunner:
         Agreement threshold for the ABC cascade in the MAP stage.
     chunk_size:
         Sentences per MAP chunk.
+    chunk_overlap:
+        Sentences shared between adjacent MAP chunks.  0 (default) = disjoint.
     scorer:
         MapOutputScorer used to score voter agreement in the MAP stage.
         Defaults to EmbeddingScorer.  Pass CascadedCompositeScorer for
@@ -149,6 +151,7 @@ class SummarizationRunner:
         escalation_llm,
         theta: float = 0.7,
         chunk_size: int = 10,
+        chunk_overlap: int = 2,
         scorer: MapOutputScorer | None = None,
         grounding_threshold: float | None = 0.5,
         contradiction_similarity_threshold: float | None = 0.7,
@@ -170,7 +173,7 @@ class SummarizationRunner:
         cache_file = cache_path or (output_dir / "pipeline_cache.json")
         self._cache = PipelineCache(cache_file)
 
-        self._map = MapStage(voter_llms, level2_voter_llms, escalation_llm, theta=theta, chunk_size=chunk_size, scorer=scorer)
+        self._map = MapStage(voter_llms, level2_voter_llms, escalation_llm, theta=theta, chunk_size=chunk_size, chunk_overlap=chunk_overlap, scorer=scorer)
         self._normalize = NormalizeStage()
         self._group = GroupStage()
         self._canonicalize = CanonicalizeStage()
@@ -215,6 +218,7 @@ class SummarizationRunner:
         self._config_snapshot = {
             "theta": theta,
             "chunk_size": chunk_size,
+            "chunk_overlap": chunk_overlap,
             "scorer": type(scorer).__name__ if scorer else "EmbeddingScorer",
             "grounding_threshold": grounding_threshold,
             "contradiction_similarity_threshold": contradiction_similarity_threshold,
@@ -287,6 +291,7 @@ class SummarizationRunner:
                 collector.record_chunking(
                     total_chunks=len(chunk_summaries),
                     chunk_size=self._map.chunk_size,
+                    chunk_overlap=self._map.chunk_overlap,
                 )
 
             # Track total MAP findings for rejection summary (before any filtering)

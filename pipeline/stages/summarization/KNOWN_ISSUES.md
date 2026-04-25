@@ -11,18 +11,6 @@ Each issue has a **severity**, the **file:location** to touch, a description, an
 
 ## High-Impact Accuracy Risks
 
-### ACC-1 — Chunk boundary finding loss
-**Severity:** High  
-**File:** `map_stage.py:583–587` (`_make_chunks`)  
-**Symptom:** A finding that spans the junction of two 10-sentence chunks is either extracted as
-a fragment by both, or missed by both. No cross-chunk context is available to the LLM.
-Affects complex multi-sentence causal or prognostic claims most.  
-**Fix options:**
-- Add a configurable sentence overlap (e.g. 2 sentences shared between adjacent chunks).
-- Or use a sliding window with stride < chunk_size.
-- Minimum: log how many MAP findings cite sentence IDs from only the last or first position
-  of a chunk (proxy for boundary fragments).
-
 ### ACC-2 — `relation_type` LLM variance splits the same fact into different groups
 **Severity:** High  
 **File:** `map_stage.py` / `prompts.py` (extraction), `group_stage.py:55–56` (grouping key)  
@@ -85,8 +73,8 @@ negligible, and masks real directional ambiguity in the canonical rule.
 **Fix options:**
 - Create a separate `unclear` CanonicalRule for unclear-direction findings (analogous to how
   positive and negative get separate rules).
-- Or: exclude unclear findings from direction bins entirely and flag the group as
-  `canonical_scope=conflicted` when unclear count is significant relative to total.
+- Or: exclude unclear findings from direction bins entirely and set `is_conflicted=True` on
+  the group when unclear count is significant relative to total.
 - Minimum: store `direction_counts` on `CanonicalRule` so downstream stages can see the raw
   split, not just the bin they were assigned to.
 
@@ -105,37 +93,6 @@ Requires resolving DES-7 first (score scale mismatch between single-paper and mu
 ---
 
 ## Medium-Impact Accuracy Risks
-
-### ACC-7 — Unbounded candidate list sent to LLM in CANONICALIZE
-**Severity:** Medium  
-**File:** `canonicalize_stage.py:289–293` (`_select_predicate`)  
-**Symptom:** All findings in a direction bin are sent as candidates to the LLM — no cap. On
-per-paper runs groups are typically small, but with cross-paper pooling a bin could have dozens
-of candidates, causing unbounded token usage, latency, and cost per group.  
-**Fix:** Cap at a configurable `max_candidates` (e.g. top-10 by grounding score). Findings
-are already sorted descending by score (line 230–234), so truncation is safe.
-
-### ACC-8 — Position bias in LLM predicate selection
-**Severity:** Medium  
-**File:** `canonicalize_stage.py:289–293` (`_select_predicate`)  
-**Symptom:** Candidates are sorted descending by grounding score, so candidate #1 always has
-the highest score. LLMs have known primacy bias and systematically favour items listed first.
-The LLM will be nudged toward the highest-grounding candidate regardless of clinical
-informativeness — partially defeating the purpose of using an LLM over the deterministic
-fallback.  
-**Fix options:**
-- Randomize candidate order before sending to LLM (makes selection independent of score rank).
-- Or: remove score prefix from the prompt so the LLM cannot use rank as a signal.
-- Minimum: log how often the LLM picks candidate #1 vs others to measure actual bias.
-
-### ACC-9 — RELATE pair truncation is index-ordered, not importance-ordered
-**Severity:** Medium  
-**File:** `relate_stage.py:294–299`  
-**Symptom:** When `len(eligible) > MAX_PAIRS (500)`, the first 500 by `itertools.combinations`
-index order are kept. Rules from later chunks (end of paper — often Discussion/Conclusion,
-which carry high-confidence summary statements) are systematically dropped.  
-**Fix:** Sort eligible pairs by `(rules[i].mean_grounding_score + rules[j].mean_grounding_score)`
-descending before truncating to `max_pairs`.
 
 ### ACC-10 — Cross-paper gate does not check outcome for non-expression rules
 **Severity:** Medium  
@@ -160,43 +117,9 @@ Incorrect cases: "not uncommon" → negative (wrong; means positive), "no signif
   direction field without heuristic overriding.
 - The heuristic should only fire on `unclear` findings (it does today) — do not expand its scope.
 
-### DES-2 — Incremental corpus relate never computes intra-paper relations for the new paper
-**Severity:** Medium  
-**File:** `corpus_relate.py:333–340` (`_incremental_gate`)  
-**Symptom:** The XOR gate rejects any pair where both rules come from the same paper. So when
-a paper is processed incrementally, its own intra-paper corpus relations are never written to
-`SumCorpusRelation`. Only a full `relate_from_dir` run produces them. If incremental is the
-only mode used, intra-paper corpus relations are permanently absent for all papers.  
-**Fix:** After computing cross-paper pairs, run a second pass over `new_rules` with the
-standard `_should_compare_cross_paper` gate (no XOR restriction) to produce intra-paper
-pairs, then include them in `_replace_for_pmcid`.
-
-### ~~DES-5~~ — RESOLVED
-`_split_windows()` now uses spaCy sentencizer + greedy packing under a dynamic per-hypothesis
-token budget with 1-sentence overlap. Oversized sentences split further by `;` then `,`;
-truly unsplittable clauses are truncated at the tokenizer level.
-
 ---
 
 ## Lower-Impact / Design Choices
-
-### BUG-2 — `filter_findings` does not write `grounding_score` back onto findings
-**Severity:** Medium  
-**File:** `grounding_filter.py` (`filter_findings`)  
-**Symptom:** `filter_findings` runs NLI and drops low-scoring findings but never writes
-`grounding_score` onto the kept ones. Any downstream code that reads `grounding_score` will
-see `None`. `filter_findings_with_scores` is the correct replacement (the runner comment
-says to use it), but `filter_findings` remains callable.  
-**Fix:** Remove `filter_findings` or delegate it to `filter_findings_with_scores` and discard
-the dropped list.
-
-### BUG-3 — `_NLI_PIPE_CACHE` key ignores `batch_size` and `device`
-**Severity:** Low  
-**File:** `grounding_filter.py` (`GroundingFilter._pipe`)  
-**Symptom:** The module-level cache is keyed only on `model_name`. Two `GroundingFilter`
-instances with different `batch_size` or `device` settings share the first instance's pipeline
-silently.  
-**Fix:** Key the cache on `(model_name, device, batch_size)`.
 
 ### ACC-12 — `_nli_scores()` in RELATE does not use the sliding window
 **Severity:** Low (predicate text from CANONICALIZE is almost always short)  
@@ -208,16 +131,6 @@ multi-clause clinical statement), it will be silently truncated at 512 tokens.
 **Fix:** Apply the same `_split_windows` approach from `grounding_filter.py`. Since the function
 is shared, consider moving `_split_windows` and `_score_pairs` to a shared utilities module and
 importing from both.
-
-### DES-6 — `CanonicalScopeEnum` is a single value — cannot express conflicted + multi_study
-**Severity:** Low  
-**File:** `canonicalize_stage.py:83–110` (`_compute_scope`), `models.py:265–270` (`CanonicalScopeEnum`)  
-**Symptom:** A rule supported by mixed-direction evidence across multiple papers is both
-`conflicted` and `multi_study`, but the enum forces one value. `conflicted` wins by priority,
-discarding the PMCID coverage information entirely.  
-**Fix:** Replace the single-value enum with two separate fields on `CanonicalRule`:
-`is_conflicted: bool` and `study_coverage: Literal["single_study", "multi_study", "unknown"]`.
-This is a schema change requiring a migration.
 
 ### DES-7 — RESOLVE two-mode scoring produces non-comparable scales
 **Severity:** Low  
@@ -238,7 +151,7 @@ distributions, not derived from a gold-labeled dataset. There is no evaluation h
 verifying these weights produce better rankings than alternatives.  
 **What would be needed:** ~200–500 rules labeled by a pathologist with confidence tiers
 (high / medium / low), covering rules with varying support_count, contradict_count,
-finding_count, and canonical_scope. Weights could then be fit to minimise ranking error.  
+finding_count, and study_coverage. Weights could then be fit to minimise ranking error.  
 **Without expert labelers, options are:**
 - Proxy labels from citation count of supporting papers
 - LLM-as-judge confidence rating (noisy but cheap)
@@ -262,24 +175,15 @@ take the first non-None value across the cluster (or the majority value).
 
 | ID | Severity | Stage | One-line description |
 |----|----------|-------|----------------------|
-| ACC-1 | High | MAP | Chunk boundary findings lost — no overlap |
 | ACC-2 | High | MAP/GROUP | `relation_type` variance splits same fact into different groups |
 | ACC-3 | High | RELATE | Subject exact-match drops normalization-near-miss pairs |
 | ACC-4 | High | MAP/GROUNDING | `verbatim_support` is LLM paraphrase, depresses real grounding scores |
 | ACC-5 | High | CANONICALIZE/GROUP | CUI enrichment post-canonicalize cannot fix grouping errors |
 | ACC-6 | High | CANONICALIZE | `unclear` direction findings inflated into largest bin |
-| DES-1 | High | RESOLVE | Cross-paper relations ignored in FinalRule scoring — defeats cross-paper feature |
-| BUG-2 | Medium | GROUNDING | `filter_findings` never writes `grounding_score` — downstream sees `None` |
-| ACC-7 | Medium | CANONICALIZE | Unbounded candidate list sent to LLM — expensive with cross-paper pooling |
-| ACC-8 | Medium | CANONICALIZE | Position bias from grounding-score ordering in LLM predicate selection |
-| ACC-9 | Medium | RELATE | Pair truncation is index-ordered, not importance-ordered |
+| DES-1 | High | RESOLVE | Cross-paper relations ignored in FinalRule scoring |
 | ACC-10 | Medium | CORPUS RELATE | Cross-paper gate skips outcome gating for non-expression rules |
 | ACC-11 | Medium | NORMALIZE | `infer_direction()` wrong on complex clinical negation |
-| DES-2 | Medium | CORPUS RELATE | Incremental mode never computes intra-paper corpus relations |
-| ~~DES-5~~ | ~~Medium~~ | GROUNDING | RESOLVED — sentence-aware windowing with dynamic budget |
-| BUG-3 | Low | GROUNDING | `_NLI_PIPE_CACHE` key ignores `batch_size` and `device` |
 | ACC-12 | Low | RELATE | `_nli_scores()` lacks sliding window — rarely fires in practice |
-| DES-6 | Low | CANONICALIZE | `CanonicalScopeEnum` single value loses conflicted + multi_study combination |
 | DES-7 | Low | RESOLVE | Two scoring modes produce non-comparable final score scales |
-| DES-8 | Low | RESOLVE | Scoring weights hand-tuned, not empirically validated — no gold dataset |
+| DES-8 | Low | RESOLVE | Scoring weights hand-tuned, not empirically validated |
 | DES-9 | Low | NORMALIZE | `_best_scope()` ignores scope from lower-grounding findings |
