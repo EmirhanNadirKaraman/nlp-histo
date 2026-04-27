@@ -67,15 +67,37 @@ def _get_nli_pipe(model_name: str = _NLI_MODEL, batch_size: int = 16, device: in
 
 def _nli_scores(pairs: list[tuple[str, str]], pipe) -> list[dict[str, float]]:
     """
-    Run NLI on (premise, hypothesis) pairs.
+    Run NLI on (premise, hypothesis) pairs with sliding window support.
     Returns a list of dicts {entailment, contradiction, neutral} per pair.
+
+    Long premises are split into overlapping windows (budget computed from the
+    hypothesis length so the joint sequence never exceeds 512 tokens).
+    Per-label scores are max-pooled across windows so a supporting or
+    contradicting sentence near a window boundary is not silently truncated.
     """
-    inputs = [{"text": p, "text_pair": h} for p, h in pairs]
-    results = pipe(inputs)
-    out = []
-    for result in results:
-        d = {item["label"].lower(): item["score"] for item in result}
-        out.append(d)
+    from .grounding_filter import _split_windows
+
+    _empty: dict[str, float] = {"entailment": 0.0, "contradiction": 0.0, "neutral": 0.0}
+    out: list[dict[str, float]] = [dict(_empty) for _ in pairs]
+
+    flat_inputs: list[dict] = []
+    flat_indices: list[int] = []
+
+    for i, (premise, hyp) in enumerate(pairs):
+        if not premise.strip():
+            continue
+        for window in _split_windows(premise, hyp, pipe.tokenizer):
+            flat_inputs.append({"text": window, "text_pair": hyp})
+            flat_indices.append(i)
+
+    if flat_inputs:
+        batch_results = pipe(flat_inputs, truncation=True)
+        for pair_idx, result in zip(flat_indices, batch_results):
+            for item in result:
+                label = item["label"].lower()
+                if item["score"] > out[pair_idx].get(label, 0.0):
+                    out[pair_idx][label] = item["score"]
+
     return out
 
 

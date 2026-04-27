@@ -83,17 +83,6 @@ Incorrect cases: "not uncommon" → negative (wrong; means positive), "no signif
 
 ## Lower-Impact / Design Choices
 
-### ACC-12 — `_nli_scores()` in RELATE does not use the sliding window
-**Severity:** Low (predicate text from CANONICALIZE is almost always short)  
-**File:** `relate_stage.py:62–73` (`_nli_scores`)  
-**Symptom:** Unlike `grounding_filter._score_pairs()`, the RELATE NLI function does not split
-long premises into overlapping 400-char windows. Predicate text from CANONICALIZE is typically
-short, so this rarely fires — but if a rule has a long `predicate_text` (e.g. a complex
-multi-clause clinical statement), it will be silently truncated at 512 tokens.  
-**Fix:** Apply the same `_split_windows` approach from `grounding_filter.py`. Since the function
-is shared, consider moving `_split_windows` and `_score_pairs` to a shared utilities module and
-importing from both.
-
 ### DES-7 — RESOLVE two-mode scoring produces non-comparable scales
 **Severity:** Low  
 **File:** `resolve_stage.py`  
@@ -142,7 +131,6 @@ take the first non-None value across the cluster (or the majority value).
 | DES-1 | High | RESOLVE | Cross-paper relations ignored in FinalRule scoring |
 | ACC-10 | Medium | CORPUS RELATE | Cross-paper gate skips outcome gating for non-expression rules |
 | ACC-11 | Medium | NORMALIZE | `infer_direction()` wrong on complex clinical negation |
-| ACC-12 | Low | RELATE | `_nli_scores()` lacks sliding window — rarely fires in practice |
 | DES-7 | Low | RESOLVE | Two scoring modes produce non-comparable final score scales |
 | DES-8 | Low | RESOLVE | Scoring weights hand-tuned, not empirically validated |
 | DES-9 | Low | NORMALIZE | `_best_scope()` ignores scope from lower-grounding findings |
