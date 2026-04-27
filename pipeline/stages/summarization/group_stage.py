@@ -54,8 +54,17 @@ def _sha8(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:8]
 
 
-def _group_id(subject: str, outcome: str, relation_type: str, category: str) -> str:
-    return f"GRP_{_sha8(subject)}_{_sha8(outcome)}_{relation_type}_{_sha8(category)}"
+def _group_id(
+    subject: str,
+    outcome: str,
+    relation_type: str,
+    category: str = "",
+    subject_cui: str | None = None,
+    outcome_cui: str | None = None,
+) -> str:
+    subj_key = subject_cui if subject_cui else subject
+    out_key = outcome_cui if outcome_cui else outcome
+    return f"GRP_{_sha8(subj_key)}_{_sha8(out_key)}_{relation_type}_{_sha8(category)}"
 
 
 def _scope_heterogeneity(members: list[NormalFinding]) -> float:
@@ -122,7 +131,10 @@ class GroupStage:
                     f"(subject={nf.subject_entity!r}, outcome={nf.outcome_entity!r}, "
                     f"relation_type={nf.relation_type!r}). Filter with is_groupable() before calling group()."
                 )
-            key = _group_id(nf.subject_entity, nf.outcome_entity, nf.relation_type.value, nf.category)  # type: ignore[arg-type]
+            key = _group_id(  # type: ignore[arg-type]
+                nf.subject_entity, nf.outcome_entity, nf.relation_type.value, nf.category,
+                subject_cui=nf.subject_cui, outcome_cui=nf.outcome_cui,
+            )
             buckets[key].append(nf)
 
         groups = [

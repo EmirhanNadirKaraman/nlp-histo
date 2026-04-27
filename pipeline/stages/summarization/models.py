@@ -203,6 +203,8 @@ class NormalFinding(BaseModel):
     normal_id:            str               # "NF_{pmcid}_{sha8(subject+outcome+relation_type+te_ids)}"
     subject_entity:       str | None        # normalized; None if MAP did not extract
     outcome_entity:       str | None        # normalized; None if MAP did not extract
+    subject_cui:          str | None = None  # UMLS CUI resolved during NORMALIZE
+    outcome_cui:          str | None = None  # UMLS CUI resolved during NORMALIZE
     relation_type:        RelationTypeEnum  # groupability key; unclear = non-groupable
     direction:            DirectionEnum | None
     category:             Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"]

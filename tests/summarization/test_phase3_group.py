@@ -125,14 +125,14 @@ def test_different_subject_different_group():
     assert len(groups) == 2
 
 
-def test_different_category_same_group():
-    """category is NOT a grouping key — relation_type is."""
+def test_different_category_different_group():
+    """category IS a grouping key — same subject/outcome/relation_type but different category → 2 groups."""
     nfs = [
         _nf(normal_id="NF_1", category="IHC"),
         _nf(normal_id="NF_2", category="prognosis"),
     ]
     groups = GroupStage().group(nfs, PMCID)
-    assert len(groups) == 1
+    assert len(groups) == 2
 
 
 def test_different_relation_type_different_group():

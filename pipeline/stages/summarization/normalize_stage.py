@@ -122,9 +122,9 @@ _SYNONYMS: dict[str, str] = _load_synonyms()
 
 
 # ── UMLS entity resolver ───────────────────────────────────────────────────────
-# Module-level cache: entity surface text → canonical name string.
+# Module-level cache: entity surface text → (canonical_name, cui) pair.
 # Shared across all NormalizeStage instances in the same process.
-_UMLS_CACHE: dict[str, str] = {}
+_UMLS_CACHE: dict[str, tuple[str | None, str | None]] = {}
 
 # Module-level scispaCy model + linker singleton (None until first use).
 _SPACY_NLP = None
@@ -170,9 +170,9 @@ def _probe_spacy() -> bool:
         return False
 
 
-def _umls_canonical(text: str) -> str | None:
+def _umls_canonical_with_cui(text: str) -> tuple[str | None, str | None]:
     """
-    Return the UMLS preferred name for *text*, or None if no confident link.
+    Return (canonical_name, cui) for *text*, or (None, None) if no confident link.
 
     Uses the module-level scispaCy model.  Results are cached in _UMLS_CACHE.
     """
@@ -186,7 +186,9 @@ def _umls_canonical(text: str) -> str | None:
         _probe_spacy()
 
     if not _SPACY_AVAILABLE:
-        return None
+        result: tuple[str | None, str | None] = (None, None)
+        _UMLS_CACHE[text] = result
+        return result
 
     try:
         doc = _SPACY_NLP(text)  # type: ignore[arg-type]
@@ -202,37 +204,59 @@ def _umls_canonical(text: str) -> str | None:
             if concept:
                 canonical = concept.canonical_name
 
-        _UMLS_CACHE[text] = canonical  # type: ignore[assignment]  # cache None too
-        return canonical
+        result = (canonical, cui)
+        _UMLS_CACHE[text] = result
+        return result
     except Exception as exc:
         logger.debug("NORMALIZE: UMLS lookup failed for %r: %s", text, exc)
-        return None
+        result = (None, None)
+        _UMLS_CACHE[text] = result
+        return result
 
 
-def _resolve_entity(name: str | None, synonyms: dict[str, str]) -> str | None:
+def _umls_canonical(text: str) -> str | None:
+    """Return just the canonical name. Backward-compat wrapper around _umls_canonical_with_cui."""
+    canonical, _ = _umls_canonical_with_cui(text)
+    return canonical
+
+
+def _resolve_entity(name: str | None, synonyms: dict[str, str]) -> tuple[str | None, str | None]:
     """
     Canonical resolution core shared by `normalize_entity` and `NormalizeStage._norm`.
 
+    Returns (canonical_name, cui | None).
+
     Resolution order:
       1. synonyms dict — domain knowledge takes priority; covers acronyms the
-         UMLS linker gets wrong (e.g. CEAN→Cetacea).
-      2. UMLS linker (scispaCy singleton).
-      3. Identity — stripped input returned unchanged.
+         UMLS linker gets wrong (e.g. CEAN→Cetacea).  After resolving the
+         surface form, a follow-up UMLS lookup on the canonical name fills in
+         the CUI so grouped findings can be keyed on CUI even when the synonym
+         dict fires.
+      2. UMLS linker (scispaCy singleton) — returns canonical name + CUI.
+      3. Identity — stripped input returned unchanged, CUI is None.
     """
     if name is None:
-        return None
+        return None, None
     stripped = name.strip()
     from_dict = synonyms.get(stripped.lower())
     if from_dict is not None:
-        return from_dict
-    umls = _umls_canonical(stripped)
-    if umls:
-        return umls
-    return stripped
+        # Synonym dict resolved the name; look up CUI on the canonical form.
+        _, cui = _umls_canonical_with_cui(from_dict)
+        return from_dict, cui
+    canonical, cui = _umls_canonical_with_cui(stripped)
+    if canonical:
+        return canonical, cui
+    return stripped, None
 
 
 def normalize_entity(name: str | None) -> str | None:
     """Return the canonical form of an entity name using the built-in synonym dict."""
+    canonical, _ = _resolve_entity(name, _SYNONYMS)
+    return canonical
+
+
+def normalize_entity_with_cui(name: str | None) -> tuple[str | None, str | None]:
+    """Return (canonical_name, cui) pair using the built-in synonym dict + UMLS."""
     return _resolve_entity(name, _SYNONYMS)
 
 
@@ -408,15 +432,15 @@ class NormalizeStage:
         normalized = self._normalize_entities(findings)
 
         # Step 2: partition into groupable and ungroupable
-        groupable: dict[str, list[Finding]] = defaultdict(list)
-        ungroupable: list[Finding] = []
+        groupable: dict[str, list[tuple[Finding, str | None, str | None]]] = defaultdict(list)
+        ungroupable: list[tuple[Finding, str | None, str | None]] = []
 
-        for f, te_id in normalized:
+        for f, te_id, subj_cui, out_cui in normalized:
             key = _dedup_key(te_id, f.subject_entity, f.outcome_entity, f.relation_type)
             if key is None:
-                ungroupable.append(f)
+                ungroupable.append((f, subj_cui, out_cui))
             else:
-                groupable[key].append(f)
+                groupable[key].append((f, subj_cui, out_cui))
 
         results: list[NormalFinding] = []
 
@@ -425,8 +449,8 @@ class NormalizeStage:
             results.append(self._merge(group, pmcid))
 
         # Step 4: wrap each ungroupable finding individually
-        for f in ungroupable:
-            results.append(self._wrap_single(f, pmcid))
+        for f, subj_cui, out_cui in ungroupable:
+            results.append(self._wrap_single(f, pmcid, subj_cui, out_cui))
 
         logger.info(
             "[%s] NORMALIZE: %d findings → %d NormalFindings "
@@ -440,10 +464,10 @@ class NormalizeStage:
 
     def _normalize_entities(
         self, findings: list[Finding]
-    ) -> list[tuple[Finding, int]]:
+    ) -> list[tuple[Finding, int | None, str | None, str | None]]:
         """
-        Return (finding_with_normalized_entities, text_element_id) pairs.
-        text_element_id is extracted from the first evidence string; 0 if absent.
+        Return (finding_with_normalized_entities, text_element_id, subject_cui, outcome_cui) tuples.
+        text_element_id is extracted from the first evidence string; None if absent/malformed.
         """
         result = []
         for f in findings:
@@ -467,27 +491,36 @@ class NormalizeStage:
                 if (f.direction is None or f.direction == DirectionEnum.unclear)
                 else f.direction
             )
+            subj_name, subj_cui = self._norm(f.subject_entity)
+            out_name, out_cui = self._norm(f.outcome_entity)
             normed = f.model_copy(update={
-                "subject_entity": self._norm(f.subject_entity),
-                "outcome_entity": self._norm(f.outcome_entity),
+                "subject_entity": subj_name,
+                "outcome_entity": out_name,
                 "direction": direction,
             })
-            result.append((normed, te_id))
+            result.append((normed, te_id, subj_cui, out_cui))
         return result
 
-    def _norm(self, name: str | None) -> str | None:
-        """Resolve an entity name using the instance synonym dict (built-in + extra_synonyms)."""
+    def _norm(self, name: str | None) -> tuple[str | None, str | None]:
+        """Resolve an entity name; returns (canonical_name, cui | None)."""
         return _resolve_entity(name, self._synonyms)
 
-    def _merge(self, group: list[Finding], pmcid: str) -> NormalFinding:
+    def _merge(
+        self,
+        group: list[tuple[Finding, str | None, str | None]],
+        pmcid: str,
+    ) -> NormalFinding:
+        findings = [f for f, _, _ in group]
         # Representative finding: highest grounding_score
-        rep = max(group, key=lambda f: f.grounding_score or 0.0)
+        rep = max(findings, key=lambda f: f.grounding_score or 0.0)
+        rep_subj_cui = next((sc for f, sc, _ in group if f is rep), None)
+        rep_out_cui = next((oc for f, _, oc in group if f is rep), None)
 
         # Deduplicated spans (by sentence_id + te_id)
         seen: set[tuple[str, int]] = set()
         spans: list[SourceSpan] = []
         te_ids: list[int] = []
-        for f in group:
+        for f in findings:
             for span in _spans_from_finding(f):
                 key = (span.sentence_id, span.text_element_id)
                 if key not in seen:
@@ -508,6 +541,8 @@ class NormalizeStage:
                                  rep.relation_type, te_ids),
             subject_entity=rep.subject_entity,
             outcome_entity=rep.outcome_entity,
+            subject_cui=rep_subj_cui,
+            outcome_cui=rep_out_cui,
             relation_type=rep.relation_type,
             direction=direction,
             category=rep.category,
@@ -516,10 +551,16 @@ class NormalizeStage:
             source_finding_ids=[],   # populated by Phase 3+ when finding_id exists
             evidence=spans,
             pmcids=unique_pmcids,
-            mean_grounding_score=_mean_score(group),
+            mean_grounding_score=_mean_score(findings),
         )
 
-    def _wrap_single(self, f: Finding, pmcid: str) -> NormalFinding:
+    def _wrap_single(
+        self,
+        f: Finding,
+        pmcid: str,
+        subject_cui: str | None = None,
+        outcome_cui: str | None = None,
+    ) -> NormalFinding:
         spans = _spans_from_finding(f)
         te_ids = [s.text_element_id for s in spans]
         unique_pmcids = sorted({s.pmcid for s in spans}) or [pmcid]
@@ -533,6 +574,8 @@ class NormalizeStage:
                                  f.relation_type, te_ids),
             subject_entity=f.subject_entity,
             outcome_entity=f.outcome_entity,
+            subject_cui=subject_cui,
+            outcome_cui=outcome_cui,
             relation_type=f.relation_type,
             direction=direction,
             category=f.category,

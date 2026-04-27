@@ -297,6 +297,11 @@ class SummarizationRunner:
             # Track total MAP findings for rejection summary (before any filtering)
             map_findings_total = sum(len(cs.findings) for cs in chunk_summaries)
 
+            # 1a-pre. Replace LLM-paraphrased verbatim_support with actual source text from DB.
+            # Evidence strings carry the text_element_id; we batch-query TextElement.text_content
+            # so NLI grounding scores real paragraphs rather than LLM paraphrases.
+            self._replace_verbatim_from_db(chunk_summaries)
+
             # 1a. Grounding filter — score + drop ungrounded findings before NORMALIZE
             grounding_rejected: list[tuple[str, Finding]] = []  # (chunk_id, finding)
             if self._grounding is not None:
@@ -790,6 +795,68 @@ class SummarizationRunner:
                 "[%s] DB: failed to clear normalized run data (run_id=%d): %s",
                 pmcid, db_id, exc, exc_info=True,
             )
+
+    def _replace_verbatim_from_db(self, chunk_summaries: list) -> None:
+        """
+        Replace verbatim_support on each Finding with the actual TextElement
+        text_content from the database.
+
+        Evidence strings have format "S{i}|{pmcid}|{te_id}".  We collect all
+        cited te_ids, batch-query TextElement.text_content in one round-trip,
+        and overwrite verbatim_support in-place.  Falls back to the LLM-supplied
+        value when the DB is unavailable, the te_id has no match, or any error
+        occurs.  No-ops when self._db is None.
+        """
+        if self._db is None:
+            return
+
+        te_ids: set[int] = set()
+        for cs in chunk_summaries:
+            for f in cs.findings:
+                for ev in f.evidence:
+                    parts = ev.split("|")
+                    if len(parts) == 3:
+                        try:
+                            te_ids.add(int(parts[2]))
+                        except ValueError:
+                            pass
+
+        if not te_ids:
+            return
+
+        from database import TextElement  # type: ignore  # optional dep
+
+        te_map: dict[int, str] = {}
+        try:
+            with self._db.session_scope() as session:
+                rows = (
+                    session.query(TextElement.id, TextElement.text_content)
+                    .filter(TextElement.id.in_(te_ids))
+                    .all()
+                )
+                te_map = {row.id: row.text_content for row in rows}
+        except Exception as exc:
+            logger.warning("[verbatim] DB lookup failed — keeping LLM verbatim: %s", exc)
+            return
+
+        replaced = 0
+        for cs in chunk_summaries:
+            for f in cs.findings:
+                if not f.evidence:
+                    continue
+                parts = f.evidence[0].split("|")
+                if len(parts) == 3:
+                    try:
+                        te_id = int(parts[2])
+                        text = te_map.get(te_id)
+                        if text:
+                            f.verbatim_support = text
+                            replaced += 1
+                    except ValueError:
+                        pass
+
+        logger.info("[verbatim] replaced %d/%d finding verbatims from DB",
+                    replaced, sum(len(cs.findings) for cs in chunk_summaries))
 
     def _persist_map_findings(
         self,
