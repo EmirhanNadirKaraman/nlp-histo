@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import logging
 
-from .models import (
+from ..models import (
     CanonicalRule,
     DirectionEnum,
     FindingGroup,

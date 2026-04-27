@@ -17,7 +17,7 @@ import logging
 import re
 from collections import Counter
 
-from .models import AuditableSummary, EvidenceChainItem, ExtractedRules, Finding, Rule, RuleAuditSummary, RuleCounts
+from ..models import AuditableSummary, EvidenceChainItem, ExtractedRules, Finding, Rule, RuleAuditSummary, RuleCounts
 
 logger = logging.getLogger(__name__)
 

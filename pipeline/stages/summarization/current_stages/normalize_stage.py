@@ -25,8 +25,8 @@ import logging
 from collections import defaultdict
 from pathlib import Path
 
-from .models import DirectionEnum, Finding, FindingScope, NormalFinding, RelationTypeEnum, SourceSpan
-from .umls_utils import UMLS_THRESHOLD as _UMLS_THRESHOLD, best_cui as _best_cui
+from ..models import DirectionEnum, Finding, FindingScope, NormalFinding, RelationTypeEnum, SourceSpan
+from ..umls_utils import UMLS_THRESHOLD as _UMLS_THRESHOLD, best_cui as _best_cui
 
 logger = logging.getLogger(__name__)
 

@@ -20,7 +20,7 @@ import hashlib
 import logging
 from collections import defaultdict
 
-from .models import FindingGroup, NormalFinding, RelationTypeEnum
+from ..models import FindingGroup, NormalFinding, RelationTypeEnum
 
 logger = logging.getLogger(__name__)
 

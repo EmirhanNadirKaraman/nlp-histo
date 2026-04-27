@@ -11,9 +11,9 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .models import CanonicalRule
+    from ..models import CanonicalRule
 
-from .umls_utils import UMLS_THRESHOLD, best_cui as _best_cui
+from ..umls_utils import UMLS_THRESHOLD, best_cui as _best_cui
 
 logger = logging.getLogger(__name__)
 

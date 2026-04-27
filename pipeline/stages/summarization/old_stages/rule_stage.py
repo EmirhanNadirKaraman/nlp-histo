@@ -7,9 +7,9 @@ import json
 import logging
 from typing import Optional
 
-from .cache import PipelineCache
-from .models import ConsolidatedSummary, ExtractedRules
-from .prompts import build_rule_chain
+from ..cache import PipelineCache
+from ..models import ConsolidatedSummary, ExtractedRules
+from ..prompts import build_rule_chain
 
 logger = logging.getLogger(__name__)
 

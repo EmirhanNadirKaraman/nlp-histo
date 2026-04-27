@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import logging
 
-from .models import CanonicalRule, FinalRule, Relation, RelationTypeLabel
+from ..models import CanonicalRule, FinalRule, Relation, RelationTypeLabel
 
 logger = logging.getLogger(__name__)
 

@@ -31,7 +31,7 @@ from __future__ import annotations
 import itertools
 import logging
 
-from .models import CanonicalRule, Relation, RelationTypeLabel
+from ..models import CanonicalRule, Relation, RelationTypeLabel
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ def _classify_pair(
       - SCOPE_QUALIFY: one direction entails the other but not vice-versa
       - None         : UNRELATED — caller skips this pair
     """
-    from .models import DirectionEnum
+    from ..models import DirectionEnum
 
     ent_ab = scores_ab.get("entailment", 0.0)
     ent_ba = scores_ba.get("entailment", 0.0)
@@ -221,7 +221,7 @@ def _should_compare(a: CanonicalRule, b: CanonicalRule) -> tuple[bool, str]:
       subject_mismatch
       outcome_incompatible
     """
-    from .models import RelationTypeEnum  # local import avoids circular at module level
+    from ..models import RelationTypeEnum  # local import avoids circular at module level
     if a.category != b.category:
         return False, "category_mismatch"
     if a.relation_type != b.relation_type:

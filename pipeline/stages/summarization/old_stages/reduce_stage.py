@@ -8,9 +8,9 @@ import json
 import logging
 from typing import Optional, Union
 
-from .cache import PipelineCache
-from .models import AuditableSummary, ConsolidatedSummary
-from .prompts import build_reduce_chain
+from ..cache import PipelineCache
+from ..models import AuditableSummary, ConsolidatedSummary
+from ..prompts import build_reduce_chain
 
 logger = logging.getLogger(__name__)
 

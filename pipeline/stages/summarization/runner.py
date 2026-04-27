@@ -47,11 +47,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .cache import PipelineCache
-from .canonicalize_stage import CanonicalizeStage
-from .contradiction_detector import ContradictionDetector
-from .grounding_filter import GroundingFilter
-from .group_stage import GroupStage, is_groupable
-from .map_stage import MapStage
+from .current_stages.canonicalize_stage import CanonicalizeStage
+from .current_stages.contradiction_detector import ContradictionDetector
+from .helpers.grounding_filter import GroundingFilter
+from .current_stages.group_stage import GroupStage, is_groupable
+from .current_stages.map_stage import MapStage
 from .models import (
     CanonicalRule,
     ConsolidatedSummary,
@@ -66,12 +66,12 @@ from .models import (
     RejectionSummary,
     RelationTypeEnum,
 )
-from .normalize_stage import NormalizeStage
+from .current_stages.normalize_stage import NormalizeStage
 from .observability import TraceCollector, flush_collector
-from .reduce_stage import ReduceStage
-from .relate_stage import RelateStage
-from .resolve_stage import ResolveStage
-from .rule_stage import RuleStage
+from .old_stages.reduce_stage import ReduceStage
+from .current_stages.relate_stage import RelateStage
+from .current_stages.resolve_stage import ResolveStage
+from .old_stages.rule_stage import RuleStage
 from pipeline.stages.summarization.interfaces import (
     ContradictionChecker,
     GroundingChecker,
@@ -381,7 +381,7 @@ class SummarizationRunner:
 
             # Enrich canonical rules with UMLS CUIs for cross-paper entity matching.
             # No-ops silently if scispacy is unavailable.
-            from .entity_linker import enrich_rules_with_cuis  # noqa: PLC0415
+            from .current_stages.entity_linker import enrich_rules_with_cuis  # noqa: PLC0415
             enrich_rules_with_cuis(self._canonical_rules[pmcid])
             _cr_db_id_map = self._persist_canonical_rules(
                 pipeline_run_db_id, pmcid, self._canonical_rules[pmcid], _fg_db_id_map

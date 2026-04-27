@@ -18,9 +18,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import combinations
 import numpy as np
 
-from .agreement.providers import EmbedFn, OpenAIEmbedder
-from .models import ContradictingPair, ContradictionReport, ExtractedRules, Rule
-from .prompts import build_judge_chain
+from ..agreement.providers import EmbedFn, OpenAIEmbedder
+from ..models import ContradictingPair, ContradictionReport, ExtractedRules, Rule
+from ..prompts import build_judge_chain
 
 logger = logging.getLogger(__name__)
 

@@ -71,8 +71,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import CanonicalRule, CorpusRelation
-from .relate_stage import RelateStage, _norm_outcome_expression
+from ..models import CanonicalRule, CorpusRelation
+from ..current_stages.relate_stage import RelateStage, _norm_outcome_expression
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ def _should_compare_cross_paper(
       4. For expression rules: outcome marker must match (CUI if available,
          else normalized string) — prevents comparing unrelated markers.
     """
-    from .models import RelationTypeEnum  # noqa: PLC0415
+    from ..models import RelationTypeEnum  # noqa: PLC0415
 
     if a.category != b.category:
         return False, "category_mismatch"
@@ -376,7 +376,7 @@ class CorpusRelateStage:
         Uses the latest pipeline_run_id per PMCID.
         Returns (rules, id_to_pmcid, rule_meta).
         """
-        from .models import (  # noqa: PLC0415
+        from ..models import (  # noqa: PLC0415
             DirectionEnum, RelationTypeEnum,
         )
 
