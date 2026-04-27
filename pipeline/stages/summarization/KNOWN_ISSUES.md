@@ -25,31 +25,6 @@ different `FindingGroup` → never deduplicated or compared in RELATE.
 - Minimum: count how often the same `(subject, outcome)` pair appears in both `has_feature`
   and `expression` groups in a typical paper output.
 
-### ACC-4 — `verbatim_support` is LLM-generated, often a paraphrase
-**Severity:** High  
-**File:** `prompts.py` (MAP prompt), `grounding_filter.py:200–272`  
-**Symptom:** The MAP prompt asks for an "exact quote" but LLMs paraphrase. The grounding filter
-runs NLI on `(verbatim_support, claim)`. A paraphrased verbatim scores lower than the actual
-source sentence would, causing real findings to be incorrectly dropped or scored low.
-This depresses `mean_grounding_score` for genuinely grounded findings.  
-**Fix options:**
-- After MAP, search for the actual sentence in the source chunk that has the highest NLI
-  entailment with the claim, and use that as the verified verbatim (replacing the LLM-supplied
-  one). This makes grounding scores reflect real evidence, not LLM quoting quality.
-- Or: run grounding against all sentences in the source chunk (not just the LLM quote) and
-  take the max score.
-
-### ACC-5 — CUI enrichment runs post-canonicalize, cannot fix grouping errors
-**Severity:** High  
-**File:** `entity_linker.py:62–97` (`enrich_rules_with_cuis`), `runner.py` (call site)  
-**Symptom:** `enrich_rules_with_cuis` assigns `subject_cui` / `outcome_cui` to `CanonicalRule`
-objects after canonicalize has already run. By that point, grouping is done — two `NormalFinding`s
-with different surface strings (e.g. "Ki-67" vs "Ki67") that both failed UMLS lookup during
-NORMALIZE will have landed in different `FindingGroup`s and produced separate `CanonicalRule`s
-for the same real-world concept.  
-**Fix:** Resolve CUIs during NORMALIZE, store them on `NormalFinding`, and key GROUP on CUI
-when available (falling back to normalized string only when CUI is None). This requires
-`normalize_entity()` to return `(canonical_name, cui)` instead of just `canonical_name`.
 
 ### ACC-6 — `unclear` direction findings inflated into the largest direction bin in CANONICALIZE
 **Severity:** High  
@@ -163,8 +138,6 @@ take the first non-None value across the cluster (or the majority value).
 | ID | Severity | Stage | One-line description |
 |----|----------|-------|----------------------|
 | ACC-2 | High | MAP/GROUP | `relation_type` variance splits same fact into different groups |
-| ACC-4 | High | MAP/GROUNDING | `verbatim_support` is LLM paraphrase, depresses real grounding scores |
-| ACC-5 | High | CANONICALIZE/GROUP | CUI enrichment post-canonicalize cannot fix grouping errors |
 | ACC-6 | High | CANONICALIZE | `unclear` direction findings inflated into largest bin |
 | DES-1 | High | RESOLVE | Cross-paper relations ignored in FinalRule scoring |
 | ACC-10 | Medium | CORPUS RELATE | Cross-paper gate skips outcome gating for non-expression rules |
