@@ -23,6 +23,7 @@ from .models import (
     SumCorpusRelation,
     SumRejectionSummary,
     SumRejectedFinding,
+    LlmJudgeCache,
     Base,
 )
 from .db_connection import (
@@ -53,6 +54,7 @@ __all__ = [
     'SumCorpusRelation',
     'SumRejectionSummary',
     'SumRejectedFinding',
+    'LlmJudgeCache',
     'Base',
     'DatabaseConnection',
     'get_db_connection',

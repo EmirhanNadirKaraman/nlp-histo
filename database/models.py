@@ -7,7 +7,7 @@ from sqlalchemy import (
     Boolean, Column, Integer, String, Text, TIMESTAMP,
     ForeignKey, ARRAY, Index, Float, UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSON, JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -766,4 +766,40 @@ class SumCorpusRelation(Base):
         Index("ix_screl_rule_b",    "rule_id_b"),
         Index("ix_screl_type",      "relation_type"),
         UniqueConstraint("corpus_run_id", "relation_id", name="uq_sum_corpus_relation"),
+    )
+
+
+# ── LLM judge evaluation cache ────────────────────────────────────────────────
+
+class LlmJudgeCache(Base):
+    """
+    Postgres-backed cache for LLM judge evaluation results.
+
+    Each row stores one judge call: the request context, the Opus result,
+    and enough metadata to support targeted cache invalidation (by model,
+    prompt version, schema version, task, or paper).
+
+    Cache key is content-addressed:
+        sha256(model + prompt_version + schema_version + task + normalized_request_payload)
+    """
+    __tablename__ = "llm_judge_cache"
+
+    cache_key       = Column(String(64),  primary_key=True)
+    task            = Column(String(50),  nullable=False)
+    judge_model     = Column(String(100), nullable=False)
+    prompt_version  = Column(String(20),  nullable=False)
+    schema_version  = Column(String(20),  nullable=False)
+    label_source    = Column(String(50),  nullable=False)
+    request_payload = Column(JSONB,       nullable=False)
+    result_payload  = Column(JSONB,       nullable=False)
+    pmcid           = Column(String(50),  nullable=True)
+    pipeline_run_id = Column(Integer,     nullable=True)
+    source_id       = Column(Integer,     nullable=True)
+    created_at      = Column(TIMESTAMP,   server_default="now()")
+    updated_at      = Column(TIMESTAMP,   server_default="now()", onupdate=func.now())
+
+    __table_args__ = (
+        Index("ix_ljc_task",       "task"),
+        Index("ix_ljc_versions",   "judge_model", "prompt_version", "schema_version"),
+        Index("ix_ljc_pmcid_run",  "pmcid", "pipeline_run_id"),
     )
