@@ -25,6 +25,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..agreement import AgreementChecker, EmbeddingScorer, MapOutputScorer
 from ..cache import PipelineCache
+from ..llm_errors import is_non_retryable_llm_error
 from ..models import AuditableSummary
 from ..prompts import build_map_chain
 from ..routing import MapOutputRouter
@@ -32,6 +33,11 @@ from ..routing.routing_dataset import RoutingDataset, RoutingRecord
 from pipeline.stages.summarization.interfaces.scoring import ChunkDecision
 
 logger = logging.getLogger(__name__)
+
+try:
+    from langchain_core.exceptions import LengthFinishReasonError as _LengthFinishReasonError
+except ImportError:  # older langchain versions
+    _LengthFinishReasonError = None  # type: ignore[assignment,misc]
 
 
 def _format_sentences(chunk: list[dict]) -> str:
@@ -119,27 +125,49 @@ class MapStage:
         pmcid: str,
         cache: PipelineCache | None = None,
         collector=None,  # TraceCollector | None
+        start_chunk: int = 0,
+        limit_chunks: int | None = None,
     ) -> list[AuditableSummary]:
         """
         Map all sentences for one paper, returning one AuditableSummary per chunk.
 
         Chunks that hit the cache are returned immediately.  Remaining chunks
         run through the ABC cascade.
-        """
-        from .observability.models import ChunkTrace
 
-        chunks = self._make_chunks(sentences)
+        Parameters
+        ----------
+        start_chunk:
+            Zero-based index of the first chunk to process.  Chunks before
+            this index are skipped entirely (not cached, not counted).
+        limit_chunks:
+            Maximum number of chunks to process starting from *start_chunk*.
+            None means process all remaining chunks.
+        """
+        from ..observability.models import ChunkTrace
+
+        all_chunks = self._make_chunks(sentences)
+        total_paper_chunks = len(all_chunks)
+        if start_chunk or limit_chunks is not None:
+            end = (start_chunk + limit_chunks) if limit_chunks is not None else None
+            chunks = all_chunks[start_chunk:end]
+            logger.info(
+                "[%s] MAP limited: processing %d chunk(s) starting at C%d (paper has %d total)",
+                pmcid, len(chunks), start_chunk + 1, total_paper_chunks,
+            )
+        else:
+            chunks = all_chunks
         results: list[AuditableSummary | None] = []
         uncached: list[tuple[int, list[dict]]] = []
         cache_hit_indices: list[int] = []
 
         for idx, chunk in enumerate(chunks):
+            abs_idx = start_chunk + idx  # absolute position in the full paper
             if cache:
                 hit = cache.get_map(chunk)
                 if hit:
                     # Always assign chunk_id from current position — cached
                     # chunk_id may be stale (e.g. from a different run or paper).
-                    hit = hit.model_copy(update={"chunk_id": f"C{idx + 1}"})
+                    hit = hit.model_copy(update={"chunk_id": f"C{abs_idx + 1}"})
                     results.append(hit)
                     cache_hit_indices.append(idx)
                     continue
@@ -159,7 +187,7 @@ class MapStage:
                 te_ids = sorted({item.get("text_element_id", 0) for item in chunk})
                 text = _format_sentences(chunk)
                 collector.add_chunk_trace(ChunkTrace(
-                    chunk_id=f"C{idx + 1}",
+                    chunk_id=f"C{start_chunk + idx + 1}",
                     run_id=collector.run_id,
                     pmcid=pmcid,
                     te_ids=te_ids,
@@ -175,7 +203,7 @@ class MapStage:
         total_chunks = len(chunks)
         n_cached = len(cache_hit_indices)
         for pos, (idx, chunk) in enumerate(uncached, 1):
-            chunk_id = f"C{idx + 1}"
+            chunk_id = f"C{start_chunk + idx + 1}"
             # Brief inter-chunk pause to avoid Vertex AI / OpenAI rate-limit bursts.
             # Only inserted between chunks (not before the first one).
             if pos > 1:
@@ -360,7 +388,7 @@ class MapStage:
             else:
                 # Level 2: mid-tier voters
                 logger.debug("Chunk %s: L1 %s → escalating to L2", chunk_id, bundle.decision)
-                l2_voters, l2_timings = self._run_voters(inp, self._level2_voter_chains)
+                l2_voters, l2_timings = self._run_voters(inp, self._level2_voter_chains, level="L2")
                 l2_bundle = self._agreement.compute(l2_voters, source_text=inp["text"])
                 _trace_bundle = l2_bundle
                 voters = l2_voters
@@ -409,7 +437,7 @@ class MapStage:
         voter_contexts=None,  # list[VoterContext] | None — from router
         escalation_level: int = 1,
     ) -> None:
-        from .observability.models import (
+        from ..observability.models import (
             AgreementTrace,
             ChunkTrace,
             PairwiseScore,
@@ -518,7 +546,7 @@ class MapStage:
         ))
 
     def _run_voters(
-        self, inp: dict, chains: list | None = None
+        self, inp: dict, chains: list | None = None, level: str = "L1"
     ) -> tuple[list[AuditableSummary], dict[int, float | None]]:
         """Invoke each voter chain concurrently; return results and per-voter latency.
 
@@ -531,14 +559,16 @@ class MapStage:
         chains:
             Voter chains to run.  Defaults to self._voter_chains (Level 1).
             Pass self._level2_voter_chains to run Level 2 voters.
+        level:
+            Label used in log messages, e.g. "L1", "L2".
         """
         target = chains if chains is not None else self._voter_chains
+        chunk_id = inp.get("chunk_id", "?")
+        pmcid = inp.get("pmcid", "?")
         results: list[AuditableSummary | None] = [None] * len(target)
         timings: dict[int, float | None] = {}
 
         def _timed_invoke(chain, i: int):
-            chunk_id = inp.get("chunk_id", "?")
-            pmcid = inp.get("pmcid", "?")
             attempt = 0
             t0 = time.monotonic()
             last_exc: BaseException | None = None
@@ -546,45 +576,77 @@ class MapStage:
                 attempt += 1
                 if attempt > 1:
                     logger.warning(
-                        "[%s] MAP chunk %s voter %d — attempt %d/2 (prev error: %s)",
-                        pmcid, chunk_id, i, attempt, type(last_exc).__name__,
+                        "[%s] MAP chunk %s %s voter %d — retry attempt %d/2",
+                        pmcid, chunk_id, level, i, attempt,
                     )
                 try:
                     out = chain.invoke(inp)
                     elapsed_ms = (time.monotonic() - t0) * 1000.0
-                    if attempt > 1:
-                        logger.info(
-                            "[%s] MAP chunk %s voter %d — attempt %d succeeded  [%.0fms total]",
-                            pmcid, chunk_id, i, attempt, elapsed_ms,
-                        )
+                    logger.debug(
+                        "[%s] MAP chunk %s %s voter %d — OK  [%.0fms]",
+                        pmcid, chunk_id, level, i, elapsed_ms,
+                    )
                     timings[i] = elapsed_ms
                     return out
                 except Exception as exc:
                     last_exc = exc
+                    if _LengthFinishReasonError is not None and isinstance(exc, _LengthFinishReasonError):
+                        logger.warning(
+                            "[%s] MAP chunk %s %s voter %d — output truncated "
+                            "(finish_reason=length); excluding voter",
+                            pmcid, chunk_id, level, i,
+                        )
+                        break  # truncation is not fixed by retrying
+                    non_retryable = is_non_retryable_llm_error(exc)
                     logger.warning(
-                        "[%s] MAP chunk %s voter %d — attempt %d failed: %s: %s",
-                        pmcid, chunk_id, i, attempt, type(exc).__name__, exc,
+                        "[%s] MAP chunk %s %s voter %d — attempt %d/%d failed "
+                        "(%s): %s: %s",
+                        pmcid, chunk_id, level, i, attempt, 2,
+                        "non-retryable" if non_retryable else "retryable",
+                        type(exc).__name__, exc,
                     )
+                    if non_retryable:
+                        break
             timings[i] = None
             raise last_exc  # type: ignore[misc]
 
-        with ThreadPoolExecutor(max_workers=len(target)) as pool:
-            future_to_idx = {
-                pool.submit(_timed_invoke, chain, i): i
-                for i, chain in enumerate(target)
-            }
+        pool = ThreadPoolExecutor(max_workers=len(target))
+        future_to_idx = {
+            pool.submit(_timed_invoke, chain, i): i
+            for i, chain in enumerate(target)
+        }
+        try:
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
                     results[idx] = future.result()
                 except Exception as exc:
                     logger.warning(
-                        "Voter %d failed for chunk %s: %s — excluded from agreement",
-                        idx,
-                        inp.get("chunk_id", "?"),
-                        exc,
+                        "[%s] MAP chunk %s %s voter %d — excluded from agreement: %s",
+                        pmcid, chunk_id, level, idx, type(exc).__name__,
                     )
                     timings[idx] = None
+        except KeyboardInterrupt:
+            for f in future_to_idx:
+                f.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown(wait=True)
+
+        succeeded = sum(1 for r in results if r is not None)
+        failed = len(target) - succeeded
+        if failed:
+            logger.warning(
+                "[%s] MAP chunk %s %s — %d/%d voter(s) failed",
+                pmcid, chunk_id, level, failed, len(target),
+            )
+        if not succeeded:
+            logger.error(
+                "[%s] MAP chunk %s %s — ALL voters failed; chunk will be escalated",
+                pmcid, chunk_id, level,
+            )
+
         return [r for r in results if r is not None], timings  # type: ignore[return-value]
 
     # ── Helpers ────────────────────────────────────────────────────────────────

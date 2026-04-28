@@ -35,9 +35,10 @@ HERE = Path(__file__).parent
 OUT  = HERE / "out"
 
 PDF_DIR        = ROOT / "files/organized_pdfs"
-N_SAMPLES      = 30
+N_SAMPLES      = 10
 SEED           = 42
-MAX_FILE_MB    = 5.0   # skip PDFs larger than this (proxy for page count)
+MIN_FILE_MB    = 0.5   # skip PDFs smaller than this (too short / not full papers)
+MAX_FILE_MB    = 10.0  # skip PDFs larger than this (too long / image-heavy)
 
 
 def make_config() -> PipelineConfig:
@@ -74,8 +75,7 @@ def make_config() -> PipelineConfig:
         write_raw_text = True,
     )
 
-    # ── No DB for eval runs ───────────────────────────────────────────────────
-    cfg.database = DatabaseConfig(enabled=False)
+    cfg.database = DatabaseConfig(enabled=True)
 
     # ── Cropping: merge same-caption same-page detections from TATR + Docling ──
     cfg.cropping = CroppingConfig(
@@ -109,28 +109,24 @@ def main() -> None:
     cfg.prepare()
 
     # ── Sample N_SAMPLES PDFs reproducibly ───────────────────────────────────
-    all_pdfs = sorted(PDF_DIR.glob("*.pdf"))
+    all_pdfs  = sorted(PDF_DIR.glob("*.pdf"))
+    min_bytes = MIN_FILE_MB * 1024 * 1024
     max_bytes = MAX_FILE_MB * 1024 * 1024
-    eligible  = [p for p in all_pdfs if p.stat().st_size <= max_bytes]
+    eligible  = [
+        p for p in all_pdfs
+        if min_bytes <= p.stat().st_size <= max_bytes
+    ]
     logging.getLogger(__name__).info(
-        "Eligible PDFs: %d / %d (≤ %.1f MB)", len(eligible), len(all_pdfs), MAX_FILE_MB
+        "Eligible PDFs: %d / %d (%.1f–%.1f MB)",
+        len(eligible), len(all_pdfs), MIN_FILE_MB, MAX_FILE_MB,
     )
-    rng = random.Random(cfg.runtime.seed)
+    rng    = random.Random(cfg.runtime.seed)
     sample = rng.sample(eligible, min(N_SAMPLES, len(eligible)))
     sample.sort()  # stable order within the sample for readable logs
 
     logging.getLogger(__name__).info(
-        "Eval batch: %d / %d PDFs (seed=%d)", len(sample), len(all_pdfs), cfg.runtime.seed
+        "Eval batch: %d PDFs (seed=%d)", len(sample), cfg.runtime.seed
     )
-
-    # Uncomment to run on a single PDF instead of the full sample:
-    # sample = [HERE / "pdfs" / "PMC7543760_main.pdf"]
-    # sample = [
-    #     HERE / "pdfs" / "PMC11649516_HIS-86-236.pdf",
-    #     HERE / "pdfs" / "PMC11791726_HIS-86-485.pdf",
-    # ]
-    # sample = [HERE / "pdfs" / "PMC7150024_main.pdf"]
-    sample = [HERE / "pdfs" / "PMC11863705_main.pdf"]
 
     ParallelBatchRunner(cfg, max_workers=4).run_paths(sample)
 

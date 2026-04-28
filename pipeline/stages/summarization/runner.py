@@ -48,7 +48,7 @@ from pathlib import Path
 
 from .cache import PipelineCache
 from .current_stages.canonicalize_stage import CanonicalizeStage
-from .current_stages.contradiction_detector import ContradictionDetector
+from .helpers.contradiction_detector import ContradictionDetector
 from .helpers.grounding_filter import GroundingFilter
 from .current_stages.group_stage import GroupStage, is_groupable
 from .current_stages.map_stage import MapStage
@@ -231,12 +231,26 @@ class SummarizationRunner:
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def process(self, file_data: dict) -> dict:
+    def process(
+        self,
+        file_data: dict,
+        start_chunk: int = 0,
+        limit_chunks: int | None = None,
+    ) -> dict:
         """
         Run the full pipeline for one paper.
 
         ``file_data`` must have the shape produced by ``load_paper_from_db``:
         keys: pmcid, sentences_with_provenance (list of dicts).
+
+        Parameters
+        ----------
+        start_chunk:
+            Zero-based index of the first MAP chunk to process.  Useful for
+            testing a single chunk without processing the full paper.
+        limit_chunks:
+            Maximum number of MAP chunks to process.  None = all chunks.
+            Combine with start_chunk to process an arbitrary slice.
 
         Returns a result dict with keys:
             status, run_id, pmcid, summary, rules, contradiction_report,
@@ -279,7 +293,8 @@ class SummarizationRunner:
             logger.info("[%s] MAP — %d sentences", pmcid, len(sentences))
             t0 = time.perf_counter()
             chunk_summaries = self._map.process(
-                sentences, pmcid, cache=self._cache, collector=collector
+                sentences, pmcid, cache=self._cache, collector=collector,
+                start_chunk=start_chunk, limit_chunks=limit_chunks,
             )
             logger.info("[%s] MAP done [%.1fs] — %d chunks, %d raw findings",
                         pmcid, time.perf_counter() - t0,

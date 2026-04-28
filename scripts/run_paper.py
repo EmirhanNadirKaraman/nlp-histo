@@ -27,6 +27,8 @@ import logging
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -63,6 +65,42 @@ def build_runner(trace: bool):
 
     escalation_llm = claude_vertex_chat(                   # Level 3 — strongest
         "claude-sonnet-4-6@default", temperature=0.0
+    )
+
+    return SummarizationRunner(
+        voter_llms=voter_llms,
+        level2_voter_llms=level2_voter_llms,
+        escalation_llm=escalation_llm,
+        theta=0.7,
+        chunk_size=10,
+        output_dir=Path("out/summaries"),
+        trace_enabled=trace,
+    )
+
+
+def build_direct_runner(trace: bool):
+    """Sync runner using direct Gemini / OpenAI / Anthropic APIs (no Azure/Vertex)."""
+    from pipeline.stages.summarization import SummarizationRunner
+    from pipeline.stages.summarization.llm_providers import (
+        gemini_direct_chat,
+        openai_direct_chat,
+        anthropic_direct_chat,
+    )
+
+    voter_llms = [                                          # Level 1 — cheapest
+        gemini_direct_chat("gemini-2.5-flash-lite",                temperature=0.1),
+        openai_direct_chat("gpt-4o-mini",                         temperature=0.1),
+        openai_direct_chat("gpt-4.1-mini",                        temperature=0.1),
+    ]
+
+    level2_voter_llms = [                                  # Level 2 — mid-tier
+        gemini_direct_chat("gemini-2.5-flash",            temperature=0.1),
+        openai_direct_chat("gpt-4o",                      temperature=0.1),
+        anthropic_direct_chat("claude-haiku-4-5-20251001", temperature=0.1),
+    ]
+
+    escalation_llm = anthropic_direct_chat(                # Level 3 — strongest
+        "claude-sonnet-4-6", temperature=0.0
     )
 
     return SummarizationRunner(
@@ -113,9 +151,14 @@ def build_batch_runner():
 def main():
     parser = argparse.ArgumentParser(description="Run summarization pipeline on one paper.")
     parser.add_argument("pmcid", help="PubMed Central ID, e.g. PMC1234567")
-    parser.add_argument("--trace",   action="store_true", help="Write JSONL traces (sync mode only)")
-    parser.add_argument("--batch",   action="store_true", help="Async batch mode (50 %% discount)")
-    parser.add_argument("--dry-run", action="store_true", help="Print config and exit without API calls")
+    parser.add_argument("--trace",        action="store_true", help="Write JSONL traces (sync mode only)")
+    parser.add_argument("--batch",        action="store_true", help="Async batch mode (50 %% discount)")
+    parser.add_argument("--direct",       action="store_true", help="Use direct Gemini/OpenAI/Anthropic APIs instead of Azure/Vertex")
+    parser.add_argument("--dry-run",      action="store_true", help="Print config and exit without API calls")
+    parser.add_argument("--limit-chunks", type=int, default=None, metavar="N",
+                        help="Process at most N MAP chunks (useful for cheap iteration)")
+    parser.add_argument("--start-chunk",  type=int, default=0, metavar="K",
+                        help="Start processing from chunk K (0-based, default 0)")
     args = parser.parse_args()
 
     pmcid = args.pmcid.strip()
@@ -123,31 +166,47 @@ def main():
         pmcid = "PMC" + pmcid
 
     if args.dry_run:
-        mode = "batch" if args.batch else "sync"
+        mode = "batch" if args.batch else ("direct" if args.direct else "sync")
         print(f"PMCID:  {pmcid}")
         print(f"Mode:   {mode}")
         print(f"Trace:  {args.trace} (sync only)")
-        print("Models:")
-        print("  L1  DeepSeek-V3.2-Speciale    (Azure) [strip_thinking]")
-        print("  L1  gemini-2.5-flash-lite      (Vertex, global)")
-        print("  L1  Mistral-Large-3             (Azure)")
-        print("  L2  gemini-2.5-flash            (Vertex)")
-        print("  L2  Kimi-K2.5                   (Azure)")
-        print("  L2  claude-haiku-4-5@20251001   (Vertex Claude / Anthropic batch)")
-        print("  L3  claude-sonnet-4-6@default   (Vertex Claude / Anthropic batch)")
-        if args.batch:
-            print("\nBatch env vars required:")
-            print("  ANTHROPIC_API_KEY           (Claude L2/L3 batch)")
-            print("  VERTEX_BATCH_GCS_BUCKET     (Gemini L1/L2 batch, optional)")
+        if args.direct:
+            print("Models (direct APIs):")
+            print("  L1  gemini-2.5-flash-lite                (Google Gemini API)")
+            print("  L1  gpt-4o-mini                           (OpenAI)")
+            print("  L1  gpt-4.1-mini                          (OpenAI)")
+            print("  L2  gemini-2.5-flash                      (Google Gemini API)")
+            print("  L2  gpt-4o                                 (OpenAI)")
+            print("  L2  claude-haiku-4-5-20251001             (Anthropic)")
+            print("  L3  claude-sonnet-4-6                     (Anthropic)")
+            print("\nEnv vars required: GOOGLE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY")
+        else:
+            print("Models:")
+            print("  L1  DeepSeek-V3.2-Speciale    (Azure) [strip_thinking]")
+            print("  L1  gemini-2.5-flash-lite      (Vertex, global)")
+            print("  L1  Mistral-Large-3             (Azure)")
+            print("  L2  gemini-2.5-flash            (Vertex)")
+            print("  L2  Kimi-K2.5                   (Azure)")
+            print("  L2  claude-haiku-4-5@20251001   (Vertex Claude / Anthropic batch)")
+            print("  L3  claude-sonnet-4-6@default   (Vertex Claude / Anthropic batch)")
+            if args.batch:
+                print("\nBatch env vars required:")
+                print("  ANTHROPIC_API_KEY           (Claude L2/L3 batch)")
+                print("  VERTEX_BATCH_GCS_BUCKET     (Gemini L1/L2 batch, optional)")
         return
 
     if args.batch:
         _run_batch(pmcid)
+    elif args.direct:
+        _run_direct(pmcid, trace=args.trace,
+                    start_chunk=args.start_chunk, limit_chunks=args.limit_chunks)
     else:
-        _run_sync(pmcid, trace=args.trace)
+        _run_sync(pmcid, trace=args.trace,
+                  start_chunk=args.start_chunk, limit_chunks=args.limit_chunks)
 
 
-def _run_sync(pmcid: str, trace: bool) -> None:
+def _run_sync(pmcid: str, trace: bool,
+              start_chunk: int = 0, limit_chunks: int | None = None) -> None:
     from pipeline.stages.summarization import SummarizationRunner
 
     logger.info("Building sync runner…")
@@ -163,7 +222,41 @@ def _run_sync(pmcid: str, trace: bool) -> None:
     n = len(file_data["sentences_with_provenance"])
     logger.info("Loaded %d sentences — starting pipeline", n)
 
-    result = runner.process(file_data)
+    result = runner.process(file_data, start_chunk=start_chunk, limit_chunks=limit_chunks)
+
+    if result["status"] == "error":
+        logger.error("Pipeline failed: %s", result["error"])
+        sys.exit(1)
+
+    rules = result.get("rules", [])
+    logger.info("Done — %d rules extracted", len(rules))
+    logger.info("Result saved to out/summaries/summaries/%s.json", pmcid)
+
+    print(f"\n{'─' * 60}")
+    print(f"Summary for {pmcid}")
+    print(f"{'─' * 60}")
+    print(result.get("summary", "(no summary)"))
+    print(f"\n{len(rules)} rules extracted.")
+
+
+def _run_direct(pmcid: str, trace: bool,
+                start_chunk: int = 0, limit_chunks: int | None = None) -> None:
+    from pipeline.stages.summarization import SummarizationRunner
+
+    logger.info("Building direct-API runner (Gemini / OpenAI / Anthropic)…")
+    runner = build_direct_runner(trace=trace)
+
+    logger.info("Loading paper %s from database…", pmcid)
+    try:
+        file_data = runner.load_paper_from_db(pmcid)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
+
+    n = len(file_data["sentences_with_provenance"])
+    logger.info("Loaded %d sentences — starting pipeline", n)
+
+    result = runner.process(file_data, start_chunk=start_chunk, limit_chunks=limit_chunks)
 
     if result["status"] == "error":
         logger.error("Pipeline failed: %s", result["error"])

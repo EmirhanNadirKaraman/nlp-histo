@@ -7,20 +7,35 @@ capable LLM would extract from the same text.
 
 ---
 
+## Recommended first run
+
+Apply the migration, then start tiny and verify outputs and cache before launching
+larger sync or batch runs.
+
+```bash
+alembic upgrade head
+
+python -m eval.llm_judge \
+  --mode sync --tests q1 --n 1 --max-requests 3 \
+  --results-dir /tmp/judge_smoke
+```
+
+---
+
 ## Tests implemented
 
 | Test | File | What it measures |
 |------|------|-----------------|
 | Q1 — MAP precision | `tests/q1_precision.py` | Is each extracted claim grounded in its verbatim source? Are subject/outcome/relation/direction/category fields correct? |
-| Q2 — Relation accuracy | `tests/q2_relations.py` | Is the RELATE label (SUPPORT / CONTRADICT / SCOPE_QUALIFY) correct for persisted relation pairs? Blind by default. |
-| Q3 — Recall gap | `tests/q3_recall.py` | What generalizable findings did the pipeline miss from sampled paragraphs? |
-| Q5 — Paragraph F1 | `tests/q5_f1.py` | Paragraph-level TP/FP/FN/F1 from silver alignment decisions. |
+| Q2 — Relation accuracy | `tests/q2_relations.py` | Is the Opus-assigned label (SUPPORT / CONTRADICT / SCOPE_QUALIFY / UNRELATED) correct for persisted relation pairs? Blind by default. Phase 1 only evaluates pairs the pipeline persisted — see limitations. |
+| Q3 — Recall gap | `tests/q3_recall.py` | What generalizable findings did the pipeline miss from sampled paragraphs? Zero-extraction paragraphs are filtered to skip obvious boilerplate before sampling. |
+| Q5 — Paragraph F1 | `tests/q5_f1.py` | Opus returns silver findings and alignment decisions; Python computes TP/FP/FN/precision/recall/F1 from those alignments. Opus-provided counts are not trusted directly. |
 
 ## Tests intentionally deferred
 
 | Test | Reason |
 |------|--------|
-| Q4 — Grounding threshold calibration | `SumRejectedFinding` has no `verbatim_support` column. Evaluating a rejected claim against its own claim text is circular. Enable once a proper source-text reference is stored. |
+| Q4 — Grounding threshold calibration | `SumRejectedFinding` does not currently store exact source or verbatim evidence. Evaluating a rejected claim against its own claim text would be circular and invalid. Enable Q4 once rejected findings persist the exact source text (or a stable reference to reconstruct it) used by the grounding filter. |
 | Q6–Q9 | Future phases. |
 
 ---
@@ -37,10 +52,20 @@ SHA-256 hash of `(model, prompt_version, schema_version, task, request_inputs)`.
   (`fields_changed`, `is_correct`, F1 metrics) are **always recomputed in Python**
   when a row is read back — they are never stored stale.
 
-Run the Alembic migration before first use:
+`alembic upgrade head` creates or updates the `llm_judge_cache` table. Run it before
+first use and after any schema migration.
+
 ```bash
 alembic upgrade head
 ```
+
+### Cache versioning
+
+Cache entries are separated by judge model, prompt version, schema version, task, and
+request inputs. Changing any of the first three (e.g. bumping `PROMPT_VERSION` in
+`eval/llm_judge/__init__.py`) produces new cache keys and does not reuse old judgments.
+This means a prompt change safely invalidates only the affected version — old results
+remain in the table and can be compared against new ones.
 
 ---
 
@@ -57,8 +82,10 @@ python -m eval.llm_judge --mode sync --tests q1,q2 --n 5
 
 ### Batch mode (for production runs)
 
-Submits all requests to the Anthropic Message Batches API in one call. Batches
-can take up to 24 hours. Polling interval is configurable.
+Submits all requests to the Anthropic Message Batches API in one asynchronous call.
+Batch processing is asynchronous — the harness polls at the configured interval until
+the batch completes, then retrieves results. If the process is interrupted, resume
+with `--batch-id` and the harness will poll and fetch from where it left off.
 
 ```bash
 python -m eval.llm_judge --mode batch --tests q1,q2,q3,q5 --n 15
@@ -142,10 +169,11 @@ All written to `--results-dir` (default: `eval/llm_judge_results/`).
   },
   "q2": {
     "accuracy": 0.84,               // fraction where pipeline label == Opus label
-    "confusion_matrix": { ... },
+    "confusion_matrix": { ... },    // rows=pipeline label, cols=Opus label
     "nli_score_calibration": { ... } // NLI score buckets vs correct rate
-    // NOTE: Phase 1 measures precision of persisted relations only,
-    // not recall (unrelated pairs filtered before NLI are not evaluated).
+    // NOTE: Phase 1 measures correctness of persisted relation pairs only.
+    // The pipeline only persists non-UNRELATED pairs; candidate pairs filtered
+    // before or labeled UNRELATED by the pipeline are not evaluated here.
   },
   "q3": {
     "gap_rate_overall": 0.31,       // fraction of paragraphs with ≥1 missed finding
@@ -171,10 +199,13 @@ All written to `--results-dir` (default: `eval/llm_judge_results/`).
 
 - **Silver labels only**: Opus judgments reflect what the model would extract, not
   clinical expert consensus. Do not treat them as ground truth.
-- **Q2 measures precision, not recall**: Only persisted (non-UNRELATED) relation
-  pairs are evaluated. False-negative UNRELATED labels are invisible to this test.
-- **Q2 blind by default**: Use `--show-pipeline-label` only for calibration; blind
-  mode avoids anchoring bias.
+- **Q2 measures precision of persisted pairs, not relation recall**: The pipeline
+  only persists non-UNRELATED pairs. Relation pairs the pipeline filtered out or
+  labeled UNRELATED are not evaluated. False-negative UNRELATED labels are invisible
+  to this test.
+- **Q2 blind by default**: Opus is not shown the pipeline label unless
+  `--show-pipeline-label` is set. Use that flag only for debugging or calibration —
+  blind mode avoids anchoring bias.
 - **Sync mode is slow**: Use batch mode for full production runs (15+ papers).
 - **Retry covers transient errors**: Systematic API errors (bad prompts, schema
   violations) will exhaust retries and log to `errors.jsonl`.

@@ -63,6 +63,7 @@ class RunConfig:
     force_refresh_cache: bool = False
     max_requests: int | None = None
     no_submit: bool = False
+    dry_run: bool = False
     batch_id: str | None = None
     poll_interval: int = 30
     results_dir: Path = Path("eval/llm_judge_results")
@@ -180,6 +181,12 @@ def run(cfg: RunConfig) -> None:
         sum(len(v) for v in all_cached_rows.values()),
         len(all_skipped),
     )
+
+    # ── Dry-run: log what would be sent to Opus, then exit ───────────────────
+    if cfg.dry_run:
+        _log_dry_run(all_requests, cfg)
+        cache.close()
+        return
 
     # ── Execute ──────────────────────────────────────────────────────────────
     if cfg.mode == "sync":
@@ -420,6 +427,35 @@ def _collect_batch_results(
         _write_jsonl(errors, cfg.results_dir / "errors.jsonl")
 
     return results
+
+
+# ── Dry-run logger ───────────────────────────────────────────────────────────
+
+def _log_dry_run(requests: list[JudgeRequest], cfg: RunConfig) -> None:
+    """Write every pending Opus request to a JSONL file without calling the API."""
+    out_path = cfg.results_dir / "dry_run_requests.jsonl"
+    cfg.results_dir.mkdir(parents=True, exist_ok=True)
+
+    by_task: dict[str, int] = {}
+    with open(out_path, "w") as fh:
+        for req in requests:
+            by_task[req.task] = by_task.get(req.task, 0) + 1
+            fh.write(json.dumps({
+                "custom_id":  req.custom_id,
+                "task":       req.task,
+                "cache_key":  req.cache_key,
+                "metadata":   req.metadata,
+                "system":     req.system,
+                "user":       req.user,
+                "tool_name":  req.tool_name,
+                "schema":     req.schema,
+            }) + "\n")
+
+    print(f"\n── DRY RUN — {len(requests)} requests (no API calls made) ──────────")
+    for task, count in sorted(by_task.items()):
+        print(f"  {task:<20} {count:>4} requests")
+    print(f"\nFull prompts written to: {out_path}")
+    print("Re-run without --dry-run to execute.")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

@@ -31,13 +31,13 @@ import logging
 from pathlib import Path
 
 from ..agreement import AgreementChecker, EmbeddingScorer
-from ..contradiction_detector import ContradictionDetector
-from ..grounding_filter import GroundingFilter
+from ..helpers.contradiction_detector import ContradictionDetector
+from ..helpers.grounding_filter import GroundingFilter
 from ..interfaces.scoring import ChunkDecision
-from ..map_stage import _format_sentences
+from ..current_stages.map_stage import _format_sentences
 from ..models import AuditableSummary
-from ..reduce_stage import ReduceStage
-from ..rule_stage import RuleStage
+from ..old_stages.reduce_stage import ReduceStage
+from ..old_stages.rule_stage import RuleStage
 from .dispatch import OPENAI_MAP_TOOL, build_providers, build_requests, parse_result, submit_level
 from .models import BatchHandle, BatchPhase, BatchResult, ProviderJob, VoterBatchConfig
 

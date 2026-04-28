@@ -83,6 +83,12 @@ def main() -> None:
         help="Clear cache for current prompt/schema version before running",
     )
 
+    # Dry run
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Build all requests and log prompts to dry_run_requests.jsonl without calling the API",
+    )
+
     # Q2 specific
     parser.add_argument(
         "--show-pipeline-label", action="store_true",
@@ -107,6 +113,7 @@ def main() -> None:
         force_refresh_cache=args.force_refresh_cache,
         max_requests=args.max_requests,
         no_submit=args.no_submit,
+        dry_run=args.dry_run,
         batch_id=args.batch_id,
         poll_interval=args.poll_interval_seconds,
     )

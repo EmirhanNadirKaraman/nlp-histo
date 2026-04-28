@@ -1,6 +1,12 @@
 """
 LLM provider factories for the summarization pipeline.
 
+Direct-API factories (no Azure / Vertex required)
+--------------------------------------------------
+gemini_direct_chat   — Google Gemini API (GOOGLE_API_KEY)
+anthropic_direct_chat — Anthropic API (ANTHROPIC_API_KEY)
+openai_direct_chat   — OpenAI API (OPENAI_API_KEY)
+
 Returns LangChain-compatible ChatOpenAI objects for both Azure AI Foundry and
 Vertex AI, so any model can be dropped into voter_llms / level2_voter_llms /
 escalation_llm without changing pipeline code.
@@ -223,3 +229,63 @@ def claude_vertex_chat(
         timeout=request_timeout,
     )
 
+
+# ── Direct APIs (no Azure / Vertex required) ────────────────────────────────────
+
+def gemini_direct_chat(
+    model: str,
+    *,
+    api_key: str | None = None,
+    temperature: float = 0.1,
+    max_tokens: int = 4096,
+    request_timeout: int = 60,
+) -> ChatOpenAI:
+    """Google Gemini via its OpenAI-compatible endpoint (GOOGLE_API_KEY)."""
+    key = api_key or os.environ["GOOGLE_API_KEY"]
+    return ChatOpenAI(
+        model=model,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        api_key=key,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=request_timeout,
+    )
+
+
+def anthropic_direct_chat(
+    model: str,
+    *,
+    api_key: str | None = None,
+    temperature: float = 0.1,
+    max_tokens: int = 4096,
+    request_timeout: int = 60,
+) -> "ChatAnthropic":  # type: ignore[name-defined]
+    """Direct Anthropic API via ChatAnthropic (ANTHROPIC_API_KEY)."""
+    from langchain_anthropic import ChatAnthropic
+    key = api_key or os.environ["ANTHROPIC_API_KEY"]
+    return ChatAnthropic(
+        model=model,
+        api_key=key,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=request_timeout,
+    )
+
+
+def openai_direct_chat(
+    model: str,
+    *,
+    api_key: str | None = None,
+    temperature: float = 0.1,
+    max_tokens: int = 4096,
+    request_timeout: int = 60,
+) -> ChatOpenAI:
+    """Direct OpenAI API (OPENAI_API_KEY)."""
+    key = api_key or os.environ["OPENAI_API_KEY"]
+    return ChatOpenAI(
+        model=model,
+        api_key=key,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=request_timeout,
+    )
