@@ -126,6 +126,15 @@ class EvalMetrics(BaseModel):
     recall: float
     f1: float
     avg_similarity: float
+    # Strict F1: matched pairs with important field mismatches count as 0.5 TP
+    strict_f1: float = 0.0
+    n_field_mismatches: int = 0
+    similarity_threshold: float = 0.55
     prompt_version: str
     model: str
     pipeline_run_ids: List[int]
+    # Split provenance
+    split: str = "all"
+    split_seed: int = 42
+    dev_fraction: float = 0.8
+    evaluated_case_ids: List[str] = Field(default_factory=list)

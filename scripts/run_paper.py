@@ -1,5 +1,5 @@
 """
-Process a single histopathology paper through the summarization pipeline.
+Process one or more histopathology papers through the summarization pipeline.
 
 Usage
 -----
@@ -7,6 +7,10 @@ python scripts/run_paper.py PMC1234567
 python scripts/run_paper.py PMC1234567 --trace      # enable JSONL traces
 python scripts/run_paper.py PMC1234567 --dry-run    # print config and exit
 python scripts/run_paper.py PMC1234567 --batch      # async batch mode (50 % discount)
+
+# Omit PMCID to auto-sample from eval/data/source_cases.jsonl:
+python scripts/run_paper.py                         # 5 random PMCIDs, seed=42
+python scripts/run_paper.py --sample 3 --seed 7    # 3 random PMCIDs, seed=7
 
 Batch mode
 ----------
@@ -148,9 +152,40 @@ def build_batch_runner():
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+def _sample_pmcids(n: int, seed: int) -> list[str]:
+    """Pick n unique PMCIDs from eval/data/source_cases.jsonl using the given seed."""
+    import random
+    source = Path(__file__).parent.parent / "eval" / "data" / "source_cases.jsonl"
+    if not source.exists():
+        logger.error("source_cases.jsonl not found at %s — cannot auto-sample", source)
+        sys.exit(1)
+    import json
+    pmcids: list[str] = []
+    seen: set[str] = set()
+    with source.open() as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            pmcid = json.loads(line).get("pmcid", "")
+            if pmcid and pmcid not in seen:
+                seen.add(pmcid)
+                pmcids.append(pmcid)
+    rng = random.Random(seed)
+    sample = rng.sample(pmcids, min(n, len(pmcids)))
+    logger.info("Auto-sampled %d PMCIDs (seed=%d): %s", len(sample), seed, sample)
+    return sample
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Run summarization pipeline on one paper.")
-    parser.add_argument("pmcid", help="PubMed Central ID, e.g. PMC1234567")
+    parser = argparse.ArgumentParser(description="Run summarization pipeline on one or more papers.")
+    parser.add_argument("pmcid",          nargs="?", default=None,
+                        help="PubMed Central ID, e.g. PMC1234567. "
+                             "Omit to auto-sample from eval/data/source_cases.jsonl.")
+    parser.add_argument("--sample",       type=int, default=5, metavar="N",
+                        help="Number of PMCIDs to sample when pmcid is omitted (default: 5)")
+    parser.add_argument("--seed",         type=int, default=42,
+                        help="Random seed for PMCID sampling (default: 42)")
     parser.add_argument("--trace",        action="store_true", help="Write JSONL traces (sync mode only)")
     parser.add_argument("--batch",        action="store_true", help="Async batch mode (50 %% discount)")
     parser.add_argument("--direct",       action="store_true", help="Use direct Gemini/OpenAI/Anthropic APIs instead of Azure/Vertex")
@@ -161,13 +196,17 @@ def main():
                         help="Start processing from chunk K (0-based, default 0)")
     args = parser.parse_args()
 
-    pmcid = args.pmcid.strip()
-    if not pmcid.startswith("PMC"):
-        pmcid = "PMC" + pmcid
+    if args.pmcid is None:
+        pmcids = _sample_pmcids(args.sample, args.seed)
+    else:
+        pmcid = args.pmcid.strip()
+        if not pmcid.startswith("PMC"):
+            pmcid = "PMC" + pmcid
+        pmcids = [pmcid]
 
     if args.dry_run:
         mode = "batch" if args.batch else ("direct" if args.direct else "sync")
-        print(f"PMCID:  {pmcid}")
+        print(f"PMCIDs: {pmcids}")
         print(f"Mode:   {mode}")
         print(f"Trace:  {args.trace} (sync only)")
         if args.direct:
@@ -195,14 +234,16 @@ def main():
                 print("  VERTEX_BATCH_GCS_BUCKET     (Gemini L1/L2 batch, optional)")
         return
 
-    if args.batch:
-        _run_batch(pmcid)
-    elif args.direct:
-        _run_direct(pmcid, trace=args.trace,
-                    start_chunk=args.start_chunk, limit_chunks=args.limit_chunks)
-    else:
-        _run_sync(pmcid, trace=args.trace,
-                  start_chunk=args.start_chunk, limit_chunks=args.limit_chunks)
+    for pmcid in pmcids:
+        logger.info("─── Processing %s (%d/%d) ───", pmcid, pmcids.index(pmcid) + 1, len(pmcids))
+        if args.batch:
+            _run_batch(pmcid)
+        elif args.direct:
+            _run_direct(pmcid, trace=args.trace,
+                        start_chunk=args.start_chunk, limit_chunks=args.limit_chunks)
+        else:
+            _run_sync(pmcid, trace=args.trace,
+                      start_chunk=args.start_chunk, limit_chunks=args.limit_chunks)
 
 
 def _run_sync(pmcid: str, trace: bool,

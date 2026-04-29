@@ -3,13 +3,13 @@ Match pipeline findings against silver findings, compute metrics, write report.
 
 Usage:
   python -m eval.silver.evaluate
+  python -m eval.silver.evaluate --split test --inspect
   python -m eval.silver.evaluate --silver eval/data/silver_findings.jsonl \\
                                   --pipeline eval/data/pipeline_findings.jsonl
 """
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -23,17 +23,29 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s")
 logger = logging.getLogger(__name__)
 
+from eval.silver.inspect import write_inspection_report
 from eval.silver.jsonl_utils import read_jsonl, write_jsonl
-from eval.silver.matcher import compute_metrics, match_case
+from eval.silver.matcher import (
+    DEFAULT_CACHE_PATH,
+    EMBEDDING_MODEL,
+    SIMILARITY_THRESHOLD,
+    EmbeddingCache,
+    compute_metrics,
+    compute_sim_matrix,
+    match_from_matrix,
+)
 from eval.silver.schemas import (
     EvalMetrics,
     MatchResult,
     PipelineCaseOutput,
     SilverCaseResult,
+    SourceCase,
 )
+from eval.silver.split import filter_by_split
 
 SILVER_PATH   = Path("eval/data/silver_findings.jsonl")
 PIPELINE_PATH = Path("eval/data/pipeline_findings.jsonl")
+SOURCE_PATH   = Path("eval/data/source_cases.jsonl")
 REPORTS_DIR   = Path("eval/reports")
 
 
@@ -41,34 +53,39 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate pipeline vs silver findings")
     parser.add_argument("--silver",   default=str(SILVER_PATH))
     parser.add_argument("--pipeline", default=str(PIPELINE_PATH))
+    parser.add_argument("--source",   default=str(SOURCE_PATH),
+                        help="Source cases JSONL (required with --inspect)")
     parser.add_argument("--reports",  default=str(REPORTS_DIR))
-    parser.add_argument("--threshold", type=float, default=None,
-                        help="Similarity threshold override (default: 0.55)")
+    parser.add_argument("--embed-cache", default=str(DEFAULT_CACHE_PATH))
+    parser.add_argument("--threshold", type=float, default=SIMILARITY_THRESHOLD,
+                        help=f"Similarity threshold (default: {SIMILARITY_THRESHOLD})")
+    parser.add_argument("--split", default="all", choices=["dev", "test", "all"],
+                        help="Case split to evaluate. Default: all.")
+    parser.add_argument("--dev-fraction", type=float, default=0.8)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--inspect", action="store_true",
+                        help="Write detailed inspection Markdown + CSVs")
     args = parser.parse_args()
 
     silver_path   = Path(args.silver)
     pipeline_path = Path(args.pipeline)
     reports_dir   = Path(args.reports)
+    embed_cache_path = Path(args.embed_cache)
 
     for p in (silver_path, pipeline_path):
         if not p.exists():
             print(f"File not found: {p}", file=sys.stderr)
             sys.exit(1)
 
-    if args.threshold is not None:
-        import eval.silver.matcher as _m
-        _m.SIMILARITY_THRESHOLD = args.threshold
-
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         print("OPENAI_API_KEY not set — required for embedding-based matching", file=sys.stderr)
         sys.exit(1)
 
-    # Load data; index by case_id
+    # Load data
     silver_by_case: dict[str, SilverCaseResult] = {}
     for rec in read_jsonl(silver_path, SilverCaseResult):
-        # Latest per case_id wins (if re-run with new prompt)
-        silver_by_case[rec.case_id] = rec
+        silver_by_case[rec.case_id] = rec  # latest per case_id wins
 
     pipeline_by_case: dict[str, PipelineCaseOutput] = {}
     for rec in read_jsonl(pipeline_path, PipelineCaseOutput):
@@ -85,25 +102,51 @@ def main():
         logger.warning("%d case(s) have pipeline output but no silver: %s",
                        len(only_pipeline), sorted(only_pipeline)[:5])
 
-    logger.info("Matching %d common case(s)…", len(common))
-    match_results: list[MatchResult] = []
+    # Apply split filter
+    class _Stub:
+        def __init__(self, case_id): self.case_id = case_id
+    filtered = filter_by_split(
+        [_Stub(c) for c in common],
+        args.split,
+        dev_fraction=args.dev_fraction,
+        seed=args.seed,
+    )
+    common = sorted(s.case_id for s in filtered)
 
-    for case_id in sorted(common):
+    if not common:
+        print("No cases in selected split.", file=sys.stderr)
+        sys.exit(1)
+
+    logger.info("Split=%s  Evaluating %d common case(s)…", args.split, len(common))
+
+    # Embedding cache
+    cache = EmbeddingCache(embed_cache_path, EMBEDDING_MODEL)
+
+    # Match
+    match_results: list[MatchResult] = []
+    for case_id in common:
         silver = silver_by_case[case_id]
         pipeline = pipeline_by_case[case_id]
-        result = match_case(silver, pipeline, api_key)
+        sim, _, _ = compute_sim_matrix(silver, pipeline, api_key, cache)
+        result = match_from_matrix(silver, pipeline, sim, args.threshold)
         match_results.append(result)
         logger.info("  %s — matched %d / %d silver (pipeline has %d)",
                     case_id, len(result.matched),
                     len(silver.findings), len(pipeline.findings))
 
-    silver_list = [silver_by_case[c] for c in sorted(common)]
-    pipeline_list = [pipeline_by_case[c] for c in sorted(common)]
+    silver_list = [silver_by_case[c] for c in common]
+    pipeline_list = [pipeline_by_case[c] for c in common]
 
     prompt_version = silver_list[0].prompt_version if silver_list else "unknown"
     model = silver_list[0].model if silver_list else "unknown"
 
-    metrics = compute_metrics(match_results, silver_list, pipeline_list, prompt_version, model)
+    metrics = compute_metrics(
+        match_results, silver_list, pipeline_list, prompt_version, model,
+        split=args.split,
+        split_seed=args.seed,
+        dev_fraction=args.dev_fraction,
+        threshold=args.threshold,
+    )
 
     # Write outputs
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
@@ -115,17 +158,42 @@ def main():
     metrics_path = reports_dir / f"metrics_{timestamp}.json"
     metrics_path.write_text(metrics.model_dump_json(indent=2))
 
-    print(f"\n{'─' * 50}")
+    # Inspection report
+    if args.inspect:
+        source_path = Path(args.source)
+        source_by_case: dict[str, SourceCase] = {}
+        if source_path.exists():
+            for rec in read_jsonl(source_path, SourceCase):
+                source_by_case[rec.case_id] = rec
+        else:
+            logger.warning("Source file not found: %s — inspection will omit source text", source_path)
+
+        write_inspection_report(
+            match_results=match_results,
+            silver_by_case={c: silver_by_case[c] for c in common},
+            pipeline_by_case={c: pipeline_by_case[c] for c in common},
+            source_by_case=source_by_case,
+            reports_dir=reports_dir,
+            timestamp=timestamp,
+        )
+
+    # Print summary
+    print(f"\n{'─' * 60}")
     print(f"Evaluation results  ({timestamp})")
-    print(f"{'─' * 50}")
-    print(f"Cases evaluated:    {metrics.n_cases}")
+    print(f"Split: {args.split}  |  Threshold: {args.threshold}  |  "
+          f"Cases: {metrics.n_cases}")
+    print(f"{'─' * 60}")
     print(f"Silver findings:    {metrics.n_silver_findings}")
     print(f"Pipeline findings:  {metrics.n_pipeline_findings}")
     print(f"Matched pairs:      {metrics.n_matched}")
+    print(f"Field mismatches:   {metrics.n_field_mismatches}")
+    print(f"{'─' * 60}")
     print(f"Precision:          {metrics.precision:.3f}")
     print(f"Recall:             {metrics.recall:.3f}")
-    print(f"F1:                 {metrics.f1:.3f}")
+    print(f"F1 (loose):         {metrics.f1:.3f}")
+    print(f"F1 (strict):        {metrics.strict_f1:.3f}")
     print(f"Avg similarity:     {metrics.avg_similarity:.3f}")
+    print(f"{'─' * 60}")
     print(f"\nMatch results → {match_path}")
     print(f"Metrics      → {metrics_path}")
 
