@@ -7,6 +7,13 @@ from .agreement import (
     ScoreBundle,
     ChunkDecision,
 )
+from .config import (
+    SummarizationConfig,
+    MapConfig,
+    GroundingConfig,
+    RelateConfig,
+    ResolveConfig,
+)
 from .runner import SummarizationRunner
 from .batch import BatchSummarizationRunner, BatchHandle, BatchPhase, VoterBatchConfig
 from .models import (
@@ -19,6 +26,11 @@ from .models import (
 )
 
 __all__ = [
+    "SummarizationConfig",
+    "MapConfig",
+    "GroundingConfig",
+    "RelateConfig",
+    "ResolveConfig",
     "SummarizationRunner",
     "BatchSummarizationRunner",
     "BatchHandle",

@@ -60,7 +60,7 @@ def build_requests(
     level:       "l1" | "l2" | "l3"
     chunk_ids:   subset of chunks to process; None = all chunks
     """
-    from ..map_stage import _format_sentences  # module-private helper
+    from ..current_stages.map_stage import _format_sentences  # module-private helper
 
     targets = chunk_ids if chunk_ids is not None else list(chunk_map.keys())
     requests: list[BatchRequest] = []
@@ -75,6 +75,7 @@ def build_requests(
                 model=cfg.model,
                 provider=cfg.provider,
                 max_tokens=cfg.max_tokens,
+                temperature=cfg.temperature,
             ))
     return requests
 
@@ -111,6 +112,9 @@ def build_providers(providers_needed: set[str]) -> dict:
     if "claude" in providers_needed:
         from .claude_batch import AnthropicBatchProvider
         providers["claude"] = AnthropicBatchProvider()
+    if "gemini" in providers_needed:
+        from .gemini_batch import GeminiBatchProvider
+        providers["gemini"] = GeminiBatchProvider()
     if "vertex_gemini" in providers_needed:
         from .vertex_batch import VertexGeminiBatchProvider
         providers["vertex_gemini"] = VertexGeminiBatchProvider()

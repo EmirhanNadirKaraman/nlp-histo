@@ -40,27 +40,10 @@ from __future__ import annotations
 
 import logging
 
+from ..config import ResolveConfig
 from ..models import CanonicalRule, FinalRule, Relation, RelationTypeLabel
 
 logger = logging.getLogger(__name__)
-
-# Scoring constants — relations-present mode
-_GROUNDING_WEIGHT       = 0.60
-_GROUNDING_DEFAULT      = 0.50   # used when mean_grounding_score is None
-_FINDING_BONUS_MAX      = 0.10
-_FINDING_BONUS_SCALE    = 5
-_SUPPORT_BOOST_PER_REL  = 0.08
-_SUPPORT_BOOST_CAP      = 0.20
-_SINGLE_STUDY_PEN       = 0.10
-_CONTRADICT_PEN_PER_REL = 0.15
-_CONTRADICT_PEN_CAP     = 0.30
-
-# Scoring constants — relations-absent mode (RELATE skipped or empty)
-# Grounding weight raised so scores spread across [0, 1] rather than
-# clustering in a narrow band around 0.50.
-_NO_REL_GROUNDING_WEIGHT  = 0.80
-_NO_REL_FINDING_BONUS_MAX = 0.15
-_NO_REL_SINGLE_STUDY_PEN  = 0.05
 
 
 def _build_adjacency(
@@ -83,6 +66,9 @@ class ResolveStage:
 
     All logic is deterministic; no LLM calls are made.
     """
+
+    def __init__(self, config: ResolveConfig | None = None) -> None:
+        self._cfg = config or ResolveConfig()
 
     def resolve(
         self,
@@ -136,28 +122,29 @@ class ResolveStage:
                 if r.relation_type == RelationTypeLabel.SCOPE_QUALIFY
             ]
 
+            cfg = self._cfg
             grounding = (
                 rule.mean_grounding_score
                 if rule.mean_grounding_score is not None
-                else _GROUNDING_DEFAULT
+                else cfg.grounding_default
             )
 
             if relations_present:
-                base           = grounding * _GROUNDING_WEIGHT
-                finding_bonus  = min(rule.finding_count / _FINDING_BONUS_SCALE, 1.0) * _FINDING_BONUS_MAX
-                support_bonus  = min(len(supports) * _SUPPORT_BOOST_PER_REL, _SUPPORT_BOOST_CAP)
+                base           = grounding * cfg.grounding_weight
+                finding_bonus  = min(rule.finding_count / cfg.finding_bonus_scale, 1.0) * cfg.finding_bonus_max
+                support_bonus  = min(len(supports) * cfg.support_boost_per_rel, cfg.support_boost_cap)
                 single_study_pen = (
-                    _SINGLE_STUDY_PEN
+                    cfg.single_study_pen
                     if rule.study_coverage == "single_study"
                     else 0.0
                 )
-                contradict_pen = min(len(contradicts) * _CONTRADICT_PEN_PER_REL, _CONTRADICT_PEN_CAP)
+                contradict_pen = min(len(contradicts) * cfg.contradict_pen_per_rel, cfg.contradict_pen_cap)
             else:
-                base           = grounding * _NO_REL_GROUNDING_WEIGHT
-                finding_bonus  = min(rule.finding_count / _FINDING_BONUS_SCALE, 1.0) * _NO_REL_FINDING_BONUS_MAX
+                base           = grounding * cfg.no_rel_grounding_weight
+                finding_bonus  = min(rule.finding_count / cfg.finding_bonus_scale, 1.0) * cfg.no_rel_finding_bonus_max
                 support_bonus  = 0.0
                 single_study_pen = (
-                    _NO_REL_SINGLE_STUDY_PEN
+                    cfg.no_rel_single_study_pen
                     if rule.study_coverage == "single_study"
                     else 0.0
                 )

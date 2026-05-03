@@ -31,7 +31,7 @@ from __future__ import annotations
 import itertools
 import logging
 
-from ..models import CanonicalRule, Relation, RelationTypeLabel
+from ..models import CanonicalRule, RawNLIPair, Relation, RelationTypeLabel
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ _NLI_MODEL = "MoritzLaurer/deberta-v3-large-zeroshot-v2.0"
 
 def _get_nli_pipe(model_name: str = _NLI_MODEL, batch_size: int = 16, device: int | str | None = None):
     """Return cached NLI pipeline, sharing the grounding_filter singleton."""
-    from .grounding_filter import _NLI_PIPE_CACHE, _get_device
+    from ..helpers.grounding_filter import _NLI_PIPE_CACHE, _get_device
     resolved_device = device if device is not None else _get_device()
     cache_key = (model_name, resolved_device, batch_size)
     if cache_key not in _NLI_PIPE_CACHE:
@@ -75,7 +75,7 @@ def _nli_scores(pairs: list[tuple[str, str]], pipe) -> list[dict[str, float]]:
     Per-label scores are max-pooled across windows so a supporting or
     contradicting sentence near a window boundary is not silently truncated.
     """
-    from .grounding_filter import _split_windows
+    from ..helpers.grounding_filter import _split_windows
 
     _empty: dict[str, float] = {"entailment": 0.0, "contradiction": 0.0, "neutral": 0.0}
     out: list[dict[str, float]] = [dict(_empty) for _ in pairs]
@@ -279,10 +279,9 @@ class RelateStage:
         rules: list[CanonicalRule],
         pmcid: str = "",
         gate=None,
-    ) -> list[Relation]:
+    ) -> tuple[list[Relation], list[RawNLIPair]]:
         """
-        Compare all eligible pairs of CanonicalRules and return non-UNRELATED
-        Relation objects.
+        Compare all eligible pairs of CanonicalRules.
 
         Parameters
         ----------
@@ -298,10 +297,13 @@ class RelateStage:
 
         Returns
         -------
-        List of Relation objects (SUPPORT | CONTRADICT | SCOPE_QUALIFY only).
+        (relations, raw_pairs)
+            relations  — non-UNRELATED Relation objects (SUPPORT | CONTRADICT | SCOPE_QUALIFY).
+            raw_pairs  — RawNLIPair for every eligible pair including UNRELATED, with all
+                         four NLI scores, so thresholds can be swept offline.
         """
         if len(rules) < 2:
-            return []
+            return [], []
 
         _gate = gate if gate is not None else _should_compare
         pipe = _get_nli_pipe(self._model_name, self._batch_size, self._device)
@@ -344,7 +346,7 @@ class RelateStage:
             eligible = eligible[: self._max_pairs]
 
         if not eligible:
-            return []
+            return [], []
 
         # Build bidirectional NLI input
         nli_inputs_ab: list[tuple[str, str]] = []
@@ -357,14 +359,28 @@ class RelateStage:
         scores_ba = _nli_scores(nli_inputs_ba, pipe)
 
         relations: list[Relation] = []
+        raw_pairs: list[RawNLIPair] = []
+
         for (i, j), s_ab, s_ba in zip(eligible, scores_ab, scores_ba):
             label = _classify_pair(
                 rules[i], rules[j], s_ab, s_ba,
                 self._entailment_threshold,
                 self._contradiction_threshold,
             )
+            classified = label if label is not None else RelationTypeLabel.UNRELATED
+
+            raw_pairs.append(RawNLIPair(
+                rule_id_a=rules[i].canonical_id,
+                rule_id_b=rules[j].canonical_id,
+                ent_a_to_b=round(s_ab.get("entailment", 0.0), 6),
+                ent_b_to_a=round(s_ba.get("entailment", 0.0), 6),
+                con_a_to_b=round(s_ab.get("contradiction", 0.0), 6),
+                con_b_to_a=round(s_ba.get("contradiction", 0.0), 6),
+                classified_label=classified,
+            ))
+
             if label is None:
-                continue  # UNRELATED — skip
+                continue  # UNRELATED — not added to relations
 
             # Store the score that is semantically meaningful for this label:
             #   SUPPORT / SCOPE_QUALIFY → entailment score (the signal that fired)
@@ -376,14 +392,13 @@ class RelateStage:
                 score_ab = s_ab.get("entailment", 0.0)
                 score_ba = s_ba.get("entailment", 0.0)
 
-            relation = Relation(
+            relations.append(Relation(
                 rule_id_a=rules[i].canonical_id,
                 rule_id_b=rules[j].canonical_id,
                 relation_type=label,
                 nli_score_a_to_b=score_ab,
                 nli_score_b_to_a=score_ba,
-            )
-            relations.append(relation)
+            ))
 
         logger.info(
             "[%s] RELATE: %d pairs checked → %d non-UNRELATED relations "
@@ -395,4 +410,4 @@ class RelateStage:
             sum(1 for r in relations if r.relation_type == RelationTypeLabel.CONTRADICT),
             sum(1 for r in relations if r.relation_type == RelationTypeLabel.SCOPE_QUALIFY),
         )
-        return relations
+        return relations, raw_pairs

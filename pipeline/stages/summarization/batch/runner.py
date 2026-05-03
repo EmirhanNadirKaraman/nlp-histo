@@ -31,6 +31,7 @@ import logging
 from pathlib import Path
 
 from ..agreement import AgreementChecker, EmbeddingScorer
+from ..config import SummarizationConfig
 from ..helpers.contradiction_detector import ContradictionDetector
 from ..helpers.grounding_filter import GroundingFilter
 from ..interfaces.scoring import ChunkDecision
@@ -58,14 +59,9 @@ class BatchSummarizationRunner:
     escalation_llm:
         Synchronous LangChain LLM for REDUCE and RULE EXTRACTION (called once
         per paper at the end, after all MAP batches complete).
-    theta:
-        Agreement threshold for the ABC cascade.
-    chunk_size:
-        Sentences per MAP chunk (must match the sync runner if results are shared).
-    grounding_threshold:
-        NLI entailment threshold for the grounding filter; None to disable.
-    contradiction_similarity_threshold:
-        Cosine similarity threshold for contradiction detection; None to disable.
+    config:
+        All numeric/boolean pipeline knobs.  Defaults to SummarizationConfig().
+        Only map and grounding sub-configs are used by the batch runner.
     output_dir:
         Directory for final ``{pmcid}.json`` result files.
     handle_dir:
@@ -79,26 +75,32 @@ class BatchSummarizationRunner:
         l2_voters: list[VoterBatchConfig],
         l3_model: VoterBatchConfig,
         escalation_llm,
-        theta: float = 0.7,
-        chunk_size: int = 10,
-        grounding_threshold: float | None = 0.5,
-        contradiction_similarity_threshold: float | None = 0.7,
+        config: SummarizationConfig | None = None,
         output_dir: Path = Path("out/summaries"),
         handle_dir: Path | None = None,
     ) -> None:
+        cfg = config or SummarizationConfig()
         self._l1 = l1_voters
         self._l2 = l2_voters
         self._l3 = l3_model
-        self._chunk_size = chunk_size
-        self._agreement = AgreementChecker(scorer=EmbeddingScorer(), theta=theta)
+        self._chunk_size = cfg.map.chunk_size
+        self._agreement = AgreementChecker(
+            scorer=EmbeddingScorer(),
+            theta=cfg.map.theta,
+            reject_theta=cfg.map.reject_theta,
+        )
         self._reduce = ReduceStage(escalation_llm)
         self._rules = RuleStage(escalation_llm)
-        self._grounding = GroundingFilter(grounding_threshold) if grounding_threshold else None
+        self._grounding = (
+            GroundingFilter(cfg.grounding.threshold)
+            if cfg.grounding.threshold is not None else None
+        )
         self._contradiction = (
             ContradictionDetector(
-                escalation_llm, similarity_threshold=contradiction_similarity_threshold
+                escalation_llm,
+                similarity_threshold=cfg.contradiction_similarity_threshold,
             )
-            if contradiction_similarity_threshold is not None
+            if cfg.contradiction_similarity_threshold is not None
             else None
         )
         self._output_dir = output_dir

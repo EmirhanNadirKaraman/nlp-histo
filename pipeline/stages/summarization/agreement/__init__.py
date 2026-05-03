@@ -7,7 +7,7 @@ from .embedding_similarity import EmbeddingSimilarityStrategy
 from .hybrid_structured import HybridStructuredSimilarity
 from .lexical_similarity import LexicalSimilarityStrategy
 from .llm_judge import LLMJudgeScorer
-from .providers import EmbedFn, OpenAIEmbedder
+from .providers import EmbedFn, GeminiEmbedder, OpenAIEmbedder
 from .semantic_scorer import SemanticAgreementScorer
 from pipeline.stages.summarization.interfaces.agreement import MapOutputScorer
 from pipeline.stages.summarization.interfaces.scoring import ChunkDecision, ScoreBundle
@@ -26,5 +26,6 @@ __all__ = [
     "ScoreBundle",
     "ChunkDecision",
     "EmbedFn",
+    "GeminiEmbedder",
     "OpenAIEmbedder",
 ]

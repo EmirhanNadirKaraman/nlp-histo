@@ -313,6 +313,22 @@ class Relation(BaseModel):
     nli_score_b_to_a: float   # entailment score from B→A direction
 
 
+class RawNLIPair(BaseModel):
+    """
+    Raw NLI scores for one eligible pair from the RELATE stage, including
+    pairs classified as UNRELATED.  Saved alongside Relation[] so that
+    entailment/contradiction thresholds can be swept offline without
+    re-running the NLI model.
+    """
+    rule_id_a:   str
+    rule_id_b:   str
+    ent_a_to_b:  float
+    ent_b_to_a:  float
+    con_a_to_b:  float
+    con_b_to_a:  float
+    classified_label: RelationTypeLabel   # UNRELATED when neither threshold fired
+
+
 # ── Phase 6: RESOLVE output ───────────────────────────────────────────────────
 
 class FinalRule(BaseModel):

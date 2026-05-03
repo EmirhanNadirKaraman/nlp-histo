@@ -21,8 +21,9 @@ class BatchPhase(str, Enum):
 class VoterBatchConfig:
     """Config for one voter in batch mode."""
     model: str
-    provider: str           # "azure" | "claude" | "vertex_gemini"
+    provider: str           # "azure" | "claude" | "gemini" | "vertex_gemini"
     max_tokens: int = 4096
+    temperature: float = 0.1
     strip_thinking: bool = False  # strip <think>…</think> from response
 
 
@@ -34,6 +35,7 @@ class BatchRequest:
     model: str
     provider: str
     max_tokens: int = 4096
+    temperature: float = 0.1
 
 
 @dataclass

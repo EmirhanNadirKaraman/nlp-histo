@@ -9,6 +9,11 @@ from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 from pipeline.stages.summarization import SummarizationRunner
 
+from dataclasses import replace
+from pipeline.stages.summarization.config import SummarizationConfig, MapConfig
+
+cfg = SummarizationConfig(map=MapConfig(theta=0.65))   # override just what you need
+
 runner = SummarizationRunner(
     voter_llms=[                                                   # Level 1: cheapest
         AzureChatOpenAI(model="DeepSeek-V3.2-Speciale",          temperature=0.1),
@@ -21,7 +26,7 @@ runner = SummarizationRunner(
         ChatAnthropic(model="claude-haiku-4-5-20251001",          temperature=0.1),
     ],
     escalation_llm=ChatAnthropic(model="claude-sonnet-4-6", temperature=0),  # Level 3
-    theta=0.7,
+    config=cfg,
     output_dir=Path("out/summaries"),
     trace_enabled=True,   # ← enable structured JSONL traces
 )
@@ -47,6 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .cache import PipelineCache
+from .config import SummarizationConfig
 from .current_stages.canonicalize_stage import CanonicalizeStage
 from .helpers.contradiction_detector import ContradictionDetector
 from .helpers.grounding_filter import GroundingFilter
@@ -99,22 +105,14 @@ class SummarizationRunner:
     escalation_llm:
         LLM for MAP Level-3 (final) escalations, REDUCE, and RULES.
         Typically the most capable model (e.g. Sonnet 4.6).
-    theta:
-        Agreement threshold for the ABC cascade in the MAP stage.
-    chunk_size:
-        Sentences per MAP chunk.
-    chunk_overlap:
-        Sentences shared between adjacent MAP chunks.  0 (default) = disjoint.
+    config:
+        All numeric/boolean pipeline knobs.  Defaults to SummarizationConfig()
+        which provides calibrated defaults for all thresholds and scoring
+        constants.  Use dataclasses.replace() to override specific fields.
     scorer:
         MapOutputScorer used to score voter agreement in the MAP stage.
         Defaults to EmbeddingScorer.  Pass CascadedCompositeScorer for
         embedding + LLM judge cascade.
-    grounding_threshold:
-        Minimum NLI entailment score to consider a claim grounded.  Set to
-        None to disable grounding filtering entirely.
-    contradiction_similarity_threshold:
-        Cosine similarity threshold for candidate rule pairs sent to the LLM
-        judge in contradiction detection.  Set to None to disable.
     output_dir:
         Where to write per-concept result JSON files.
     cache_path:
@@ -122,15 +120,9 @@ class SummarizationRunner:
         ``output_dir/pipeline_cache.json``.
     trace_enabled:
         When True, structured JSONL traces are written to ``trace_dir`` for
-        every processed paper.  Traces answer "why was this chunk escalated?",
-        "which pairwise score was low?", etc.
+        every processed paper.
     trace_dir:
         Directory for JSONL trace files.  Defaults to ``output_dir/traces``.
-        Files: ``runs.jsonl``, ``chunks.jsonl``.
-    nli_entailment_threshold:
-        NLI score above which a rule pair is classified as entailment in RELATE.
-    nli_contradiction_threshold:
-        NLI score above which a rule pair is classified as contradiction in RELATE.
     db:
         DatabaseConnection instance for persisting pipeline outputs.  All DB
         writes are no-ops when None.
@@ -149,14 +141,9 @@ class SummarizationRunner:
         voter_llms: list,
         level2_voter_llms: list,
         escalation_llm,
-        theta: float = 0.7,
-        chunk_size: int = 10,
-        chunk_overlap: int = 2,
+        config: SummarizationConfig | None = None,
         scorer: MapOutputScorer | None = None,
-        grounding_threshold: float | None = 0.5,
-        contradiction_similarity_threshold: float | None = 0.7,
-        nli_entailment_threshold: float = 0.50,
-        nli_contradiction_threshold: float = 0.50,
+        embed_fn=None,
         output_dir: Path = Path("langchain-summarization/summarization_results"),
         cache_path: Path | None = None,
         trace_enabled: bool = False,
@@ -166,6 +153,7 @@ class SummarizationRunner:
         run_ner: bool = True,
         run_reduce: bool = False,
     ) -> None:
+        cfg = config or SummarizationConfig()
         self._output_dir = output_dir
         self._summaries_dir = output_dir / "summaries"
         self._summaries_dir.mkdir(parents=True, exist_ok=True)
@@ -173,25 +161,45 @@ class SummarizationRunner:
         cache_file = cache_path or (output_dir / "pipeline_cache.json")
         self._cache = PipelineCache(cache_file)
 
-        self._map = MapStage(voter_llms, level2_voter_llms, escalation_llm, theta=theta, chunk_size=chunk_size, chunk_overlap=chunk_overlap, scorer=scorer)
+        # If no explicit scorer but an embed_fn is provided, build EmbeddingScorer
+        # with that function so the agreement check never falls back to OpenAIEmbedder.
+        if scorer is None and embed_fn is not None:
+            from .agreement import EmbeddingScorer
+            scorer = EmbeddingScorer(embed_fn=embed_fn)
+
+        self._map = MapStage(
+            voter_llms, level2_voter_llms, escalation_llm,
+            theta=cfg.map.theta,
+            reject_theta=cfg.map.reject_theta,
+            chunk_size=cfg.map.chunk_size,
+            chunk_overlap=cfg.map.chunk_overlap,
+            chunk_workers=cfg.map.chunk_workers,
+            scorer=scorer,
+        )
         self._normalize = NormalizeStage()
         self._group = GroupStage()
         self._canonicalize = CanonicalizeStage()
         self._relate = RelateStage(
-            entailment_threshold=nli_entailment_threshold,
-            contradiction_threshold=nli_contradiction_threshold,
+            entailment_threshold=cfg.relate.entailment_threshold,
+            contradiction_threshold=cfg.relate.contradiction_threshold,
         )
-        self._resolve = ResolveStage()
+        self._resolve = ResolveStage(cfg.resolve)
         self._reduce = ReduceStage(escalation_llm)
         self._rules = RuleStage(escalation_llm)
         self._grounding: GroundingChecker | None = (
-            GroundingFilter(grounding_threshold) if grounding_threshold is not None else None
+            GroundingFilter(cfg.grounding.threshold)
+            if cfg.grounding.threshold is not None else None
         )
         self._contradiction: ContradictionChecker | None = (
-            ContradictionDetector(escalation_llm, similarity_threshold=contradiction_similarity_threshold)
-            if contradiction_similarity_threshold is not None else None
+            ContradictionDetector(
+                escalation_llm,
+                similarity_threshold=cfg.contradiction_similarity_threshold,
+                embed_fn=embed_fn,
+            )
+            if cfg.contradiction_similarity_threshold is not None else None
         )
 
+        self._cfg = cfg
         self._db = db  # DatabaseConnection | None — persistence is fully optional
         self._force_rerun = force_rerun
         self._run_ner = run_ner
@@ -211,17 +219,16 @@ class SummarizationRunner:
         self._canonical_rules: dict[str, list[CanonicalRule]] = {}
         # Stores RELATE output per pmcid. Input to Phase 6 RESOLVE.
         self._relations: dict[str, list[Relation]] = {}
+        # Stores raw NLI scores for all eligible pairs (including UNRELATED).
+        self._relate_raw_pairs: dict[str, list] = {}
         # Stores RESOLVE output per pmcid. Final knowledge base.
         self._final_rules: dict[str, list[FinalRule]] = {}
 
+        import dataclasses
         # Snapshot of config for traces (model introspection is best-effort)
         self._config_snapshot = {
-            "theta": theta,
-            "chunk_size": chunk_size,
-            "chunk_overlap": chunk_overlap,
+            **dataclasses.asdict(cfg),
             "scorer": type(scorer).__name__ if scorer else "EmbeddingScorer",
-            "grounding_threshold": grounding_threshold,
-            "contradiction_similarity_threshold": contradiction_similarity_threshold,
             "voter_model_count": len(voter_llms),
             "voter_models": [_model_name(m) for m in voter_llms],
             "level2_voter_model_count": len(level2_voter_llms),
@@ -396,7 +403,7 @@ class SummarizationRunner:
 
             # Enrich canonical rules with UMLS CUIs for cross-paper entity matching.
             # No-ops silently if scispacy is unavailable.
-            from .current_stages.entity_linker import enrich_rules_with_cuis  # noqa: PLC0415
+            from .helpers.entity_linker import enrich_rules_with_cuis  # noqa: PLC0415
             enrich_rules_with_cuis(self._canonical_rules[pmcid])
             _cr_db_id_map = self._persist_canonical_rules(
                 pipeline_run_db_id, pmcid, self._canonical_rules[pmcid], _fg_db_id_map
@@ -408,11 +415,12 @@ class SummarizationRunner:
                 "[%s] RELATE — %d canonical rules", pmcid, len(self._canonical_rules[pmcid])
             )
             t0 = time.perf_counter()
-            self._relations[pmcid] = self._relate.relate(
+            self._relations[pmcid], self._relate_raw_pairs[pmcid] = self._relate.relate(
                 self._canonical_rules[pmcid], pmcid
             )
-            logger.info("[%s] RELATE done [%.1fs] — %d relations",
-                        pmcid, time.perf_counter() - t0, len(self._relations[pmcid]))
+            logger.info("[%s] RELATE done [%.1fs] — %d relations, %d raw pairs",
+                        pmcid, time.perf_counter() - t0,
+                        len(self._relations[pmcid]), len(self._relate_raw_pairs[pmcid]))
             self._persist_relations(
                 pipeline_run_db_id, pmcid, self._relations[pmcid], _cr_db_id_map
             )
@@ -520,6 +528,9 @@ class SummarizationRunner:
                 "relations": [
                     r.model_dump() for r in self._relations.get(pmcid, [])
                 ],
+                "relate_raw_pairs": [
+                    p.model_dump() for p in self._relate_raw_pairs.get(pmcid, [])
+                ],
                 "final_rules": [
                     r.model_dump() for r in self._final_rules.get(pmcid, [])
                 ],
@@ -624,7 +635,7 @@ class SummarizationRunner:
         -------
         List of CorpusRelation objects written to output_path.
         """
-        from .corpus_relate import CorpusRelateStage  # noqa: PLC0415 — lazy import
+        from .helpers.corpus_relate import CorpusRelateStage  # noqa: PLC0415 — lazy import
 
         src = source_dir or self._summaries_dir
         out = output_path or (self._output_dir / "corpus_relations.json")
@@ -1130,7 +1141,7 @@ class SummarizationRunner:
         if self._db is None:
             return
         try:
-            from .corpus_relate import CorpusRelateStage  # noqa: PLC0415
+            from .helpers.corpus_relate import CorpusRelateStage  # noqa: PLC0415
             stage = CorpusRelateStage(
                 entailment_threshold=self._relate._entailment_threshold,
                 contradiction_threshold=self._relate._contradiction_threshold,

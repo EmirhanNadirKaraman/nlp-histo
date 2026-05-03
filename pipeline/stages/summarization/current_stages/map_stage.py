@@ -94,8 +94,10 @@ class MapStage:
         level2_voter_llms: list,
         escalation_llm,
         theta: float = 0.7,
+        reject_theta: float = 0.2,
         chunk_size: int = 10,
         chunk_overlap: int = 0,
+        chunk_workers: int = 5,
         scorer: MapOutputScorer | None = None,
         router: MapOutputRouter | None = None,
         routing_collector: RoutingDataset | None = None,
@@ -111,11 +113,12 @@ class MapStage:
         self._voter_chains = [build_map_chain(llm) for llm in voter_llms]
         self._level2_voter_chains = [build_map_chain(llm) for llm in level2_voter_llms]
         self._escalation_chain = build_map_chain(escalation_llm)
-        self._agreement = AgreementChecker(scorer=scorer or EmbeddingScorer(), theta=theta)
+        self._agreement = AgreementChecker(scorer=scorer or EmbeddingScorer(), theta=theta, reject_theta=reject_theta)
         self._router = router
         self._routing_collector = routing_collector
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self._chunk_workers = chunk_workers
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -202,27 +205,30 @@ class MapStage:
 
         total_chunks = len(chunks)
         n_cached = len(cache_hit_indices)
-        for pos, (idx, chunk) in enumerate(uncached, 1):
+
+        def _process_chunk(args: tuple) -> tuple[int, AuditableSummary | None, float]:
+            idx, chunk = args
             chunk_id = f"C{start_chunk + idx + 1}"
-            # Brief inter-chunk pause to avoid Vertex AI / OpenAI rate-limit bursts.
-            # Only inserted between chunks (not before the first one).
-            if pos > 1:
-                time.sleep(3.0)
-            logger.info(
-                "[%s] MAP chunk %s/%s (chunk_id=%s, %d sentences) …",
-                pmcid, n_cached + pos, total_chunks, chunk_id, len(chunk),
-            )
             t_chunk = time.monotonic()
             result = self._cascade(chunk, pmcid, chunk_id, collector=collector)
             elapsed_ms = (time.monotonic() - t_chunk) * 1000
-            n_findings = len(result.findings) if result else 0
-            logger.info(
-                "[%s] MAP chunk %s/%s done — %d findings  [%.0fms]",
-                pmcid, n_cached + pos, total_chunks, n_findings, elapsed_ms,
-            )
-            results[idx] = result
-            if cache and result is not None:
-                cache.set_map(chunk, result)
+            return idx, result, elapsed_ms
+
+        with ThreadPoolExecutor(max_workers=self._chunk_workers) as pool:
+            futures = {pool.submit(_process_chunk, (idx, chunk)): (pos, idx, chunk)
+                       for pos, (idx, chunk) in enumerate(uncached, 1)}
+            for future in as_completed(futures):
+                pos, idx, chunk = futures[future]
+                chunk_id = f"C{start_chunk + idx + 1}"
+                idx_result, result, elapsed_ms = future.result()
+                n_findings = len(result.findings) if result else 0
+                logger.info(
+                    "[%s] MAP chunk %s/%s done (chunk_id=%s) — %d findings  [%.0fms]",
+                    pmcid, n_cached + pos, total_chunks, chunk_id, n_findings, elapsed_ms,
+                )
+                results[idx_result] = result
+                if cache and result is not None:
+                    cache.set_map(chunk, result)
 
         live_results = [r for r in results if r is not None]
 
