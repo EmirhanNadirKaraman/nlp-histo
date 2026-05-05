@@ -69,7 +69,7 @@ def build_llm():
         project=os.environ["VERTEX_PROJECT"],
         location="global",
         temperature=0.1,
-        request_timeout=20,   # fail fast: normal responses are 5-10s
+        timeout=20,   # fail fast: normal responses are 5-10s
     )
 
 
@@ -96,33 +96,35 @@ def build_batch_runners(
     from pipeline.stages.summarization.batch.runner import BatchSummarizationRunner
     from pipeline.stages.summarization.batch.models import VoterBatchConfig
     from pipeline.stages.summarization import SummarizationRunner
+    from pipeline.stages.summarization.config import (
+        SummarizationConfig, MapConfig, GroundingConfig,
+    )
     from database import get_db_connection
 
-    haiku  = VoterBatchConfig(model="claude-haiku-4-5-20251001",  provider="claude", max_tokens=4096)
-    sonnet = VoterBatchConfig(model="claude-sonnet-4-6-20251001", provider="claude", max_tokens=4096)
+    haiku  = VoterBatchConfig(model="claude-haiku-4-5-20251001",  provider="claude")
+    sonnet = VoterBatchConfig(model="claude-sonnet-4-6-20251001", provider="claude")
     sync_llm = build_llm()  # Gemini Flash Lite — used for NORMALIZE/CANONICALIZE/REDUCE
+
+    # Single voter → always KEEP, no escalation. Disable contradiction detector.
+    cfg = SummarizationConfig(
+        map=MapConfig(theta=0.0, reject_theta=-1.0),
+        grounding=GroundingConfig(threshold=None if skip_nli else 0.3),
+        contradiction_similarity_threshold=None,
+    )
 
     batch_runner = BatchSummarizationRunner(
         l1_voters=[haiku],
         l2_voters=[haiku],
         l3_model=sonnet,
         escalation_llm=sync_llm,
-        theta=0.0,          # single voter → always KEEP, no escalation
-        chunk_size=10,
-        grounding_threshold=None if skip_nli else 0.3,
-        contradiction_similarity_threshold=None,
+        config=cfg,
         output_dir=Path("out/summaries"),
     )
     sync_runner = SummarizationRunner(
         voter_llms=[sync_llm],
         level2_voter_llms=[sync_llm],
         escalation_llm=sync_llm,
-        theta=0.0,
-        chunk_size=10,
-        grounding_threshold=None if skip_nli else 0.3,
-        contradiction_similarity_threshold=None,
-        nli_entailment_threshold=0.50,
-        nli_contradiction_threshold=0.50,
+        config=cfg,
         output_dir=Path("out/summaries"),
         db=get_db_connection(),
         run_ner=not skip_ner,
@@ -138,22 +140,26 @@ def build_runner(
     skip_ner: bool = False,
 ) -> "SummarizationRunner":
     from pipeline.stages.summarization import SummarizationRunner
+    from pipeline.stages.summarization.config import (
+        SummarizationConfig, MapConfig, GroundingConfig,
+    )
     from database import get_db_connection
 
     llm = build_llm()
 
     # theta=0.0 → first voter always "agrees" with itself; no cascade fires.
+    # reject_theta=-1.0 ensures nothing is hard-rejected.
     # All three LLM slots receive the same model instance.
+    cfg = SummarizationConfig(
+        map=MapConfig(theta=0.0, reject_theta=-1.0),
+        grounding=GroundingConfig(threshold=0.3 if not skip_nli else None),
+        contradiction_similarity_threshold=None,   # skip pairwise contradiction detection
+    )
     return SummarizationRunner(
         voter_llms=[llm],
         level2_voter_llms=[llm],
         escalation_llm=llm,
-        theta=0.0,
-        chunk_size=10,
-        grounding_threshold=0.3 if not skip_nli else None,
-        contradiction_similarity_threshold=None,   # skip pairwise contradiction detection
-        nli_entailment_threshold=0.50,
-        nli_contradiction_threshold=0.50,
+        config=cfg,
         output_dir=Path("out/summaries"),
         trace_enabled=trace,
         db=get_db_connection(),

@@ -35,13 +35,11 @@ from ..models import CanonicalRule, RawNLIPair, Relation, RelationTypeLabel
 
 logger = logging.getLogger(__name__)
 
-MAX_PAIRS = 500  # safety cap — increase if your rule sets are large
-
 # ── Module-level NLI singleton ─────────────────────────────────────────────────
 # Delegates to the grounding_filter module-level cache so the same model
 # instance is shared with GroundingFilter (loaded once per process).
 
-_NLI_MODEL = "MoritzLaurer/deberta-v3-large-zeroshot-v2.0"
+_NLI_MODEL = "cross-encoder/nli-deberta-v3-large"
 
 
 def _get_nli_pipe(model_name: str = _NLI_MODEL, batch_size: int = 16, device: int | str | None = None):
@@ -91,7 +89,13 @@ def _nli_scores(pairs: list[tuple[str, str]], pipe) -> list[dict[str, float]]:
             flat_indices.append(i)
 
     if flat_inputs:
-        batch_results = pipe(flat_inputs, truncation=True)
+        from tqdm.auto import tqdm  # noqa: PLC0415
+        _bs = getattr(pipe, "_batch_size", 16)
+        batch_results = []
+        with tqdm(total=len(flat_inputs), desc="NLI [relate]", unit="pair", leave=False) as pbar:
+            for start in range(0, len(flat_inputs), _bs):
+                batch_results.extend(pipe(flat_inputs[start:start + _bs], truncation=True))
+                pbar.update(min(_bs, len(flat_inputs) - start))
         for pair_idx, result in zip(flat_indices, batch_results):
             for item in result:
                 label = item["label"].lower()
@@ -254,8 +258,6 @@ class RelateStage:
     contradiction_threshold:
         Minimum contradiction score (both directions required) to classify
         as CONTRADICT.
-    max_pairs:
-        Hard cap on the number of pairs compared.
     """
 
     def __init__(
@@ -263,14 +265,12 @@ class RelateStage:
         model_name: str = _NLI_MODEL,
         entailment_threshold: float = 0.55,
         contradiction_threshold: float = 0.65,
-        max_pairs: int = MAX_PAIRS,
         batch_size: int = 16,
         device: int | str | None = None,
     ) -> None:
         self._model_name = model_name
         self._entailment_threshold = entailment_threshold
         self._contradiction_threshold = contradiction_threshold
-        self._max_pairs = max_pairs
         self._batch_size = batch_size
         self._device = device
 
@@ -334,16 +334,6 @@ class RelateStage:
                 len(all_pairs),
                 ", ".join(f"{k}={v}" for k, v in sorted(rejection_counts.items())),
             )
-
-        if len(eligible) > self._max_pairs:
-            logger.warning(
-                "[%s] RELATE: %d eligible pairs exceeds cap %d — truncating by grounding score.",
-                pmcid, len(eligible), self._max_pairs,
-            )
-            eligible.sort(
-                key=lambda p: -((rules[p[0]].mean_grounding_score or 0.0) + (rules[p[1]].mean_grounding_score or 0.0))
-            )
-            eligible = eligible[: self._max_pairs]
 
         if not eligible:
             return [], []

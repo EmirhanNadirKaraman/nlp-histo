@@ -114,7 +114,7 @@ def test_mismatch_detected_for_direction():
 
 # ── match_case ─────────────────────────────────────────────────────────────────
 
-def _mock_embeddings(texts, api_key=None):
+def _mock_embedder(texts):
     """Deterministic embeddings: same text → same unit vector (hash-bucketed)."""
     import hashlib
     dim = 16
@@ -125,14 +125,14 @@ def _mock_embeddings(texts, api_key=None):
     return result
 
 
-@patch("eval.silver.matcher._get_embeddings")
+@patch("eval.silver.matcher.get_embeddings")
 def test_perfect_match(mock_emb):
     # silver[0] and pipeline[0] should match (same position → cosine 1.0)
-    mock_emb.side_effect = _mock_embeddings
+    mock_emb.side_effect = lambda texts, embedder, cache: _mock_embedder(texts)
     silver = _silver(claims=("claim A",))
     pipeline = _pipeline(claims=("claim A",))
 
-    result = match_case(silver, pipeline, openai_api_key="fake")
+    result = match_case(silver, pipeline, _mock_embedder)
 
     assert len(result.matched) == 1
     assert result.matched[0].similarity == pytest.approx(1.0)
@@ -140,40 +140,40 @@ def test_perfect_match(mock_emb):
     assert result.unmatched_pipeline == []
 
 
-@patch("eval.silver.matcher._get_embeddings")
+@patch("eval.silver.matcher.get_embeddings")
 def test_no_match_below_threshold(mock_emb):
     # silver[0] maps to unit vec 0, pipeline[0] to unit vec 1 → cosine 0.0
-    mock_emb.side_effect = _mock_embeddings
+    mock_emb.side_effect = lambda texts, embedder, cache: _mock_embedder(texts)
     silver = _silver(claims=("claim A",))
     pipeline = _pipeline(claims=("claim B",))
 
-    result = match_case(silver, pipeline, openai_api_key="fake")
+    result = match_case(silver, pipeline, _mock_embedder)
 
     assert result.matched == []
     assert len(result.unmatched_silver) == 1
     assert len(result.unmatched_pipeline) == 1
 
 
-@patch("eval.silver.matcher._get_embeddings")
+@patch("eval.silver.matcher.get_embeddings")
 def test_empty_silver(mock_emb):
-    mock_emb.side_effect = _mock_embeddings
+    mock_emb.side_effect = lambda texts, embedder, cache: _mock_embedder(texts)
     silver = _silver(claims=())
     pipeline = _pipeline(claims=("claim A",))
 
-    result = match_case(silver, pipeline, openai_api_key="fake")
+    result = match_case(silver, pipeline, _mock_embedder)
 
     assert result.matched == []
     assert result.unmatched_silver == []
     assert len(result.unmatched_pipeline) == 1
 
 
-@patch("eval.silver.matcher._get_embeddings")
+@patch("eval.silver.matcher.get_embeddings")
 def test_empty_pipeline(mock_emb):
-    mock_emb.side_effect = _mock_embeddings
+    mock_emb.side_effect = lambda texts, embedder, cache: _mock_embedder(texts)
     silver = _silver(claims=("claim A",))
     pipeline = _pipeline(claims=())
 
-    result = match_case(silver, pipeline, openai_api_key="fake")
+    result = match_case(silver, pipeline, _mock_embedder)
 
     assert result.matched == []
     assert len(result.unmatched_silver) == 1
@@ -182,12 +182,12 @@ def test_empty_pipeline(mock_emb):
 
 # ── compute_metrics ────────────────────────────────────────────────────────────
 
-@patch("eval.silver.matcher._get_embeddings")
+@patch("eval.silver.matcher.get_embeddings")
 def test_metrics_perfect(mock_emb):
-    mock_emb.side_effect = _mock_embeddings
+    mock_emb.side_effect = lambda texts, embedder, cache: _mock_embedder(texts)
     silver = _silver(claims=("A",))
     pipeline = _pipeline(claims=("A",))
-    result = match_case(silver, pipeline, openai_api_key="fake")
+    result = match_case(silver, pipeline, _mock_embedder)
 
     metrics = compute_metrics([result], [silver], [pipeline], "v1", "opus")
     assert metrics.precision == pytest.approx(1.0)
@@ -195,12 +195,12 @@ def test_metrics_perfect(mock_emb):
     assert metrics.f1 == pytest.approx(1.0)
 
 
-@patch("eval.silver.matcher._get_embeddings")
+@patch("eval.silver.matcher.get_embeddings")
 def test_metrics_zero_recall(mock_emb):
-    mock_emb.side_effect = _mock_embeddings
+    mock_emb.side_effect = lambda texts, embedder, cache: _mock_embedder(texts)
     silver = _silver(claims=("A",))
     pipeline = _pipeline(claims=("B",))  # orthogonal → no match
-    result = match_case(silver, pipeline, openai_api_key="fake")
+    result = match_case(silver, pipeline, _mock_embedder)
 
     metrics = compute_metrics([result], [silver], [pipeline], "v1", "opus")
     assert metrics.recall == pytest.approx(0.0)

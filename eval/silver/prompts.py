@@ -33,7 +33,13 @@ ONLY extract: generalizable medical facts — findings that apply to a disease e
 For each finding, extract the following fields exactly as described.
 
 category
-  One of: morphology | IHC | molecular_genetics | staging | treatment | prognosis
+  One of: morphology | IHC | molecular_genetics | staging | treatment | prognosis | demographics
+
+  Use demographics for: sex distribution, age distribution, sex predominance, cohort composition,
+  epidemiology, and any population-level clinical demographic observation.
+  IMPORTANT: use category="demographics" (with the trailing 's'). Do NOT write category="demographic".
+  Do NOT use relation_type="demographic" as a substitute for the demographics category — they are
+  independent fields. A demographics finding will typically also carry relation_type="demographic".
 
 claim
   Concise telegraphic statement of the finding (≤30 words). Must be a generalizable fact,
@@ -116,7 +122,7 @@ EXTRACT_FINDINGS_TOOL = {
                     "properties": {
                         "category": {
                             "type": "string",
-                            "enum": ["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"],
+                            "enum": ["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"],
                         },
                         "claim":            {"type": "string"},
                         "subject_entity":   {"type": ["string", "null"]},

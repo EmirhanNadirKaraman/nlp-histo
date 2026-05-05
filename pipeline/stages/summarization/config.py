@@ -20,12 +20,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+DEFAULT_MAX_TOKENS: int = 16384
+"""Default max_tokens for all voter / escalation LLM calls in the MAP stage."""
+
 
 @dataclass
 class MapConfig:
     """ABC cascade + chunking knobs for the MAP stage."""
 
-    theta: float = 0.7
+    theta: float = 0.8
     """Deferral score >= theta → KEEP without escalation."""
 
     reject_theta: float = 0.2
@@ -45,7 +48,7 @@ class MapConfig:
 class GroundingConfig:
     """NLI entailment filter applied after MAP."""
 
-    threshold: float | None = 0.5
+    threshold: float | None = None
     """Minimum entailment score to keep a claim. None disables the filter."""
 
 

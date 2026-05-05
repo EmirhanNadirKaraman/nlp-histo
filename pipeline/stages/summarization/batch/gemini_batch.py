@@ -47,21 +47,21 @@ class GeminiBatchProvider:
                 else:
                     user_messages.append(msg)
 
+            config: dict = {
+                "response_mime_type": "application/json",
+                "temperature": req.temperature,
+                "max_output_tokens": req.max_tokens,
+            }
+            if system_content:
+                config["system_instruction"] = system_content
+
             gemini_req: dict = {
                 "contents": [
                     {"role": "user", "parts": [{"text": m["content"]}]}
                     for m in user_messages
                 ],
-                "config": {
-                    "response_mime_type": "application/json",
-                    "temperature": req.temperature,
-                    "max_output_tokens": req.max_tokens,
-                },
+                "config": config,
             }
-            if system_content:
-                gemini_req["system_instruction"] = {
-                    "parts": [{"text": system_content}]
-                }
 
             inline_requests.append(gemini_req)
             custom_ids.append(req.custom_id)

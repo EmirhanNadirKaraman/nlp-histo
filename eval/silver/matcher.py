@@ -38,7 +38,9 @@ logger = logging.getLogger(__name__)
 
 SIMILARITY_THRESHOLD = 0.55
 EMBEDDING_MODEL = "text-embedding-3-small"
-DEFAULT_CACHE_PATH = Path("eval/data/embedding_cache.json")
+GEMINI_EMBEDDING_MODEL = "gemini-embedding-001"
+DEFAULT_CACHE_PATH = Path("eval/data/embedding_cache_openai.json")
+DEFAULT_GEMINI_CACHE_PATH = Path("eval/data/embedding_cache_gemini.json")
 
 # Fields compared for field-mismatch detection (both silver and pipeline have these)
 _SCOPE_FIELD_PAIRS = [
@@ -143,18 +145,11 @@ class EmbeddingCache:
         return len(self._entries)
 
 
-# ── OpenAI embedding call ──────────────────────────────────────────────────────
-
-def _fetch_embeddings(texts: list[str], api_key: str, model: str) -> list[list[float]]:
-    from openai import OpenAI
-    client = OpenAI(api_key=api_key)
-    response = client.embeddings.create(model=model, input=texts)
-    return [item.embedding for item in response.data]
-
+# ── Embedding fetch ────────────────────────────────────────────────────────────
 
 def get_embeddings(
     texts: list[str],
-    api_key: str,
+    embedder: object,  # any callable: (list[str]) -> list[list[float]]
     cache: EmbeddingCache,
 ) -> list[list[float]]:
     """Return embeddings for texts, using cache for hits and batching misses."""
@@ -173,7 +168,7 @@ def get_embeddings(
     if miss_texts:
         logger.info("Fetching %d embedding(s) from API (cache has %d)",
                     len(miss_texts), len(cache))
-        fetched = _fetch_embeddings(miss_texts, api_key, cache.embedding_model)
+        fetched = embedder(miss_texts)  # type: ignore[operator]
         for idx, text, emb in zip(miss_indices, miss_texts, fetched):
             cache.set(text, emb)
             results[idx] = emb
@@ -221,7 +216,7 @@ def _field_mismatches(silver_finding: SilverFinding, pipeline_finding: PipelineF
 def compute_sim_matrix(
     silver: SilverCaseResult,
     pipeline: PipelineCaseOutput,
-    openai_api_key: str,
+    embedder: object,  # any callable: (list[str]) -> list[list[float]]
     cache: EmbeddingCache,
 ) -> tuple[list[list[float]], list[str], list[str]]:
     """
@@ -237,7 +232,7 @@ def compute_sim_matrix(
         return [], silver_texts, pipeline_texts
 
     all_texts = silver_texts + pipeline_texts
-    all_embs = get_embeddings(all_texts, openai_api_key, cache)
+    all_embs = get_embeddings(all_texts, embedder, cache)
     s_embs = all_embs[:len(silver_texts)]
     p_embs = all_embs[len(silver_texts):]
 
@@ -318,7 +313,7 @@ def match_from_matrix(
 def match_case(
     silver: SilverCaseResult,
     pipeline: PipelineCaseOutput,
-    openai_api_key: str,
+    embedder: object,
     *,
     cache: EmbeddingCache | None = None,
     threshold: float = SIMILARITY_THRESHOLD,
@@ -326,7 +321,7 @@ def match_case(
     """Match one case. Uses/updates cache if provided."""
     if cache is None:
         cache = EmbeddingCache(DEFAULT_CACHE_PATH)
-    sim, _, _ = compute_sim_matrix(silver, pipeline, openai_api_key, cache)
+    sim, _, _ = compute_sim_matrix(silver, pipeline, embedder, cache)
     return match_from_matrix(silver, pipeline, sim, threshold)
 
 

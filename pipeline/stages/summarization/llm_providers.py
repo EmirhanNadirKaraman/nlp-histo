@@ -38,6 +38,8 @@ import re
 
 from langchain_openai import ChatOpenAI
 
+from pipeline.stages.summarization.config import DEFAULT_MAX_TOKENS
+
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
@@ -73,7 +75,7 @@ def azure_foundry_chat(
     endpoint: str | None = None,
     api_key: str | None = None,
     temperature: float = 0.1,
-    max_tokens: int = 4096,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     strip_thinking: bool = False,
 ) -> ChatOpenAI:
     """
@@ -121,7 +123,7 @@ def vertex_gemini_chat(
     project: str | None = None,
     location: str | None = None,
     temperature: float = 0.1,
-    max_tokens: int = 4096,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     request_timeout: int = 20,
 ) -> ChatOpenAI:
     """
@@ -181,7 +183,7 @@ def claude_vertex_chat(
     project: str | None = None,
     location: str | None = None,
     temperature: float = 0.1,
-    max_tokens: int = 4096,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     request_timeout: int = 20,
 ) -> ChatOpenAI:
     """
@@ -237,7 +239,7 @@ def gemini_direct_chat(
     *,
     api_key: str | None = None,
     temperature: float = 0.1,
-    max_tokens: int = 4096,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     request_timeout: int = 60,
 ) -> ChatOpenAI:
     """Google Gemini via its OpenAI-compatible endpoint (GOOGLE_API_KEY)."""
@@ -257,7 +259,7 @@ def anthropic_direct_chat(
     *,
     api_key: str | None = None,
     temperature: float = 0.1,
-    max_tokens: int = 4096,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     request_timeout: int = 60,
 ) -> "ChatAnthropic":  # type: ignore[name-defined]
     """Direct Anthropic API via ChatAnthropic (ANTHROPIC_API_KEY)."""
@@ -277,7 +279,7 @@ def openai_direct_chat(
     *,
     api_key: str | None = None,
     temperature: float = 0.1,
-    max_tokens: int = 4096,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     request_timeout: int = 60,
 ) -> ChatOpenAI:
     """Direct OpenAI API (OPENAI_API_KEY)."""

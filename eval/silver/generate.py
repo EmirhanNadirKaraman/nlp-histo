@@ -33,6 +33,8 @@ def main():
     parser.add_argument("--source",  default=str(SOURCE_PATH))
     parser.add_argument("--output",  default=str(OUTPUT_PATH))
     parser.add_argument("--model",   default=DEFAULT_MODEL)
+    parser.add_argument("--batch",   action="store_true",
+                        help="Use Anthropic batch API (~50% cheaper). Re-run to check status.")
     args = parser.parse_args()
 
     source = Path(args.source)
@@ -46,7 +48,10 @@ def main():
         output_path=Path(args.output),
         model=args.model,
     )
-    gen.run()
+    if args.batch:
+        gen.run_batch()
+    else:
+        gen.run()
 
 
 if __name__ == "__main__":

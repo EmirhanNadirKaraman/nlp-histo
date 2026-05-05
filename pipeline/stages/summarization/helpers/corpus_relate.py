@@ -71,7 +71,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..models import CanonicalRule, CorpusRelation
+from ..models import CanonicalRule, CorpusRelation, Relation
 from ..current_stages.relate_stage import RelateStage, _norm_outcome_expression
 
 logger = logging.getLogger(__name__)
@@ -251,8 +251,9 @@ class CorpusRelateStage:
                 "CORPUS RELATE: fewer than 2 rules across the corpus — nothing to compare"
             )
             corpus_relations: list[CorpusRelation] = []
+            raw_pairs_corpus: list = []
         else:
-            raw_relations = self._relate.relate(
+            raw_relations, raw_pairs_corpus = self._relate.relate(
                 all_rules, pmcid="corpus", gate=_should_compare_cross_paper,
             )
             logger.info(
@@ -276,6 +277,11 @@ class CorpusRelateStage:
             "intra_paper_count": intra_count,
             "cross_paper_count": cross_count,
             "relations": [r.model_dump() for r in corpus_relations],
+            "raw_nli_pairs": [
+                {**p.model_dump(), "pmcid_a": id_to_pmcid.get(p.rule_id_a, ""),
+                 "pmcid_b": id_to_pmcid.get(p.rule_id_b, "")}
+                for p in raw_pairs_corpus
+            ],
         }
         output_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -343,7 +349,7 @@ class CorpusRelateStage:
             "CORPUS RELATE [%s]: comparing %d new rules × %d existing rules",
             new_pmcid, len(new_rules), len(existing_rules),
         )
-        raw_cross = self._relate.relate(
+        raw_cross, _raw_pairs_cross = self._relate.relate(
             all_rules, pmcid="corpus", gate=_incremental_gate,
         )
 
@@ -351,9 +357,9 @@ class CorpusRelateStage:
         # The XOR gate above blocks same-paper pairs, so they are never computed
         # on reprocess.  Run RelateStage directly on new_rules (all same PMCID)
         # to produce the intra-paper neighborhood for the reprocessed paper.
-        raw_intra: list = []
+        raw_intra: list[Relation] = []
         if len(new_rules) >= 2:
-            raw_intra = self._relate.relate(
+            raw_intra, _raw_pairs_intra = self._relate.relate(
                 new_rules, pmcid="corpus_intra", gate=_should_compare_cross_paper,
             )
 

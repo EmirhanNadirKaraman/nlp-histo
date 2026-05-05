@@ -7,7 +7,11 @@ from __future__ import annotations
 from enum import Enum
 from typing import List, Literal
 
-from pydantic import BaseModel, Field
+import logging
+
+from pydantic import BaseModel, Field, field_validator
+
+_log = logging.getLogger(__name__)
 
 
 # ── Phase 1: new enums and scope model ────────────────────────────────────────
@@ -45,8 +49,15 @@ class FindingScope(BaseModel):
 
 # ── MAP output ─────────────────────────────────────────────────────────────────
 
+_CATEGORY_ALIASES: dict[str, str] = {
+    "demographic": "demographics",  # LLM alias; category uses trailing 's', relation_type does not
+}
+
+
 class Finding(BaseModel):
-    category: Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"]
+    # NOTE: relation_type uses "demographic" (no 's'); category uses "demographics" (with 's').
+    # Some models emit the alias — _repair_category_alias normalises it before Pydantic validates.
+    category: Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"]
     claim: str = Field(description="Atomic, telegraphic medical fact")
     evidence: List[str] = Field(description="Citation IDs, e.g. ['S1|PMC123|456']")
     confidence: Literal["high", "medium", "low"]
@@ -58,6 +69,20 @@ class Finding(BaseModel):
     direction:         DirectionEnum | None     = None
     scope:             FindingScope | None      = None
     grounding_score:   float | None             = None
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _repair_category_alias(cls, v: object) -> object:
+        if isinstance(v, str) and v in _CATEGORY_ALIASES:
+            _log.warning("Repaired category alias %r → %r", v, _CATEGORY_ALIASES[v])
+            return _CATEGORY_ALIASES[v]
+        return v
+
+    @field_validator("direction", "scope", "subject_entity", "outcome_entity",
+                     "grounding_score", mode="before")
+    @classmethod
+    def _null_string_to_none(cls, v: object) -> object:
+        return None if v == "null" else v
 
 
 class AuditMetadata(BaseModel):
@@ -73,6 +98,20 @@ class AuditableSummary(BaseModel):
     findings: List[Finding]
     summary_text: str
     audit_metadata: AuditMetadata
+
+    @field_validator("findings", mode="before")
+    @classmethod
+    def _drop_invalid_findings(cls, v: object) -> object:
+        if not isinstance(v, list):
+            return v
+        clean = []
+        for item in v:
+            try:
+                Finding.model_validate(item)
+                clean.append(item)
+            except Exception as exc:
+                _log.warning("Dropping malformed finding: %s", exc)
+        return clean
 
 
 # ── REDUCE output ──────────────────────────────────────────────────────────────
@@ -207,7 +246,7 @@ class NormalFinding(BaseModel):
     outcome_cui:          str | None = None  # UMLS CUI resolved during NORMALIZE
     relation_type:        RelationTypeEnum  # groupability key; unclear = non-groupable
     direction:            DirectionEnum | None
-    category:             Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"]
+    category:             Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"]
     predicate_text:       str               # representative claim text
     scope:                FindingScope      # from the best-grounded source finding
     source_finding_ids:   List[str]         # Finding.finding_id values merged here (reserved for Phase 3+)
@@ -236,7 +275,7 @@ class FindingGroup(BaseModel):
     subject_entity:       str                    # always non-None (groupability invariant)
     outcome_entity:       str                    # always non-None (groupability invariant)
     relation_type:        RelationTypeEnum       # grouping key
-    category:             Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"]
+    category:             Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"]
     member_ids:           List[str]              # NormalFinding.normal_id values
     direction_counts:     dict[str, int]         # direction.value → count (None keys stored as "unclear")
     scope_heterogeneity:  float                  # 0.0 = all scope fields agree; 1.0 = maximum variation
@@ -250,7 +289,7 @@ class AtomicFinding(BaseModel):
     Not imported or used anywhere in Phase 1 runner/filter code.
     """
     finding_id:       str
-    category:         Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"]
+    category:         Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"]
     claim:            str
     subject_entity:   str | None
     outcome_entity:   str | None
@@ -280,7 +319,7 @@ class CanonicalRule(BaseModel):
     predicate_text:      str                   # LLM-selected or best-score fallback
     is_conflicted:       bool                  # True if ≥2 non-unclear opposing directions in bin
     study_coverage:      Literal["single_study", "multi_study", "unknown"]
-    category:            Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"]
+    category:            Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"]
     supporting_pmcids:   List[str]             # unique PMCIDs across member NFs
     member_normal_ids:   List[str]             # NormalFinding.normal_id values in this bin
     mean_grounding_score: float | None
@@ -327,6 +366,8 @@ class RawNLIPair(BaseModel):
     con_a_to_b:  float
     con_b_to_a:  float
     classified_label: RelationTypeLabel   # UNRELATED when neither threshold fired
+    pmcid_a:     str = ""                 # source paper for rule_id_a (corpus-level only)
+    pmcid_b:     str = ""                 # source paper for rule_id_b (corpus-level only)
 
 
 # ── Phase 6: RESOLVE output ───────────────────────────────────────────────────
@@ -347,7 +388,7 @@ class FinalRule(BaseModel):
     predicate_text:        str
     is_conflicted:         bool
     study_coverage:        Literal["single_study", "multi_study", "unknown"]
-    category:              Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis"]
+    category:              Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"]
     supporting_pmcids:     List[str]
     member_normal_ids:     List[str]
     mean_grounding_score:  float | None

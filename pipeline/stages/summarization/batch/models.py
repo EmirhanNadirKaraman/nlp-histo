@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from pipeline.stages.summarization.config import DEFAULT_MAX_TOKENS
+
 
 class BatchPhase(str, Enum):
     """State machine phase for the cascading batch run."""
@@ -22,7 +24,7 @@ class VoterBatchConfig:
     """Config for one voter in batch mode."""
     model: str
     provider: str           # "azure" | "claude" | "gemini" | "vertex_gemini"
-    max_tokens: int = 4096
+    max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = 0.1
     strip_thinking: bool = False  # strip <think>…</think> from response
 
@@ -34,7 +36,7 @@ class BatchRequest:
     messages: list[dict]    # OpenAI-format role/content dicts
     model: str
     provider: str
-    max_tokens: int = 4096
+    max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = 0.1
 
 

@@ -23,7 +23,11 @@ CRITICAL EXTRACTION RULES:
 </Task>
 
 <Categories>
-Assign each finding to exactly one: morphology | IHC | molecular_genetics | staging | treatment | prognosis
+Assign each finding to exactly one: morphology | IHC | molecular_genetics | staging | treatment | prognosis | demographics
+
+  Use demographics for: sex distribution, age distribution, sex predominance, cohort composition,
+  epidemiology, and any population-level clinical demographic observation.
+  IMPORTANT: use category="demographics" (with the trailing 's'). Do NOT write category="demographic".
 </Categories>
 
 <FilterRules>
@@ -149,7 +153,7 @@ Return your analysis in this EXACT structure:
   "chunk_id": "{chunk_id}",
   "findings": [
     {{
-      "category": "morphology|IHC|molecular_genetics|staging|treatment|prognosis",
+      "category": "morphology|IHC|molecular_genetics|staging|treatment|prognosis|demographics",
       "claim": "<telegraphic_atomic_fact>",
       "evidence": ["S1|PMC123456|789"],
       "confidence": "high|medium|low",

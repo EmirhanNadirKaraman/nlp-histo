@@ -355,7 +355,13 @@ def _score_pairs(pairs: list[tuple[str, str]], nli_pipe) -> list[float]:
             flat_pair_indices.append(i)
 
     if flat_inputs:
-        batch_results = nli_pipe(flat_inputs, truncation=True)
+        from tqdm.auto import tqdm  # noqa: PLC0415
+        _bs = getattr(nli_pipe, "_batch_size", 16)
+        batch_results = []
+        with tqdm(total=len(flat_inputs), desc="NLI [grounding]", unit="sent", leave=False) as pbar:
+            for start in range(0, len(flat_inputs), _bs):
+                batch_results.extend(nli_pipe(flat_inputs[start:start + _bs], truncation=True))
+                pbar.update(min(_bs, len(flat_inputs) - start))
         for pair_idx, result in zip(flat_pair_indices, batch_results):
             window_score = next(
                 (s["score"] for s in result if s["label"].lower() == "entailment"),

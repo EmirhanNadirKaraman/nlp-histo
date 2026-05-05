@@ -29,6 +29,7 @@ _VALID_CATEGORIES = frozenset([
     "staging",
     "treatment",
     "prognosis",
+    "demographics",
 ])
 
 

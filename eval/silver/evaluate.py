@@ -23,11 +23,14 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s")
 logger = logging.getLogger(__name__)
 
+from eval.silver.embedders import GeminiEmbedder, OpenAIEmbedder
 from eval.silver.inspect import write_inspection_report
 from eval.silver.jsonl_utils import read_jsonl, write_jsonl
 from eval.silver.matcher import (
     DEFAULT_CACHE_PATH,
+    DEFAULT_GEMINI_CACHE_PATH,
     EMBEDDING_MODEL,
+    GEMINI_EMBEDDING_MODEL,
     SIMILARITY_THRESHOLD,
     EmbeddingCache,
     compute_metrics,
@@ -56,7 +59,10 @@ def main():
     parser.add_argument("--source",   default=str(SOURCE_PATH),
                         help="Source cases JSONL (required with --inspect)")
     parser.add_argument("--reports",  default=str(REPORTS_DIR))
-    parser.add_argument("--embed-cache", default=str(DEFAULT_CACHE_PATH))
+    parser.add_argument("--embed-cache", default=None,
+                        help="Embedding cache path (default depends on --embedder)")
+    parser.add_argument("--embedder", default="openai", choices=["openai", "gemini"],
+                        help="Embedding provider (default: openai)")
     parser.add_argument("--threshold", type=float, default=SIMILARITY_THRESHOLD,
                         help=f"Similarity threshold (default: {SIMILARITY_THRESHOLD})")
     parser.add_argument("--split", default="all", choices=["dev", "test", "all"],
@@ -70,17 +76,30 @@ def main():
     silver_path   = Path(args.silver)
     pipeline_path = Path(args.pipeline)
     reports_dir   = Path(args.reports)
-    embed_cache_path = Path(args.embed_cache)
 
     for p in (silver_path, pipeline_path):
         if not p.exists():
             print(f"File not found: {p}", file=sys.stderr)
             sys.exit(1)
 
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        print("OPENAI_API_KEY not set — required for embedding-based matching", file=sys.stderr)
-        sys.exit(1)
+    if args.embedder == "gemini":
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            print("GOOGLE_API_KEY not set — required for Gemini embeddings", file=sys.stderr)
+            sys.exit(1)
+        embedder = GeminiEmbedder(api_key)
+        embed_model = GEMINI_EMBEDDING_MODEL
+        default_cache = DEFAULT_GEMINI_CACHE_PATH
+    else:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            print("OPENAI_API_KEY not set — required for OpenAI embeddings", file=sys.stderr)
+            sys.exit(1)
+        embedder = OpenAIEmbedder(api_key)
+        embed_model = EMBEDDING_MODEL
+        default_cache = DEFAULT_CACHE_PATH
+
+    embed_cache_path = Path(args.embed_cache) if args.embed_cache else default_cache
 
     # Load data
     silver_by_case: dict[str, SilverCaseResult] = {}
@@ -120,14 +139,14 @@ def main():
     logger.info("Split=%s  Evaluating %d common case(s)…", args.split, len(common))
 
     # Embedding cache
-    cache = EmbeddingCache(embed_cache_path, EMBEDDING_MODEL)
+    cache = EmbeddingCache(embed_cache_path, embed_model)
 
     # Match
     match_results: list[MatchResult] = []
     for case_id in common:
         silver = silver_by_case[case_id]
         pipeline = pipeline_by_case[case_id]
-        sim, _, _ = compute_sim_matrix(silver, pipeline, api_key, cache)
+        sim, _, _ = compute_sim_matrix(silver, pipeline, embedder, cache)
         result = match_from_matrix(silver, pipeline, sim, args.threshold)
         match_results.append(result)
         logger.info("  %s — matched %d / %d silver (pipeline has %d)",

@@ -6,6 +6,8 @@ without any API calls.
 
 Usage:
   python -m eval.silver.sweep
+  python -m eval.silver.sweep --embedder gemini
+  python -m eval.silver.sweep --embedder both
   python -m eval.silver.sweep --split dev --min-threshold 0.40 --max-threshold 0.80
 
 NOTE: Use only the dev split for threshold selection. Never use --split test
@@ -28,9 +30,11 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s")
 logger = logging.getLogger(__name__)
 
+from eval.silver.embedders import GeminiEmbedder, OpenAIEmbedder
 from eval.silver.jsonl_utils import read_jsonl
 from eval.silver.matcher import (
-    EMBEDDING_MODEL,
+    DEFAULT_CACHE_PATH,
+    DEFAULT_GEMINI_CACHE_PATH,
     STRICT_FIELDS,
     EmbeddingCache,
     compute_sim_matrix,
@@ -41,7 +45,6 @@ from eval.silver.split import filter_by_split
 
 SILVER_PATH   = Path("eval/data/silver_findings.jsonl")
 PIPELINE_PATH = Path("eval/data/pipeline_findings.jsonl")
-EMBED_CACHE   = Path("eval/data/embedding_cache.json")
 REPORTS_DIR   = Path("eval/reports")
 
 
@@ -104,14 +107,75 @@ def _metrics_at_threshold(
     }
 
 
+def _run_sweep(
+    label: str,
+    embedder: object,
+    cache: EmbeddingCache,
+    common: list[str],
+    silver_by_case: dict,
+    pipeline_by_case: dict,
+    thresholds: list[float],
+    args,
+) -> tuple[list[dict], dict]:
+    """Compute sim matrices once, then sweep all thresholds. Returns (rows, best)."""
+    logger.info("[%s] Computing similarity matrices…", label)
+    cases_with_matrices: list[tuple] = []
+    for case_id in common:
+        silver = silver_by_case[case_id]
+        pipeline = pipeline_by_case[case_id]
+        sim, _, _ = compute_sim_matrix(silver, pipeline, embedder, cache)
+        cases_with_matrices.append((silver, pipeline, sim))
+
+    logger.info("[%s] All embeddings ready. Starting threshold sweep…", label)
+    rows = []
+    for t in thresholds:
+        row = _metrics_at_threshold(cases_with_matrices, t)
+        row["split"] = args.split
+        row["seed"] = args.seed
+        row["dev_fraction"] = args.dev_fraction
+        row["embedder"] = label
+        rows.append(row)
+
+    best = max(rows, key=lambda r: r["f1"])
+    return rows, best
+
+
+def _print_table(label: str, rows: list[dict], best: dict, n_cases: int, args) -> None:
+    print(f"\n{'─' * 80}")
+    print(f"MAP Silver Eval — Threshold Sweep  [{label}]")
+    print(f"Split: {args.split}  |  Cases: {n_cases}  |  "
+          f"Seed: {args.seed}  |  Dev fraction: {args.dev_fraction}")
+    print("NOTE: These are dev-set results only — do not report as final performance.")
+    print(f"{'─' * 80}")
+    print(f"{'Threshold':>10}  {'Precision':>9}  {'Recall':>7}  {'F1':>7}  "
+          f"{'Strict F1':>9}  {'Matched':>7}  {'Mismatches':>10}")
+    print(f"{'─' * 80}")
+    for row in rows:
+        marker = " ← best F1" if row["threshold"] == best["threshold"] else ""
+        print(
+            f"{row['threshold']:>10.2f}  {row['precision']:>9.3f}  "
+            f"{row['recall']:>7.3f}  {row['f1']:>7.3f}  "
+            f"{row['strict_f1']:>9.3f}  {row['n_matched']:>7}  "
+            f"{row['n_field_mismatches']:>10}{marker}"
+        )
+    print(f"{'─' * 80}")
+    print(f"\nBest F1 threshold: {best['threshold']:.2f}  "
+          f"(F1={best['f1']:.3f}, Strict F1={best['strict_f1']:.3f})")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sweep similarity threshold for MAP silver eval")
     parser.add_argument("--silver",   default=str(SILVER_PATH))
     parser.add_argument("--pipeline", default=str(PIPELINE_PATH))
     parser.add_argument("--reports",  default=str(REPORTS_DIR))
-    parser.add_argument("--embed-cache", default=str(EMBED_CACHE))
+    parser.add_argument("--embed-cache",        default=str(DEFAULT_CACHE_PATH),
+                        help="Cache path for OpenAI embeddings")
+    parser.add_argument("--embed-cache-gemini", default=str(DEFAULT_GEMINI_CACHE_PATH),
+                        help="Cache path for Gemini embeddings")
+    parser.add_argument("--embedder", default="openai", choices=["openai", "gemini", "both"],
+                        help="Embedding provider to use (default: openai)")
     parser.add_argument("--split",    default="dev", choices=["dev", "test", "all"],
-                        help="Split to evaluate on. Default: dev. Use 'test' only for final reporting.")
+                        help="Split to evaluate on. Default: dev.")
     parser.add_argument("--dev-fraction", type=float, default=0.8)
     parser.add_argument("--seed",     type=int, default=42)
     parser.add_argument("--min-threshold", type=float, default=0.40)
@@ -122,16 +186,23 @@ def main() -> None:
     silver_path   = Path(args.silver)
     pipeline_path = Path(args.pipeline)
     reports_dir   = Path(args.reports)
-    embed_cache_path = Path(args.embed_cache)
 
     for p in (silver_path, pipeline_path):
         if not p.exists():
             print(f"File not found: {p}", file=sys.stderr)
             sys.exit(1)
 
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        print("OPENAI_API_KEY not set — required for embedding computation", file=sys.stderr)
+    use_openai = args.embedder in ("openai", "both")
+    use_gemini = args.embedder in ("gemini", "both")
+
+    openai_key = os.environ.get("OPENAI_API_KEY") if use_openai else None
+    gemini_key = os.environ.get("GOOGLE_API_KEY") if use_gemini else None
+
+    if use_openai and not openai_key:
+        print("OPENAI_API_KEY not set — required for OpenAI embeddings", file=sys.stderr)
+        sys.exit(1)
+    if use_gemini and not gemini_key:
+        print("GOOGLE_API_KEY not set — required for Gemini embeddings", file=sys.stderr)
         sys.exit(1)
 
     if args.split == "test":
@@ -152,7 +223,6 @@ def main() -> None:
 
     common = sorted(set(silver_by_case) & set(pipeline_by_case))
 
-    # Apply split filter
     class _Stub:
         def __init__(self, case_id): self.case_id = case_id
     filtered = filter_by_split(
@@ -171,83 +241,66 @@ def main() -> None:
     logger.info("Split=%s  Cases=%d  (seed=%d, dev_fraction=%.2f)",
                 args.split, len(common), args.seed, args.dev_fraction)
 
-    # Pre-compute all embeddings once
-    cache = EmbeddingCache(embed_cache_path, EMBEDDING_MODEL)
-    logger.info("Computing similarity matrices (embeddings cached at %s)…", embed_cache_path)
-
-    cases_with_matrices: list[tuple] = []
-    for case_id in common:
-        silver = silver_by_case[case_id]
-        pipeline = pipeline_by_case[case_id]
-        sim, _, _ = compute_sim_matrix(silver, pipeline, api_key, cache)
-        cases_with_matrices.append((silver, pipeline, sim))
-
-    logger.info("All embeddings ready. Starting threshold sweep…")
-
-    # Sweep
     thresholds = _thresholds(args.min_threshold, args.max_threshold, args.step)
-    rows = []
-    for t in thresholds:
-        row = _metrics_at_threshold(cases_with_matrices, t)
-        row["split"] = args.split
-        row["seed"] = args.seed
-        row["dev_fraction"] = args.dev_fraction
-        rows.append(row)
-
-    best = max(rows, key=lambda r: r["f1"])
-
-    # Write CSV
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     reports_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = reports_dir / f"sweep_{timestamp}.csv"
 
+    all_rows: list[dict] = []
+    sweep_results: list[tuple[str, list[dict], dict]] = []  # (label, rows, best)
+
+    if use_openai:
+        from eval.silver.embedders import OPENAI_MODEL
+        cache = EmbeddingCache(Path(args.embed_cache), OPENAI_MODEL)
+        embedder = OpenAIEmbedder(openai_key)  # type: ignore[arg-type]
+        rows, best = _run_sweep(
+            "openai", embedder, cache, common,
+            silver_by_case, pipeline_by_case, thresholds, args,
+        )
+        sweep_results.append(("openai", rows, best))
+        all_rows.extend(rows)
+
+    if use_gemini:
+        from eval.silver.embedders import GEMINI_MODEL
+        cache = EmbeddingCache(Path(args.embed_cache_gemini), GEMINI_MODEL)
+        embedder = GeminiEmbedder(gemini_key)  # type: ignore[arg-type]
+        rows, best = _run_sweep(
+            "gemini", embedder, cache, common,
+            silver_by_case, pipeline_by_case, thresholds, args,
+        )
+        sweep_results.append(("gemini", rows, best))
+        all_rows.extend(rows)
+
+    # Write CSV (all embedders combined)
+    csv_path = reports_dir / f"sweep_{timestamp}.csv"
     fieldnames = [
-        "threshold", "precision", "recall", "f1", "strict_f1",
+        "embedder", "threshold", "precision", "recall", "f1", "strict_f1",
         "n_matched", "n_silver", "n_pipeline", "n_field_mismatches",
         "split", "seed", "dev_fraction",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(all_rows)
 
     # Write provenance JSON
     import json
     prov_path = reports_dir / f"sweep_{timestamp}_provenance.json"
     prov_path.write_text(json.dumps({
         "timestamp": timestamp,
+        "embedder": args.embedder,
         "split": args.split,
         "seed": args.seed,
         "dev_fraction": args.dev_fraction,
         "evaluated_case_ids": evaluated_case_ids,
         "silver_path": str(silver_path),
         "pipeline_path": str(pipeline_path),
-        "embed_cache_path": str(embed_cache_path),
-        "embedding_model": EMBEDDING_MODEL,
         "threshold_range": [args.min_threshold, args.max_threshold, args.step],
     }, indent=2), encoding="utf-8")
 
-    # Print table
-    print(f"\n{'─' * 80}")
-    print("MAP Silver Eval — Threshold Sweep")
-    print(f"Split: {args.split}  |  Cases: {len(common)}  |  "
-          f"Seed: {args.seed}  |  Dev fraction: {args.dev_fraction}")
-    print(f"NOTE: These are dev-set results only — do not report as final performance.")
-    print(f"{'─' * 80}")
-    print(f"{'Threshold':>10}  {'Precision':>9}  {'Recall':>7}  {'F1':>7}  "
-          f"{'Strict F1':>9}  {'Matched':>7}  {'Mismatches':>10}")
-    print(f"{'─' * 80}")
-    for row in rows:
-        marker = " ← best F1" if row["threshold"] == best["threshold"] else ""
-        print(
-            f"{row['threshold']:>10.2f}  {row['precision']:>9.3f}  "
-            f"{row['recall']:>7.3f}  {row['f1']:>7.3f}  "
-            f"{row['strict_f1']:>9.3f}  {row['n_matched']:>7}  "
-            f"{row['n_field_mismatches']:>10}{marker}"
-        )
-    print(f"{'─' * 80}")
-    print(f"\nBest F1 threshold: {best['threshold']:.2f}  "
-          f"(F1={best['f1']:.3f}, Strict F1={best['strict_f1']:.3f})")
+    # Print tables
+    for label, rows, best in sweep_results:
+        _print_table(label, rows, best, len(common), args)
+
     print(f"\nSweep CSV    → {csv_path}")
     print(f"Provenance   → {prov_path}")
 

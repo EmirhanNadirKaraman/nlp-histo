@@ -91,3 +91,40 @@ def sample_source_cases(
 
     logger.info("Sampled %d / %d candidate paragraphs", len(cases), len(candidates))
     return cases
+
+
+def sample_papers_source_cases(
+    n_papers: int,
+    seed: int = 42,
+    pmcids: list[str] | None = None,
+) -> list[dict]:
+    """
+    Randomly select n_papers papers and return ALL useful text elements from them.
+
+    Unlike sample_source_cases (which samples individual TEs), this returns the
+    complete set of paragraphs for each selected paper — giving the pipeline
+    per-paper context for RELATE/RESOLVE calibration.
+    """
+    import sys
+    from pathlib import Path as _Path
+    sys.path.insert(0, str(_Path(__file__).parent.parent.parent))
+
+    from database import get_db_connection
+    from database.models import TextElement, Document
+
+    db = get_db_connection()
+    with db.session_scope() as session:
+        q = session.query(Document.pmcid).order_by(Document.pmcid)
+        if pmcids:
+            q = q.filter(Document.pmcid.in_(pmcids))
+        all_pmcids = [row.pmcid for row in q.all()]
+
+    if not all_pmcids:
+        logger.warning("No documents found in database.")
+        return []
+
+    rng = random.Random(seed)
+    chosen_pmcids = rng.sample(all_pmcids, min(n_papers, len(all_pmcids)))
+    logger.info("Selected %d papers (seed=%d): %s", len(chosen_pmcids), seed, ", ".join(chosen_pmcids))
+
+    return sample_source_cases(n=10_000_000, seed=seed, pmcids=chosen_pmcids)

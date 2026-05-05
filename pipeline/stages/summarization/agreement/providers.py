@@ -64,15 +64,27 @@ class GeminiEmbedder:
 
     def __call__(self, texts: list[str]) -> list[list[float]]:
         import os
+        import time
         import google.genai as genai  # lazy import — optional dependency
 
         client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
-        result = client.models.embed_content(
-            model=self._model,
-            contents=texts,
-            config={"task_type": self._task_type},
-        )
-        return [e.values for e in result.embeddings]
+        delay = 5.0
+        for attempt in range(6):
+            try:
+                result = client.models.embed_content(
+                    model=self._model,
+                    contents=texts,
+                    config={"task_type": self._task_type},
+                )
+                return [e.values for e in result.embeddings]
+            except Exception as exc:
+                if attempt == 5:
+                    raise
+                if "429" in str(exc) or "quota" in str(exc).lower() or "rate" in str(exc).lower():
+                    time.sleep(delay)
+                    delay = min(delay * 2, 120.0)
+                else:
+                    raise
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(model={self._model!r})"
