@@ -78,6 +78,16 @@ class Finding(BaseModel):
             return _CATEGORY_ALIASES[v]
         return v
 
+    @field_validator("relation_type", mode="before")
+    @classmethod
+    def _coerce_invalid_relation_type(cls, v: object) -> object:
+        if isinstance(v, str):
+            valid = {e.value for e in RelationTypeEnum}
+            if v not in valid:
+                _log.warning("Unknown relation_type %r — coercing to 'unclear'", v)
+                return RelationTypeEnum.unclear
+        return v
+
     @field_validator("direction", "scope", "subject_entity", "outcome_entity",
                      "grounding_score", mode="before")
     @classmethod

@@ -78,14 +78,17 @@ class BatchSummarizationRunner:
         config: SummarizationConfig | None = None,
         output_dir: Path = Path("out/summaries"),
         handle_dir: Path | None = None,
+        embed_fn=None,
     ) -> None:
+        from ..agreement.providers import OpenAIEmbedder
         cfg = config or SummarizationConfig()
         self._l1 = l1_voters
         self._l2 = l2_voters
         self._l3 = l3_model
         self._chunk_size = cfg.map.chunk_size
+        self._embed_fn = embed_fn or OpenAIEmbedder()
         self._agreement = AgreementChecker(
-            scorer=EmbeddingScorer(),
+            scorer=EmbeddingScorer(self._embed_fn),
             theta=cfg.map.theta,
             reject_theta=cfg.map.reject_theta,
         )
@@ -287,18 +290,20 @@ class BatchSummarizationRunner:
             chunk_id = parts[1] if len(parts) > 1 else "unknown"
             by_chunk.setdefault(chunk_id, []).append(res)
 
-        # Store raw content for debugging
+        # Store raw content for debugging and accumulate token usage
         raw_store = getattr(handle, f"{level}_raw")
+        level_usage = handle.token_usage.setdefault(level, {"input": 0, "output": 0})
         for res in raw_results:
             if res.content:
                 raw_store[res.custom_id] = res.content
+            level_usage["input"]  += res.input_tokens
+            level_usage["output"] += res.output_tokens
 
-        escalated: list[str] = []
-
+        # ── Pass 1: parse all voter outputs for every chunk ───────────────────
+        chunk_voters: dict[str, list[AuditableSummary]] = {}
         for chunk_id in targets:
             results = by_chunk.get(chunk_id, [])
             results_sorted = sorted(results, key=lambda r: r.custom_id)
-
             voters: list[AuditableSummary] = []
             for res in results_sorted:
                 vi_part = res.custom_id.split("__")[-1]
@@ -307,6 +312,53 @@ class BatchSummarizationRunner:
                 parsed = parse_result(res, strip_thinking=strip)
                 if parsed is not None:
                     voters.append(parsed)
+            chunk_voters[chunk_id] = voters
+
+        # ── Pass 2: batch-embed all unique claims upfront ─────────────────────
+        from ..agreement.embedding import _claims as _extract_claims
+        all_texts: list[str] = list({
+            c
+            for voters in chunk_voters.values()
+            for v in voters
+            for c in _extract_claims(v)
+        })
+        embed_cache: dict[str, list[float]] = {}
+        if all_texts:
+            raw_embed = self._embed_fn
+            logger.info(
+                "[%s] Pre-embedding %d unique claim strings across %d chunks",
+                pmcid, len(all_texts), len(targets),
+            )
+            embs = raw_embed(all_texts)
+            embed_cache = dict(zip(all_texts, embs))
+
+        def _cached_embed(texts: list[str]) -> list[list[float]]:
+            result = []
+            misses: list[tuple[int, str]] = []
+            for idx, t in enumerate(texts):
+                if t in embed_cache:
+                    result.append(embed_cache[t])
+                else:
+                    misses.append((idx, t))
+                    result.append(None)  # type: ignore[arg-type]
+            if misses:
+                new_embs = raw_embed([t for _, t in misses])
+                for (idx, t), e in zip(misses, new_embs):
+                    embed_cache[t] = e
+                    result[idx] = e
+            return result  # type: ignore[return-value]
+
+        agreement = AgreementChecker(
+            scorer=EmbeddingScorer(_cached_embed),
+            theta=self._agreement.theta,
+            reject_theta=self._agreement.reject_theta,
+        )
+
+        # ── Pass 3: agreement scoring from cache — no API calls ───────────────
+        escalated: list[str] = []
+
+        for chunk_id in targets:
+            voters = chunk_voters[chunk_id]
 
             if not voters:
                 logger.warning("[%s] Chunk %s: all %s voters failed — escalating", pmcid, chunk_id, level)
@@ -314,10 +366,10 @@ class BatchSummarizationRunner:
                 continue
 
             source_text = _format_sentences(handle.chunk_map[chunk_id])
-            bundle = self._agreement.compute(voters, source_text=source_text)
+            bundle = agreement.compute(voters, source_text=source_text)
 
             if bundle.decision == ChunkDecision.KEEP:
-                best = self._agreement.best(voters, bundle=bundle)
+                best = agreement.best(voters, bundle=bundle)
                 handle.finalized[chunk_id] = best.model_dump()
             else:
                 escalated.append(chunk_id)
@@ -350,9 +402,12 @@ class BatchSummarizationRunner:
             chunk_id = parts[1] if len(parts) > 1 else "unknown"
             by_chunk.setdefault(chunk_id, []).append(res)
 
+        l3_usage = handle.token_usage.setdefault("l3", {"input": 0, "output": 0})
         for res in raw_results:
             if res.content:
                 handle.l3_raw[res.custom_id] = res.content
+            l3_usage["input"]  += res.input_tokens
+            l3_usage["output"] += res.output_tokens
 
         for chunk_id in targets:
             results = by_chunk.get(chunk_id, [])

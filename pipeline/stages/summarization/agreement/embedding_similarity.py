@@ -25,8 +25,7 @@ class EmbeddingSimilarityStrategy:
     embed_fn:
         Callable that maps a list of strings to embedding vectors.
         Defaults to OpenAIEmbedder (text-embedding-3-small).
-    max_claims_per_batch:
-        Chunk size for the single-batch embedding call.
+        The embedder is responsible for its own batching internally.
     tau:
         Weak-match threshold.  Default 0.15.
     count_alpha:
@@ -43,7 +42,6 @@ class EmbeddingSimilarityStrategy:
     def __init__(
         self,
         embed_fn: EmbedFn | None = None,
-        max_claims_per_batch: int = 2048,
         tau: float = 0.15,
         count_alpha: float = 0.25,
         reuse_weight: float = 0.15,
@@ -51,7 +49,6 @@ class EmbeddingSimilarityStrategy:
         grounding_floor: float = 0.50,
     ) -> None:
         self._embed: EmbedFn = embed_fn or OpenAIEmbedder()
-        self._max_batch = max_claims_per_batch
         self._tau = tau
         self._count_alpha = count_alpha
         self._reuse_weight = reuse_weight
@@ -98,22 +95,11 @@ class EmbeddingSimilarityStrategy:
         if not all_claims:
             return np.eye(n)
 
-        # One embedding API call for all claims across all voters.
-        if len(all_claims) <= self._max_batch:
-            raw_embs = np.array(self._embed(all_claims), dtype=float)
-        else:
-            chunks = [
-                all_claims[i : i + self._max_batch]
-                for i in range(0, len(all_claims), self._max_batch)
-            ]
-            raw_embs = np.concatenate(
-                [np.array(self._embed(c), dtype=float) for c in chunks]
-            )
+        raw_embs = np.array(self._embed(all_claims), dtype=float)
         norms = np.linalg.norm(raw_embs, axis=1, keepdims=True)
         norms = np.where(norms == 0.0, 1.0, norms)
         all_embs = raw_embs / norms
 
-        # Split normalised embeddings back by voter.
         voter_embs: list[np.ndarray] = []
         start = 0
         for claims in claim_lists:
@@ -121,10 +107,7 @@ class EmbeddingSimilarityStrategy:
             voter_embs.append(all_embs[start : start + count])
             start += count
 
-        # Build symmetric matrix using the shared alignment core.
-        matrix, _ = self._build_matrix_and_breakdowns(
-            n, voter_embs, claim_lists, context
-        )
+        matrix, _ = self._build_matrix_and_breakdowns(n, voter_embs, claim_lists, context)
         return matrix
 
     def compute_matrix_with_breakdown(
@@ -165,16 +148,7 @@ class EmbeddingSimilarityStrategy:
             ]
             return np.eye(n), empty_bd
 
-        if len(all_claims) <= self._max_batch:
-            raw_embs = np.array(self._embed(all_claims), dtype=float)
-        else:
-            chunks = [
-                all_claims[i : i + self._max_batch]
-                for i in range(0, len(all_claims), self._max_batch)
-            ]
-            raw_embs = np.concatenate(
-                [np.array(self._embed(c), dtype=float) for c in chunks]
-            )
+        raw_embs = np.array(self._embed(all_claims), dtype=float)
         norms = np.linalg.norm(raw_embs, axis=1, keepdims=True)
         norms = np.where(norms == 0.0, 1.0, norms)
         all_embs = raw_embs / norms

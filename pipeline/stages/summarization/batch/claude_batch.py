@@ -107,7 +107,13 @@ class AnthropicBatchProvider:
                     content = next(
                         (b.text for b in msg.content if hasattr(b, "text")), ""
                     )
-                results.append(BatchResult(custom_id=custom_id, content=content))
+                usage = getattr(msg, "usage", None)
+                results.append(BatchResult(
+                    custom_id=custom_id,
+                    content=content,
+                    input_tokens=getattr(usage, "input_tokens", 0) or 0,
+                    output_tokens=getattr(usage, "output_tokens", 0) or 0,
+                ))
             else:
                 err = getattr(item.result, "error", "unknown error")
                 results.append(BatchResult(

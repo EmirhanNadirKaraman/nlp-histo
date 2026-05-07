@@ -112,7 +112,13 @@ class GeminiBatchProvider:
             elif inline_response.response:
                 try:
                     content = inline_response.response.text
-                    results.append(BatchResult(custom_id=custom_id, content=content))
+                    um = getattr(inline_response.response, "usage_metadata", None)
+                    results.append(BatchResult(
+                        custom_id=custom_id,
+                        content=content,
+                        input_tokens=getattr(um, "prompt_token_count", 0) or 0,
+                        output_tokens=getattr(um, "candidates_token_count", 0) or 0,
+                    ))
                 except Exception as exc:
                     results.append(BatchResult(
                         custom_id=custom_id, content=None, error=str(exc)

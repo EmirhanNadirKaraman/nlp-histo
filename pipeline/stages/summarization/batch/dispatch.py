@@ -118,6 +118,9 @@ def build_providers(providers_needed: set[str]) -> dict:
     if "vertex_gemini" in providers_needed:
         from .vertex_batch import VertexGeminiBatchProvider
         providers["vertex_gemini"] = VertexGeminiBatchProvider()
+    if "openai" in providers_needed:
+        from .openai_batch import OpenAIBatchProvider
+        providers["openai"] = OpenAIBatchProvider()
     return providers
 
 

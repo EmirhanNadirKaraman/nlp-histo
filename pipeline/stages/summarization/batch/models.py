@@ -46,6 +46,8 @@ class BatchResult:
     custom_id: str
     content: str | None     # JSON string of the tool-call arguments
     error: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 @dataclass
@@ -110,6 +112,13 @@ class BatchHandle:
     # Final per-chunk AuditableSummary (serialised) — populated incrementally
     finalized: dict[str, dict] = field(default_factory=dict)
 
+    # Actual token usage accumulated from API responses, keyed by level
+    token_usage: dict[str, dict[str, int]] = field(default_factory=lambda: {
+        "l1": {"input": 0, "output": 0},
+        "l2": {"input": 0, "output": 0},
+        "l3": {"input": 0, "output": 0},
+    })
+
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {
@@ -127,6 +136,7 @@ class BatchHandle:
             "l2_chunk_ids": self.l2_chunk_ids,
             "l3_chunk_ids": self.l3_chunk_ids,
             "finalized": self.finalized,
+            "token_usage": self.token_usage,
         }
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -148,4 +158,9 @@ class BatchHandle:
             l2_chunk_ids=data.get("l2_chunk_ids", []),
             l3_chunk_ids=data.get("l3_chunk_ids", []),
             finalized=data.get("finalized", {}),
+            token_usage=data.get("token_usage", {
+                "l1": {"input": 0, "output": 0},
+                "l2": {"input": 0, "output": 0},
+                "l3": {"input": 0, "output": 0},
+            }),
         )

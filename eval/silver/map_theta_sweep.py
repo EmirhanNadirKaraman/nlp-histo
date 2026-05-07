@@ -81,16 +81,14 @@ SILVER_PATH  = Path("eval/data/silver_findings.jsonl")
 
 def _make_voters():
     from pipeline.stages.summarization.batch.models import VoterBatchConfig
-    # Azure AI Foundry serverless endpoints don't support the batch file API,
-    # so the sweep uses only Gemini (direct API) and Claude (Anthropic batch API).
     L1 = [
-        VoterBatchConfig(model="gemini-2.5-flash-lite", provider="gemini", temperature=0.1),
-        VoterBatchConfig(model="gemini-2.5-flash-lite", provider="gemini", temperature=0.3),
+        VoterBatchConfig(model="gemini-2.5-flash-lite",     provider="gemini", temperature=0.1),
+        VoterBatchConfig(model="gpt-4o-mini",               provider="openai", temperature=0.1),
         VoterBatchConfig(model="claude-haiku-4-5-20251001", provider="claude", temperature=0.1),
     ]
     L2 = [
         VoterBatchConfig(model="gemini-2.5-flash",          provider="gemini", temperature=0.1),
-        VoterBatchConfig(model="gemini-2.5-flash",          provider="gemini", temperature=0.3),
+        VoterBatchConfig(model="gpt-4.1-mini",              provider="openai", temperature=0.1),
         VoterBatchConfig(model="claude-haiku-4-5-20251001", provider="claude", temperature=0.3),
     ]
     L3 = VoterBatchConfig(model="claude-sonnet-4-6-20251001", provider="claude")
