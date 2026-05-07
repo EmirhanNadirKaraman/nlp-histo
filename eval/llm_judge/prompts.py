@@ -82,7 +82,7 @@ Q1_SCHEMA: dict[str, Any] = {
         },
         "correct_relation_type": {"type": "string", "enum": RELATION_TYPES},
         "correct_direction": {
-            "type": ["string", "null"],
+            "anyOf": [{"type": "string", "enum": DIRECTIONS}, {"type": "null"}],
             "description": "Correct direction, or null if not applicable",
         },
         "correct_category": {"type": "string", "enum": CATEGORIES},
@@ -281,7 +281,7 @@ Q5_SCHEMA: dict[str, Any] = {
                     "subject_entity": {"type": ["string", "null"]},
                     "outcome_entity": {"type": ["string", "null"]},
                     "relation_type": {"type": "string", "enum": RELATION_TYPES},
-                    "direction": {"type": ["string", "null"]},
+                    "direction": {"anyOf": [{"type": "string", "enum": DIRECTIONS}, {"type": "null"}]},
                     "category": {"type": "string", "enum": CATEGORIES},
                 },
                 "required": ["claim"],

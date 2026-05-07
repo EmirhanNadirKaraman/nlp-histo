@@ -18,7 +18,9 @@ from .models import BatchRequest, BatchResult, ProviderJob
 
 logger = logging.getLogger(__name__)
 
-# Vertex version string → Anthropic direct-API model ID
+# Maps Vertex AI version strings to Anthropic direct-API IDs.
+# Only needed if using provider="vertex_claude"; currently unused because
+# all Claude voters use the direct Anthropic API (ANTHROPIC_API_KEY).
 _VERTEX_TO_DIRECT: dict[str, str] = {
     "claude-haiku-4-5@20251001": "claude-haiku-4-5-20251001",
     "claude-sonnet-4-6@default": "claude-sonnet-4-6-20251001",

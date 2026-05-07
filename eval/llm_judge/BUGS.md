@@ -236,17 +236,15 @@ if field_name in ("subject_entity", "outcome_entity"):
 
 ---
 
-## DESIGN ISSUE 1 — `DIRECTIONS` enum is defined in `prompts.py` but never used
+## DESIGN ISSUE 1 — ~~`DIRECTIONS` enum is defined in `prompts.py` but never used~~ ✅ FIXED
 
 **File:** `prompts.py:35`
 
+`DIRECTIONS` was unwired in Q1 `correct_direction` and Q5 `silver_findings.direction`. Both now use `anyOf` with the enum:
 ```python
-DIRECTIONS = ["positive", "negative", "absent", "partial", "unclear"]
+"anyOf": [{"type": "string", "enum": DIRECTIONS}, {"type": "null"}]
 ```
-
-This constant is defined but never referenced in any schema. The Q1 schema's `correct_direction` field is free-text (no enum constraint), meaning Opus can return arbitrary direction strings. Either:
-- Add `"enum": DIRECTIONS` to Q1's `correct_direction` schema
-- Or remove the dead constant
+All four enum constants (`RELATION_TYPES`, `CATEGORIES`, `RELATION_LABELS`, `DIRECTIONS`) are now wired into schemas.
 
 ---
 
@@ -281,5 +279,5 @@ This works during normal runs because `req` (the `JudgeRequest`) is built fresh 
 | 8  | MEDIUM | runner.py | `import anthropic` crashes dry-run when not installed |
 | 9  | LOW | runner.py | Stale JSONL files not cleaned up |
 | 10 | MEDIUM | q1_precision.py | Case-sensitive entity comparison inflates error rate |
-| D1 | LOW | prompts.py | Dead `DIRECTIONS` constant |
+| D1 | ~~LOW~~ | ~~prompts.py~~ | ~~Dead `DIRECTIONS` constant~~ ✅ FIXED |
 | D2 | LOW | cache.py | `cache.get()` can't return request context |

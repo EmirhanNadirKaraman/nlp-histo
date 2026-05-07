@@ -45,28 +45,30 @@ logger = logging.getLogger("run_paper")
 
 def build_runner(trace: bool):
     from pipeline.stages.summarization import SummarizationRunner
-    from pipeline.stages.summarization.agreement import OpenAIEmbedder
+    from pipeline.stages.summarization.agreement.providers import OpenAIEmbedder
+    from pipeline.stages.summarization.batch.voter_configs import (
+        CLAUDE_L1, CLAUDE_L2, CLAUDE_L3, GEMINI_L1, GEMINI_L2, OPENAI_L1, OPENAI_L2,
+    )
     from pipeline.stages.summarization.config import SummarizationConfig
     from pipeline.stages.summarization.llm_providers import (
         anthropic_direct_chat,
         gemini_direct_chat,
+        openai_direct_chat,
     )
 
-    voter_llms = [                                          # Level 1 — cheapest
-        gemini_direct_chat("gemini-2.5-flash-lite",        temperature=0.1),
-        gemini_direct_chat("gemini-2.5-flash-lite",        temperature=0.3),
-        anthropic_direct_chat("claude-haiku-4-5-20251001", temperature=0.1),
+    voter_llms = [                                        # Level 1 — cheapest
+        gemini_direct_chat(GEMINI_L1,  temperature=0.1),
+        openai_direct_chat(OPENAI_L1,  temperature=0.1),
+        anthropic_direct_chat(CLAUDE_L1, temperature=0.1),
     ]
 
-    level2_voter_llms = [                                  # Level 2 — mid-tier
-        gemini_direct_chat("gemini-2.5-flash",             temperature=0.1),
-        gemini_direct_chat("gemini-2.5-flash",             temperature=0.3),
-        anthropic_direct_chat("claude-haiku-4-5-20251001", temperature=0.3),
+    level2_voter_llms = [                                # Level 2 — mid-tier
+        gemini_direct_chat(GEMINI_L2,  temperature=0.1),
+        openai_direct_chat(OPENAI_L2,  temperature=0.1),
+        anthropic_direct_chat(CLAUDE_L2, temperature=0.3),
     ]
 
-    escalation_llm = anthropic_direct_chat(                # Level 3 — strongest
-        "claude-sonnet-4-6", temperature=0.0,
-    )
+    escalation_llm = anthropic_direct_chat(CLAUDE_L3, temperature=0.0)  # Level 3
 
     return SummarizationRunner(
         voter_llms=voter_llms,
@@ -82,34 +84,25 @@ def build_runner(trace: bool):
 # ── Batch runner ───────────────────────────────────────────────────────────────
 
 def build_batch_runner():
-    from pipeline.stages.summarization.agreement.providers import OpenAIEmbedder
-    from pipeline.stages.summarization.batch import BatchSummarizationRunner, VoterBatchConfig
+    from pipeline.stages.summarization.agreement.providers import GeminiEmbedder
+    from pipeline.stages.summarization.batch import BatchSummarizationRunner
+    from pipeline.stages.summarization.batch.voter_configs import (
+        CLAUDE_L3, make_l1_voters, make_l2_voters, make_l3_voter,
+    )
     from pipeline.stages.summarization.config import SummarizationConfig
     from pipeline.stages.summarization.llm_providers import anthropic_direct_chat
 
-    l1_voters = [
-        VoterBatchConfig("gemini-2.5-flash-lite",      provider="gemini", temperature=0.1),
-        VoterBatchConfig("gpt-4o-mini",                provider="openai", temperature=0.1),
-        VoterBatchConfig("claude-haiku-4-5-20251001",  provider="claude", temperature=0.1),
-    ]
-    l2_voters = [
-        VoterBatchConfig("gemini-2.5-flash",           provider="gemini", temperature=0.1),
-        VoterBatchConfig("gpt-4.1-mini",               provider="openai", temperature=0.1),
-        VoterBatchConfig("claude-haiku-4-5-20251001",  provider="claude", temperature=0.3),
-    ]
-    l3_model = VoterBatchConfig("claude-sonnet-4-6", provider="claude")
-
     # REDUCE + RULES still run synchronously (one call per paper at the end)
-    escalation_llm = anthropic_direct_chat("claude-sonnet-4-6", temperature=0.0)
+    escalation_llm = anthropic_direct_chat(CLAUDE_L3, temperature=0.0)
 
     return BatchSummarizationRunner(
-        l1_voters=l1_voters,
-        l2_voters=l2_voters,
-        l3_model=l3_model,
+        l1_voters=make_l1_voters(),
+        l2_voters=make_l2_voters(),
+        l3_model=make_l3_voter(),
         escalation_llm=escalation_llm,
         config=SummarizationConfig(),
         output_dir=Path("out/summaries"),
-        embed_fn=OpenAIEmbedder(),
+        embed_fn=GeminiEmbedder(),
     )
 
 
@@ -178,17 +171,19 @@ def main():
         pmcids = [pmcid]
 
     if args.dry_run:
+        from pipeline.stages.summarization.batch.voter_configs import (
+            make_l1_voters, make_l2_voters, make_l3_voter,
+        )
         mode = "batch" if args.batch else "sync"
-        runner = build_batch_runner()
+        l1, l2, l3 = make_l1_voters(), make_l2_voters(), make_l3_voter()
         print(f"PMCIDs: {pmcids}")
         print(f"Mode:   {mode}")
         print(f"Trace:  {args.trace} (sync only)")
         print("Models:")
-        for v in runner._l1:
+        for v in l1:
             print(f"  L1  {v.model:<40} (t={v.temperature})  [{v.provider}]")
-        for v in runner._l2:
+        for v in l2:
             print(f"  L2  {v.model:<40} (t={v.temperature})  [{v.provider}]")
-        l3 = runner._l3
         print(f"  L3  {l3.model:<40} (t={l3.temperature})  [{l3.provider}]")
         print("\nEnv vars required: GOOGLE_API_KEY, ANTHROPIC_API_KEY")
         return
@@ -207,8 +202,6 @@ def main():
 
 def _run_sync(pmcid: str, trace: bool,
               start_chunk: int = 0, limit_chunks: int | None = None) -> None:
-    from pipeline.stages.summarization import SummarizationRunner
-
     logger.info("Building sync runner…")
     runner = build_runner(trace=trace)
 
@@ -240,10 +233,11 @@ def _run_sync(pmcid: str, trace: bool,
 
 
 # Pricing per 1M tokens (USD) — batch input and output rates per level.
-# L1: 1× gemini-2.5-flash-lite + 1× gpt-4o-mini + 1× claude-haiku-4-5
-# L2: 1× gemini-2.5-flash      + 1× gpt-4.1-mini + 1× claude-haiku-4-5
-# L3: 1× claude-sonnet-4-6
-# Weighted averages across voters in each level (batch pricing ≈ 50 % off standard).
+# See voter_configs.py for model assignments.
+# L1: GEMINI_L1 + OPENAI_L1 + CLAUDE_L1   (batch pricing ≈ 50 % off standard)
+# L2: GEMINI_L2 + OPENAI_L2 + CLAUDE_L2
+# L3: CLAUDE_L3
+# Weighted averages across the 3 voters per level.
 _INPUT_PRICE_PER_M = {
     "l1": (0.10  + 0.075 + 0.80) / 3,   # ≈ 0.325
     "l2": (0.15  + 0.20  + 0.80) / 3,   # ≈ 0.383
@@ -275,11 +269,16 @@ def _escalation_stats(pmcid: str, handle) -> dict:
     usage = handle.token_usage
     actual_cost = sum(_level_cost(usage, lvl) for lvl in ("l1", "l2", "l3"))
 
-    # Baseline: all chunks processed by L3 only (no cascade).
-    # Assume same total input tokens as L1 (prompt is the same), L3 output price.
+    # Baseline: all chunks processed by L3 only (no cascade), 1 voter per chunk.
+    # L1 token totals are across all 3 voters, so divide by voter count to get
+    # the per-chunk token estimate before scaling to L3 price.
+    from pipeline.stages.summarization.batch.voter_configs import make_l1_voters
+    n_l1_voters = len(make_l1_voters())
     l1_inp = usage.get("l1", {}).get("input", 0)
     l1_out = usage.get("l1", {}).get("output", 0)
-    baseline_cost = (l1_inp * _INPUT_PRICE_PER_M["l3"] + l1_out * _OUTPUT_PRICE_PER_M["l3"]) / 1_000_000
+    baseline_inp = l1_inp / n_l1_voters
+    baseline_out = l1_out / n_l1_voters
+    baseline_cost = (baseline_inp * _INPUT_PRICE_PER_M["l3"] + baseline_out * _OUTPUT_PRICE_PER_M["l3"]) / 1_000_000
     saved = baseline_cost - actual_cost
 
     return {
@@ -368,9 +367,11 @@ def _run_all_batch(pmcids: list[str], poll_interval: int = 20) -> None:
         handle = runner.load_or_submit(file_data)
         return pmcid, handle
 
+    _MAX_WORKERS = 16
+
     handles: dict[str, object] = {}
     logger.info("Loading or submitting %d papers in parallel…", len(pmcids))
-    with ThreadPoolExecutor(max_workers=len(pmcids)) as ex:
+    with ThreadPoolExecutor(max_workers=min(len(pmcids), _MAX_WORKERS)) as ex:
         futures = {ex.submit(_submit, p): p for p in pmcids}
         for fut in as_completed(futures):
             pmcid, handle = fut.result()
@@ -383,14 +384,20 @@ def _run_all_batch(pmcids: list[str], poll_interval: int = 20) -> None:
         return
 
     # ── Phase 2: poll all handles until every one is COMPLETE ─────────────────
+    def _advance_one(pmcid: str) -> tuple[str, object]:
+        return pmcid, runner.advance(handles[pmcid])
+
     while True:
         pending = [p for p, h in handles.items() if h.phase != BatchPhase.COMPLETE]
         if not pending:
             break
         logger.info("Advancing %d / %d pending papers…", len(pending), len(handles))
-        for pmcid in pending:
-            handles[pmcid] = runner.advance(handles[pmcid])
-            logger.info("[%s] phase=%s", pmcid, handles[pmcid].phase.value)
+        with ThreadPoolExecutor(max_workers=min(len(pending), _MAX_WORKERS)) as ex:
+            futures = {ex.submit(_advance_one, p): p for p in pending}
+            for fut in as_completed(futures):
+                pmcid, handle = fut.result()
+                handles[pmcid] = handle
+                logger.info("[%s] phase=%s", pmcid, handle.phase.value)
         pending = [p for p, h in handles.items() if h.phase != BatchPhase.COMPLETE]
         if not pending:
             break
@@ -400,10 +407,21 @@ def _run_all_batch(pmcids: list[str], poll_interval: int = 20) -> None:
 
     # ── Phase 3: finalize all ─────────────────────────────────────────────────
     logger.info("All papers complete — finalising…")
+
+    def _finalize_one(pmcid: str) -> tuple[str, dict]:
+        return pmcid, runner.finalize(handles[pmcid])
+
     escalation_stats: list[dict] = []
-    for pmcid, handle in handles.items():
-        escalation_stats.append(_escalation_stats(pmcid, handle))
-        result = runner.finalize(handle)
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=min(len(handles), _MAX_WORKERS)) as ex:
+        futures = {ex.submit(_finalize_one, p): p for p in handles}
+        for fut in as_completed(futures):
+            pmcid, result = fut.result()
+            escalation_stats.append(_escalation_stats(pmcid, handles[pmcid]))
+            results[pmcid] = result
+
+    for pmcid in handles:
+        result = results.get(pmcid, {})
         rules = result.get("rules", [])
         print(f"\n{'─' * 60}")
         print(f"Summary for {pmcid}")

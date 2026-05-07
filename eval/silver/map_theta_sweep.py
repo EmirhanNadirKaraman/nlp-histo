@@ -80,19 +80,10 @@ SILVER_PATH  = Path("eval/data/silver_findings.jsonl")
 # ── Voter configs (production setup) ─────────────────────────────────────────
 
 def _make_voters():
-    from pipeline.stages.summarization.batch.models import VoterBatchConfig
-    L1 = [
-        VoterBatchConfig(model="gemini-2.5-flash-lite",     provider="gemini", temperature=0.1),
-        VoterBatchConfig(model="gpt-4o-mini",               provider="openai", temperature=0.1),
-        VoterBatchConfig(model="claude-haiku-4-5-20251001", provider="claude", temperature=0.1),
-    ]
-    L2 = [
-        VoterBatchConfig(model="gemini-2.5-flash",          provider="gemini", temperature=0.1),
-        VoterBatchConfig(model="gpt-4.1-mini",              provider="openai", temperature=0.1),
-        VoterBatchConfig(model="claude-haiku-4-5-20251001", provider="claude", temperature=0.3),
-    ]
-    L3 = VoterBatchConfig(model="claude-sonnet-4-6-20251001", provider="claude")
-    return L1, L2, L3
+    from pipeline.stages.summarization.batch.voter_configs import (
+        make_l1_voters, make_l2_voters, make_l3_voter,
+    )
+    return make_l1_voters(), make_l2_voters(), make_l3_voter()
 
 THETA_GRID = [0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90]
 
@@ -662,14 +653,14 @@ def main() -> None:
     parser.add_argument("--source",        default=str(SOURCE_PATH))
     parser.add_argument("--silver",        default=str(SILVER_PATH))
     parser.add_argument("--reports",       default=str(REPORTS_DIR))
-    parser.add_argument("--embedder",      default="gemini", choices=["openai", "gemini"])
+    parser.add_argument("--embedder",      default="openai", choices=["openai", "gemini"])
     parser.add_argument("--embed-cache",   default=None)
     parser.add_argument("--sim-threshold", type=float, default=SIMILARITY_THRESHOLD)
     parser.add_argument("--split",         default="dev", choices=["dev", "test", "all"])
     parser.add_argument("--dev-fraction",  type=float, default=0.8)
     parser.add_argument("--seed",          type=int, default=42)
-    parser.add_argument("--poll-interval", type=int, default=120,
-                        help="Seconds between status polls in 'all' mode")
+    parser.add_argument("--poll-interval", type=int, default=30,
+                        help="Seconds between status polls in collect/all mode")
     parser.add_argument("--n-cases", type=int, default=None,
                         help="Limit to first N cases (for smoke testing)")
     parser.add_argument("--primer-dir", default=None,
@@ -681,9 +672,9 @@ def main() -> None:
     reports_dir = Path(args.reports)
     timestamp   = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
 
-    primer_dir  = Path(args.primer_dir) if args.primer_dir else PRIMER_DIR
-    primer_path = primer_dir / "primer.json"
-    cache_path  = primer_dir / "voter_cache.json"
+    primer_dir       = Path(args.primer_dir) if args.primer_dir else PRIMER_DIR
+    primer_path      = primer_dir / "primer.json"
+    voter_cache_path = primer_dir / "voter_cache.json"
 
     # ── Load source cases ──
     if not source_path.exists():
@@ -711,7 +702,7 @@ def main() -> None:
         if not primer_path.exists():
             print(f"No primer found at {primer_path}.", file=sys.stderr)
             sys.exit(1)
-        rebuild_cache_from_primer(primer_path, cache_path)
+        rebuild_cache_from_primer(primer_path, voter_cache_path)
         print("Voter cache rebuilt from saved primer. Ready to sweep.")
         return
 
@@ -721,17 +712,23 @@ def main() -> None:
             print("No primer found. Run `prime` first.", file=sys.stderr)
             sys.exit(1)
         handle = PrimerHandle.load(primer_path)
-        handle, done = run_collect(handle, primer_path, cache_path)
-        if done:
-            print("Voter cache written. Ready to sweep.")
-        else:
-            print("Jobs still running. Run `collect` again later.")
+        while True:
+            handle, done = run_collect(handle, primer_path, voter_cache_path)
+            if done:
+                print("Voter cache written. Ready to sweep.")
+                break
+            from pipeline.stages.summarization.batch.models import ProviderJob
+            for jd in handle.jobs:
+                j = ProviderJob.from_dict(jd)
+                logger.info("  job %s  provider=%s  status=%s", j.job_id, j.provider, j.status)
+            logger.info("Jobs still running — sleeping %ds…", args.poll_interval)
+            time.sleep(args.poll_interval)
 
     if args.mode == "all":
         while handle.phase != "complete":
             logger.info("Polling jobs… (sleeping %ds)", args.poll_interval)
             time.sleep(args.poll_interval)
-            handle, done = run_collect(handle, primer_path, cache_path)
+            handle, done = run_collect(handle, primer_path, voter_cache_path)
             if done:
                 logger.info("All jobs complete. Voter cache ready.")
                 break
@@ -743,14 +740,14 @@ def main() -> None:
 
     # ── SWEEP ──
     if args.mode in ("sweep", "all"):
-        if not cache_path.exists():
-            print(f"Voter cache not found: {cache_path}. Run prime + collect first.", file=sys.stderr)
+        if not voter_cache_path.exists():
+            print(f"Voter cache not found: {voter_cache_path}. Run prime + collect first.", file=sys.stderr)
             sys.exit(1)
         if not silver_path.exists():
             print(f"silver_findings.jsonl not found: {silver_path}", file=sys.stderr)
             sys.exit(1)
 
-        voter_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        voter_cache = json.loads(voter_cache_path.read_text(encoding="utf-8"))
 
         silver_by_case: dict[str, SilverCaseResult] = {}
         for rec in read_jsonl(silver_path, SilverCaseResult):
@@ -762,8 +759,8 @@ def main() -> None:
             if not api_key:
                 print("GOOGLE_API_KEY not set", file=sys.stderr); sys.exit(1)
             embedder = GeminiEmbedder(api_key)
-            cache_path = Path(args.embed_cache) if args.embed_cache else DEFAULT_GEMINI_CACHE_PATH
-            embed_cache = EmbeddingCache(cache_path, GEMINI_EMBEDDING_MODEL)
+            embed_cache_path = Path(args.embed_cache) if args.embed_cache else DEFAULT_GEMINI_CACHE_PATH
+            embed_cache = EmbeddingCache(embed_cache_path, GEMINI_EMBEDDING_MODEL)
             from pipeline.stages.summarization.agreement.providers import GeminiEmbedder as AgreementGeminiEmbedder
             _raw_agreement_fn = AgreementGeminiEmbedder()
         else:
@@ -774,8 +771,8 @@ def main() -> None:
             if not api_key:
                 print("OPENAI_API_KEY not set", file=sys.stderr); sys.exit(1)
             embedder = OpenAIEmbedder(api_key)
-            cache_path = Path(args.embed_cache) if args.embed_cache else DEFAULT_CACHE_PATH
-            embed_cache = EmbeddingCache(cache_path, EMBEDDING_MODEL)
+            embed_cache_path = Path(args.embed_cache) if args.embed_cache else DEFAULT_CACHE_PATH
+            embed_cache = EmbeddingCache(embed_cache_path, EMBEDDING_MODEL)
             _raw_agreement_fn = AgreementOpenAIEmbedder()
 
         # Pre-compute all agreement embeddings upfront so the theta replay loop

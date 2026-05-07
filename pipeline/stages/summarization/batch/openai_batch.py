@@ -68,9 +68,13 @@ class OpenAIBatchProvider:
 
     def check(self, job: ProviderJob) -> ProviderJob:
         batch = self._client.batches.retrieve(job.job_id)
-        job.status = batch.status  # validating | in_progress | completed | failed | cancelled
         if batch.status == "completed" and batch.output_file_id:
+            job.status = "completed"
             job.output_location = batch.output_file_id
+        elif batch.status in ("failed", "cancelled", "expired"):
+            job.status = "failed"
+        else:
+            job.status = "in_progress"
         return job
 
     def retrieve(self, job: ProviderJob) -> list[BatchResult]:

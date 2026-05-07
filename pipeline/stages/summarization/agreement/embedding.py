@@ -8,7 +8,7 @@ import numpy as np
 
 from pipeline.stages.summarization.interfaces.scoring import AgreementContext, ScoreBundle
 from pipeline.stages.summarization.models import AuditableSummary
-from .providers import EmbedFn, GeminiEmbedder
+from .providers import EmbedFn, OpenAIEmbedder
 
 
 # ── Polarity vocabulary for contradiction heuristic ──────────────────────────────
@@ -353,7 +353,7 @@ class EmbeddingScorer:
     ----------
     embed_fn:
         Callable mapping a list of strings to embedding vectors.
-        Defaults to GeminiEmbedder (gemini-embedding-001).
+        Defaults to OpenAIEmbedder (text-embedding-3-small).
     """
 
     def __init__(
@@ -365,7 +365,7 @@ class EmbeddingScorer:
         contradiction_weight: float = 0.20,
         grounding_floor: float = 0.50,
     ) -> None:
-        self._embed: EmbedFn = embed_fn or GeminiEmbedder()
+        self._embed: EmbedFn = embed_fn or OpenAIEmbedder()
         self.tau = tau
         self.count_alpha = count_alpha
         self.reuse_weight = reuse_weight
