@@ -75,7 +75,6 @@ class RunConfig:
 
 def run(cfg: RunConfig) -> None:
     """Main entry point for the evaluation harness."""
-    import anthropic as _anthropic
     from database import get_db_connection
 
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
@@ -88,6 +87,7 @@ def run(cfg: RunConfig) -> None:
 
     # ── Resume batch mode ────────────────────────────────────────────────────
     if cfg.batch_id:
+        import anthropic as _anthropic
         client = _anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
         _resume_batch(client, cfg, cache)
         return
@@ -462,6 +462,8 @@ def _log_dry_run(requests: list[JudgeRequest], cfg: RunConfig) -> None:
 
 def _write_jsonl(rows: list[dict], path: Path) -> None:
     if not rows:
+        if path.exists():
+            path.unlink()
         return
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     logger.info("Wrote %d rows → %s", len(rows), path)

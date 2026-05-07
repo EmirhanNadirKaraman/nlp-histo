@@ -4,28 +4,13 @@ Comprehensive audit of the Phase 1 evaluation harness.
 
 ---
 
-## BUG 1 — `sampling.py` pipeline_runs status check is case-sensitive and queries wrong PK
+## BUG 1 — ~~`sampling.py` pipeline_runs status check is case-sensitive~~ ✅ NOT A BUG
 
 **File:** `sampling.py:74-78`
 
-```python
-rows = session.execute(text(
-    "SELECT DISTINCT ON (pmcid) pmcid, id AS run_id "
-    "FROM pipeline_runs WHERE status = 'success' "
-    "ORDER BY pmcid, started_at DESC"
-)).fetchall()
-```
+**Analysis:** The pipeline always writes lowercase string literals (`"success"`, `"failed"`, `"interrupted"`, `"running"`) via hardcoded calls to `_finish_pipeline_run()`. The query `WHERE status = 'success'` matches exactly. No code path writes `"SUCCESS"` or `"Success"`.
 
-**Problems:**
-1. The `PipelineRun.status` column stores `"success"` but the comment in the model says `"running / success / failed"`. If the pipeline ever writes `"SUCCESS"` or `"Success"`, this query silently returns zero rows — which is exactly the `0 papers pass word-count filter` error you hit.
-2. `id AS run_id` returns the `pipeline_runs.id` (surrogate integer PK). But downstream, all `build_q*_requests()` functions call `session.query(SumMapFinding).filter_by(pipeline_run_id=run_id)`. The FK `SumMapFinding.pipeline_run_id` does indeed point to `pipeline_runs.id` (the integer PK), so this is actually correct — but only because the naming is confusing. The `PaperSample.run_id` field stores the integer PK, not the human-readable `pipeline_runs.run_id` string column (like `"PMC123_20260401T120000"`). This is a naming trap that will mislead future readers.
-
-**Fix:**
-```python
-# Case-insensitive match
-"FROM pipeline_runs WHERE LOWER(status) = 'success' "
-```
-And rename `PaperSample.run_id` → `PaperSample.pipeline_run_id` for clarity, or add a comment noting it stores the integer PK, not the string `run_id` column.
+The `PaperSample.run_id` naming (stores integer PK, not the human-readable `pipeline_runs.run_id` string) is a readability trap but not a runtime bug — the FK wiring is correct.
 
 ---
 
@@ -83,27 +68,15 @@ buckets.setdefault(bucket, []).append(r.get(label_key) == positive_value)
 
 ---
 
-## BUG 4 — Q1 `correct_direction` uses `type: ["string", "null"]` which Anthropic tool_use may not support
+## BUG 4 — ~~Q1 `correct_direction` uses `type: ["string", "null"]` which Anthropic tool_use may not support~~ ✅ FIXED
 
-**File:** `prompts.py:84-87`
+**File:** `prompts.py`
 
-```python
-"correct_direction": {
-    "type": ["string", "null"],
-    "description": "Correct direction, or null if not applicable",
-},
-```
-
-**Problem:** Anthropic's tool-use `input_schema` follows JSON Schema but some providers only accept a single type string, not the array-of-types union syntax. If the Anthropic API rejects `["string", "null"]`, every request with this schema will fail at the API level.
-
-**Fix:** Test with the actual API. If it fails, use the `anyOf` pattern instead:
-```python
-"correct_direction": {
-    "anyOf": [{"type": "string"}, {"type": "null"}],
-    "description": "Correct direction, or null if not applicable",
-},
-```
-This also applies to `correct_subject_entity`, `correct_outcome_entity` in Q1, `subject_entity`/`outcome_entity` in Q3 and Q5 schemas, `direction` in Q5, and `pipeline_index` in Q5 alignments.
+Tested `anyOf` against the live API — confirmed working. All 7 fields converted from `["type", "null"]` array syntax to `anyOf`:
+- Q1: `correct_direction`, `correct_subject_entity`, `correct_outcome_entity`
+- Q3: `subject_entity`, `outcome_entity`
+- Q5 silver_findings: `subject_entity`, `outcome_entity`, `direction`
+- Q5 alignments: `pipeline_index` (`["integer", "null"]` → `anyOf`)
 
 ---
 
@@ -162,7 +135,7 @@ a.get("pipeline_index")
 
 ---
 
-## BUG 8 — `runner.py` imports `anthropic` unconditionally in `run()`
+## BUG 8 — ~~`runner.py` imports `anthropic` unconditionally in `run()`~~ ✅ FIXED
 
 **File:** `runner.py:78`
 
@@ -188,7 +161,7 @@ def run(cfg: RunConfig) -> None:
 
 ---
 
-## BUG 9 — `_write_jsonl` silently skips empty result sets
+## BUG 9 — ~~`_write_jsonl` silently skips empty result sets~~ ✅ FIXED
 
 **File:** `runner.py:463-467`
 
@@ -269,15 +242,15 @@ This works during normal runs because `req` (the `JudgeRequest`) is built fresh 
 
 | #  | Severity | File | Issue |
 |----|----------|------|-------|
-| 1  | **HIGH** | sampling.py | Case-sensitive status check → 0 papers matched |
+| 1  | ~~HIGH~~ | ~~sampling.py~~ | ~~Case-sensitive status check → 0 papers matched~~ ✅ NOT A BUG |
 | 2  | MEDIUM | q2_relations.py | Silent failure if canonical_id format diverges |
 | 3  | LOW | metrics.py | `KeyError` on malformed cached rows |
-| 4  | MEDIUM | prompts.py | `["string", "null"]` may be rejected by Anthropic |
+| 4  | ~~MEDIUM~~ | ~~prompts.py~~ | ~~`["string", "null"]` may be rejected by Anthropic~~ ✅ FIXED |
 | 5  | **HIGH** | q5_f1.py | Partial matches vanish from F1 metrics |
 | 6  | LOW | sampling.py | PostgreSQL-only raw SQL |
 | 7  | LOW | q5_f1.py | `KeyError` on missing `pipeline_index` |
-| 8  | MEDIUM | runner.py | `import anthropic` crashes dry-run when not installed |
-| 9  | LOW | runner.py | Stale JSONL files not cleaned up |
-| 10 | MEDIUM | q1_precision.py | Case-sensitive entity comparison inflates error rate |
+| 8  | ~~MEDIUM~~ | ~~runner.py~~ | ~~`import anthropic` crashes dry-run when not installed~~ ✅ FIXED |
+| 9  | ~~LOW~~ | ~~runner.py~~ | ~~Stale JSONL files not cleaned up~~ ✅ FIXED |
+| 10 | ~~MEDIUM~~ | ~~q1_precision.py~~ | ~~Case-sensitive entity comparison inflates error rate~~ ✅ FIXED |
 | D1 | ~~LOW~~ | ~~prompts.py~~ | ~~Dead `DIRECTIONS` constant~~ ✅ FIXED |
 | D2 | LOW | cache.py | `cache.get()` can't return request context |

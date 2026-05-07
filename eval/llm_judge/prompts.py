@@ -87,11 +87,11 @@ Q1_SCHEMA: dict[str, Any] = {
         },
         "correct_category": {"type": "string", "enum": CATEGORIES},
         "correct_subject_entity": {
-            "type": ["string", "null"],
+            "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": "Correct subject_entity from the verbatim, or null if none",
         },
         "correct_outcome_entity": {
-            "type": ["string", "null"],
+            "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": "Correct outcome_entity from the verbatim, or null if none",
         },
         "scope_errors": {
@@ -217,8 +217,8 @@ Q3_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "claim": {"type": "string", "description": "The missing finding"},
                     "category": {"type": "string", "enum": CATEGORIES},
-                    "subject_entity": {"type": ["string", "null"]},
-                    "outcome_entity": {"type": ["string", "null"]},
+                    "subject_entity": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "outcome_entity": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                 },
                 "required": ["claim"],
             },
@@ -278,8 +278,8 @@ Q5_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "claim": {"type": "string"},
-                    "subject_entity": {"type": ["string", "null"]},
-                    "outcome_entity": {"type": ["string", "null"]},
+                    "subject_entity": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "outcome_entity": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                     "relation_type": {"type": "string", "enum": RELATION_TYPES},
                     "direction": {"anyOf": [{"type": "string", "enum": DIRECTIONS}, {"type": "null"}]},
                     "category": {"type": "string", "enum": CATEGORIES},
@@ -298,7 +298,7 @@ Q5_SCHEMA: dict[str, Any] = {
                         "description": "0-based index into silver_findings",
                     },
                     "pipeline_index": {
-                        "type": ["integer", "null"],
+                        "anyOf": [{"type": "integer"}, {"type": "null"}],
                         "description": "0-based index into pipeline findings, or null if unmatched",
                     },
                     "match_type": {

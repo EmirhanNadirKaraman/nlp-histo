@@ -42,6 +42,11 @@ def _compute_fields_changed(pipeline: dict, judgment: dict) -> list[str]:
             pipe_val = None
         if correct_val in (None, "null", "None", ""):
             correct_val = None
+        if field_name in ("subject_entity", "outcome_entity"):
+            if pipe_val is not None:
+                pipe_val = pipe_val.strip().lower()
+            if correct_val is not None:
+                correct_val = correct_val.strip().lower()
         if pipe_val != correct_val:
             changed.append(field_name)
     scope_errors = judgment.get("scope_errors", [])
