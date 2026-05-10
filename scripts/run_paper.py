@@ -79,12 +79,24 @@ def _make_token_callback(model_id: str, store: dict, lock: threading.Lock):
     return _CB()
 
 
-def build_runner(trace: bool):
-    """Return (runner, token_usage) where token_usage is {level: {model: {input, output}}}."""
+def build_runner(
+    trace: bool,
+    *,
+    profile_name: str | None = None,
+    artifact_root: Path | None = None,
+    artifact_run_id: str | None = None,
+):
+    """Return (runner, token_usage) where token_usage is {level: {model: {input, output}}}.
+
+    When ``profile_name`` is given, voters are built from
+    :func:`get_profile` instead of the hardcoded heterogeneous default.
+    ``artifact_root`` enables filesystem persistence (no-op when None).
+    """
     from pipeline.stages.summarization import SummarizationRunner
     from pipeline.stages.summarization.agreement.providers import OpenAIEmbedder
     from pipeline.stages.summarization.batch.voter_configs import (
         CLAUDE_L1, CLAUDE_L2, CLAUDE_L3, GEMINI_L1, GEMINI_L2, OPENAI_L1, OPENAI_L2,
+        get_profile,
     )
     from pipeline.stages.summarization.config import SummarizationConfig
     from pipeline.stages.summarization.llm_providers import (
@@ -102,21 +114,50 @@ def build_runner(trace: bool):
         cb = _make_token_callback(model_id, store, lock)
         return llm.with_config(callbacks=[cb])
 
-    voter_llms = [                                        # Level 1 — cheapest
-        with_cb(gemini_direct_chat(GEMINI_L1,    temperature=0.1), GEMINI_L1, l1_store),
-        with_cb(openai_direct_chat(OPENAI_L1,    temperature=0.1), OPENAI_L1, l1_store),
-        with_cb(anthropic_direct_chat(CLAUDE_L1, temperature=0.1), CLAUDE_L1, l1_store),
-    ]
+    _PROVIDER_FACTORY = {
+        "claude":    anthropic_direct_chat,
+        "anthropic": anthropic_direct_chat,
+        "openai":    openai_direct_chat,
+        "gemini":    gemini_direct_chat,
+    }
+    _PROVIDER_SPEC = {
+        "claude": "anthropic", "anthropic": "anthropic",
+        "openai": "openai", "gemini": "gemini",
+    }
 
-    level2_voter_llms = [                                # Level 2 — mid-tier
-        with_cb(gemini_direct_chat(GEMINI_L2,    temperature=0.1), GEMINI_L2, l2_store),
-        with_cb(openai_direct_chat(OPENAI_L2,    temperature=0.1), OPENAI_L2, l2_store),
-        with_cb(anthropic_direct_chat(CLAUDE_L2, temperature=0.3), CLAUDE_L2, l2_store),
-    ]
+    if profile_name is not None:
+        prof = get_profile(profile_name)
 
-    escalation_llm = with_cb(                           # Level 3
-        anthropic_direct_chat(CLAUDE_L3, temperature=0.0), CLAUDE_L3, l3_store
-    )
+        def _build(vc, store):
+            factory = _PROVIDER_FACTORY[vc.provider]
+            llm = factory(vc.model, temperature=vc.temperature)
+            return with_cb(llm, vc.model, store)
+
+        voter_llms        = [_build(v, l1_store) for v in prof.l1_voters]
+        level2_voter_llms = [_build(v, l2_store) for v in prof.l2_voters]
+        escalation_llm    = _build(prof.l3_voter, l3_store)
+        voter_specs        = [(_PROVIDER_SPEC[v.provider], v.model) for v in prof.l1_voters]
+        level2_voter_specs = [(_PROVIDER_SPEC[v.provider], v.model) for v in prof.l2_voters]
+        escalation_spec    = (_PROVIDER_SPEC[prof.l3_voter.provider], prof.l3_voter.model)
+        active_profile_name = prof.name
+    else:
+        voter_llms = [                                        # Level 1 — cheapest
+            with_cb(gemini_direct_chat(GEMINI_L1,    temperature=0.1), GEMINI_L1, l1_store),
+            with_cb(openai_direct_chat(OPENAI_L1,    temperature=0.1), OPENAI_L1, l1_store),
+            with_cb(anthropic_direct_chat(CLAUDE_L1, temperature=0.1), CLAUDE_L1, l1_store),
+        ]
+        level2_voter_llms = [                                # Level 2 — mid-tier
+            with_cb(gemini_direct_chat(GEMINI_L2,    temperature=0.1), GEMINI_L2, l2_store),
+            with_cb(openai_direct_chat(OPENAI_L2,    temperature=0.1), OPENAI_L2, l2_store),
+            with_cb(anthropic_direct_chat(CLAUDE_L2, temperature=0.3), CLAUDE_L2, l2_store),
+        ]
+        escalation_llm = with_cb(                           # Level 3
+            anthropic_direct_chat(CLAUDE_L3, temperature=0.0), CLAUDE_L3, l3_store
+        )
+        voter_specs        = [("gemini", GEMINI_L1), ("openai", OPENAI_L1), ("anthropic", CLAUDE_L1)]
+        level2_voter_specs = [("gemini", GEMINI_L2), ("openai", OPENAI_L2), ("anthropic", CLAUDE_L2)]
+        escalation_spec    = ("anthropic", CLAUDE_L3)
+        active_profile_name = "default"
 
     token_usage = {"l1": l1_store, "l2": l2_store, "l3": l3_store}
 
@@ -128,17 +169,25 @@ def build_runner(trace: bool):
         config=SummarizationConfig(),
         output_dir=Path("out/summaries"),
         trace_enabled=trace,
-        voter_specs=[("gemini", GEMINI_L1), ("openai", OPENAI_L1), ("anthropic", CLAUDE_L1)],
-        level2_voter_specs=[("gemini", GEMINI_L2), ("openai", OPENAI_L2), ("anthropic", CLAUDE_L2)],
-        escalation_spec=("anthropic", CLAUDE_L3),
-        cascade_profile="default",
+        voter_specs=voter_specs,
+        level2_voter_specs=level2_voter_specs,
+        escalation_spec=escalation_spec,
+        cascade_profile=active_profile_name,
+        artifact_root=artifact_root,
+        artifact_run_id=artifact_run_id,
     )
     return runner, token_usage
 
 
 # ── Batch runner ───────────────────────────────────────────────────────────────
 
-def build_batch_runner(profile_name: str | None = None):
+def build_batch_runner(
+    profile_name: str | None = None,
+    *,
+    artifact_root: Path | None = None,
+    artifact_run_id: str | None = None,
+    run_reduce: bool = False,
+):
     from pipeline.stages.summarization.agreement.providers import GeminiEmbedder
     from pipeline.stages.summarization.batch import BatchSummarizationRunner
     from pipeline.stages.summarization.batch.voter_configs import get_profile
@@ -163,6 +212,9 @@ def build_batch_runner(profile_name: str | None = None):
         output_dir=Path("out/summaries"),
         embed_fn=GeminiEmbedder(),
         cascade_profile=profile.name,
+        artifact_root=artifact_root,
+        artifact_run_id=artifact_run_id,
+        run_reduce=run_reduce,
     )
 
 
@@ -220,6 +272,12 @@ def main():
                         help="Start processing from chunk K (0-based, default 0)")
     parser.add_argument("--poll-interval", type=int, default=60, metavar="S",
                         help="Seconds between batch status polls (default: 60)")
+    parser.add_argument("--artifact-root", default=None, metavar="PATH",
+                        help="Enable filesystem persistence under this directory "
+                             "(sync mode only). Disabled when omitted.")
+    parser.add_argument("--artifact-run-id", default=None, metavar="ID",
+                        help="Reuse a single run_id across multiple papers so they "
+                             "land in the same runs/{run_id}/ directory.")
     parser.add_argument(
         "--profile", default=None, metavar="NAME",
         help="Cascade profile: smoke_haiku (default — Haiku-only smoke) | "
@@ -264,22 +322,47 @@ def main():
         print("\nEnv vars required: GOOGLE_API_KEY, ANTHROPIC_API_KEY")
         return
 
+    artifact_root_path = Path(args.artifact_root) if args.artifact_root else None
+
     if not args.sync and len(pmcids) > 1:
-        _run_all_batch(pmcids, poll_interval=args.poll_interval)
+        _run_all_batch(
+            pmcids, poll_interval=args.poll_interval,
+            profile_name=args.profile,
+            artifact_root=artifact_root_path,
+            artifact_run_id=args.artifact_run_id,
+        )
     else:
         for pmcid in pmcids:
             logger.info("─── Processing %s (%d/%d) ───", pmcid, pmcids.index(pmcid) + 1, len(pmcids))
             if not args.sync:
-                _run_batch(pmcid, poll_interval=args.poll_interval)
+                _run_batch(
+                    pmcid, poll_interval=args.poll_interval,
+                    profile_name=args.profile,
+                    artifact_root=artifact_root_path,
+                    artifact_run_id=args.artifact_run_id,
+                )
             else:
-                _run_sync(pmcid, trace=args.trace,
-                          start_chunk=args.start_chunk, limit_chunks=args.limit_chunks)
+                _run_sync(
+                    pmcid, trace=args.trace,
+                    start_chunk=args.start_chunk, limit_chunks=args.limit_chunks,
+                    profile_name=args.profile,
+                    artifact_root=artifact_root_path,
+                    artifact_run_id=args.artifact_run_id,
+                )
 
 
 def _run_sync(pmcid: str, trace: bool,
-              start_chunk: int = 0, limit_chunks: int | None = None) -> None:
+              start_chunk: int = 0, limit_chunks: int | None = None,
+              profile_name: str | None = None,
+              artifact_root: Path | None = None,
+              artifact_run_id: str | None = None) -> None:
     logger.info("Building sync runner…")
-    runner, token_usage = build_runner(trace=trace)
+    runner, token_usage = build_runner(
+        trace=trace,
+        profile_name=profile_name,
+        artifact_root=artifact_root,
+        artifact_run_id=artifact_run_id,
+    )
 
     logger.info("Loading paper %s from database…", pmcid)
     try:
@@ -502,12 +585,23 @@ def _save_escalation_report(stats: list[dict], output_dir: Path) -> None:
     print(f"Saved vs L3-only baseline: ${totals['est_saved_usd']:.5f}")
 
 
-def _run_all_batch(pmcids: list[str], poll_interval: int = 20) -> None:
+def _run_all_batch(
+    pmcids: list[str],
+    poll_interval: int = 20,
+    *,
+    profile_name: str | None = None,
+    artifact_root: Path | None = None,
+    artifact_run_id: str | None = None,
+) -> None:
     """Submit all papers simultaneously, poll together, finalize all."""
     from pipeline.stages.summarization.batch import BatchPhase
     from pipeline.stages.summarization.runner import SummarizationRunner
 
-    runner = build_batch_runner()
+    runner = build_batch_runner(
+        profile_name=profile_name,
+        artifact_root=artifact_root,
+        artifact_run_id=artifact_run_id,
+    )
 
     # ── Phase 1: submit all papers in parallel ────────────────────────────────
     def _submit(pmcid: str):
@@ -584,12 +678,23 @@ def _run_all_batch(pmcids: list[str], poll_interval: int = 20) -> None:
     _save_escalation_report(escalation_stats, Path("out/summaries/reports"))
 
 
-def _run_batch(pmcid: str, poll_interval: int = 60) -> None:
+def _run_batch(
+    pmcid: str,
+    poll_interval: int = 60,
+    *,
+    profile_name: str | None = None,
+    artifact_root: Path | None = None,
+    artifact_run_id: str | None = None,
+) -> None:
     from pipeline.stages.summarization.batch import BatchPhase
     from pipeline.stages.summarization.runner import SummarizationRunner
 
     logger.info("Building batch runner…")
-    runner = build_batch_runner()
+    runner = build_batch_runner(
+        profile_name=profile_name,
+        artifact_root=artifact_root,
+        artifact_run_id=artifact_run_id,
+    )
 
     logger.info("Loading paper %s from database…", pmcid)
     try:

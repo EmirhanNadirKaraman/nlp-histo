@@ -451,3 +451,289 @@ class RunArtifactWriter:
         """Best-effort CSV summary; never raises."""
         path = self.stage_path(stage, pmcid, name)
         return write_csv(path, rows, columns)
+
+
+# ── Stage persisters (shared by sync + batch runners) ────────────────────────
+#
+# These take a fully-built RunArtifactWriter and the in-memory stage outputs.
+# Each function is a no-op when the writer is None, so callers can pass
+# ``writer = self._make_artifact_writer(...)`` unconditionally — both runners
+# stay clean of branching on artifact_root.
+
+
+def non_groupable_reason(nf: Any) -> str:
+    """Human-readable reason a NormalFinding failed is_groupable()."""
+    from .models import RelationTypeEnum  # noqa: PLC0415 — defer to avoid circular import
+    parts = []
+    if getattr(nf, "subject_entity", None) is None:
+        parts.append("subject_entity=None")
+    if getattr(nf, "outcome_entity", None) is None:
+        parts.append("outcome_entity=None")
+    if getattr(nf, "relation_type", None) is RelationTypeEnum.unclear:
+        parts.append("relation_type=unclear")
+    return ", ".join(parts) if parts else "unknown"
+
+
+def _copy_enum_logs(writer: "RunArtifactWriter", pmcid: str) -> None:
+    """Mirror logs/{enum_observations,bad_findings}.jsonl into the per-PMCID dir.
+
+    Best-effort — missing files are silently skipped.
+    """
+    for name in ("enum_observations.jsonl", "bad_findings.jsonl"):
+        src = writer.logs_dir() / name
+        if not src.exists():
+            continue
+        try:
+            dst = writer.stage_path("map", pmcid, name)
+            dst.write_bytes(src.read_bytes())
+        except Exception as exc:
+            logger.debug("[%s] enum log copy failed for %s: %s", pmcid, name, exc)
+
+
+def persist_map_artifacts(
+    writer: "RunArtifactWriter | None",
+    pmcid: str,
+    chunk_summaries: list,
+    grounding_rejected: list,
+) -> None:
+    """Write findings.jsonl + chunks.jsonl + rejected_findings.jsonl + enum logs."""
+    if writer is None:
+        return
+    writer.add_paper(pmcid)
+    writer.mark_stage_attempted("map")
+    try:
+        # TODO: Finding has no stable finding_id; using (chunk_id, position)
+        # as the v1 MAP coordinate. Add finding_id when introduced.
+        findings_rows: list[dict] = []
+        for cs in chunk_summaries:
+            for pos, f in enumerate(cs.findings):
+                fd = f.model_dump()
+                fd["pmcid"] = pmcid
+                fd["chunk_id"] = cs.chunk_id
+                fd["position_in_chunk"] = pos
+                findings_rows.append(fd)
+        writer.write_stage_jsonl(
+            "map", "findings.jsonl", findings_rows, pmcid=pmcid, required=True,
+        )
+
+        chunk_rows = [
+            {
+                "pmcid": pmcid,
+                "chunk_id": cs.chunk_id,
+                "n_findings": len(cs.findings),
+                "summary_text": cs.summary_text,
+                "audit_metadata": cs.audit_metadata.model_dump(),
+            }
+            for cs in chunk_summaries
+        ]
+        writer.write_stage_jsonl(
+            "map", "chunks.jsonl", chunk_rows, pmcid=pmcid, required=True,
+        )
+
+        rejected_rows = [
+            {
+                "pmcid": pmcid,
+                "chunk_id": chunk_id,
+                "claim": f.claim,
+                "category": f.category,
+                "subject_entity": f.subject_entity,
+                "outcome_entity": f.outcome_entity,
+                "relation_type": f.relation_type.value if f.relation_type else None,
+                "direction": f.direction.value if f.direction else None,
+                "grounding_score": f.grounding_score,
+                "evidence": list(f.evidence) if f.evidence else [],
+                "verbatim_support": f.verbatim_support,
+                "reason": "grounding_score_below_threshold",
+            }
+            for chunk_id, f in grounding_rejected
+        ]
+        writer.write_stage_jsonl(
+            "map", "rejected_findings.jsonl", rejected_rows, pmcid=pmcid,
+        )
+
+        _copy_enum_logs(writer, pmcid)
+        writer.mark_stage_completed("map")
+    except Exception as exc:
+        writer.write_error(stage="map", error=str(exc), pmcid=pmcid)
+        raise
+
+
+def persist_normalize_artifacts(
+    writer: "RunArtifactWriter | None",
+    pmcid: str,
+    normal_findings: list,
+) -> None:
+    if writer is None:
+        return
+    writer.mark_stage_attempted("normalize")
+    try:
+        writer.write_stage_jsonl(
+            "normalize", "normal_findings.jsonl",
+            [nf.model_dump() for nf in normal_findings],
+            pmcid=pmcid, required=True,
+        )
+        entity_links = [
+            {
+                "normal_id": nf.normal_id,
+                "subject_entity": nf.subject_entity,
+                "subject_cui":    nf.subject_cui,
+                "outcome_entity": nf.outcome_entity,
+                "outcome_cui":    nf.outcome_cui,
+            }
+            for nf in normal_findings
+        ]
+        writer.write_stage_jsonl(
+            "normalize", "entity_links.jsonl", entity_links, pmcid=pmcid,
+        )
+        # TODO: NormalFinding.source_finding_ids is reserved but unpopulated.
+        dedup_rows = [
+            {
+                "normal_id": nf.normal_id,
+                "n_evidence_spans": len(nf.evidence) if nf.evidence else 0,
+                "evidence_coords": [
+                    {
+                        "sentence_id": s.sentence_id,
+                        "pmcid": s.pmcid,
+                        "text_element_id": s.text_element_id,
+                    }
+                    for s in (nf.evidence or [])
+                ],
+                "source_finding_ids": list(nf.source_finding_ids or []),
+            }
+            for nf in normal_findings
+        ]
+        writer.write_stage_jsonl(
+            "normalize", "dedup_trace.jsonl", dedup_rows, pmcid=pmcid,
+        )
+        writer.mark_stage_completed("normalize")
+    except Exception as exc:
+        writer.write_error(stage="normalize", error=str(exc), pmcid=pmcid)
+        raise
+
+
+def persist_group_artifacts(
+    writer: "RunArtifactWriter | None",
+    pmcid: str,
+    groups: list,
+    non_groupable_nfs: list,
+) -> None:
+    if writer is None:
+        return
+    writer.mark_stage_attempted("group")
+    try:
+        writer.write_stage_jsonl(
+            "group", "groups.jsonl",
+            [g.model_dump() for g in groups],
+            pmcid=pmcid, required=True,
+        )
+        non_groupable_rows = [
+            {
+                "normal_id": nf.normal_id,
+                "subject_entity": nf.subject_entity,
+                "outcome_entity": nf.outcome_entity,
+                "relation_type": nf.relation_type.value if nf.relation_type else None,
+                "category": nf.category,
+                "predicate_text": nf.predicate_text,
+                "reason": non_groupable_reason(nf),
+            }
+            for nf in non_groupable_nfs
+        ]
+        writer.write_stage_jsonl(
+            "group", "non_groupable.jsonl", non_groupable_rows, pmcid=pmcid,
+        )
+        writer.mark_stage_completed("group")
+    except Exception as exc:
+        writer.write_error(stage="group", error=str(exc), pmcid=pmcid)
+        raise
+
+
+def persist_canonicalize_artifacts(
+    writer: "RunArtifactWriter | None",
+    pmcid: str,
+    canonical_rules: list,
+) -> None:
+    if writer is None:
+        return
+    writer.mark_stage_attempted("canonicalize")
+    try:
+        writer.write_stage_jsonl(
+            "canonicalize", "canonical_rules.jsonl",
+            [cr.model_dump() for cr in canonical_rules],
+            pmcid=pmcid, required=True,
+        )
+        writer.mark_stage_completed("canonicalize")
+    except Exception as exc:
+        writer.write_error(stage="canonicalize", error=str(exc), pmcid=pmcid)
+        raise
+
+
+def persist_relate_artifacts(
+    writer: "RunArtifactWriter | None",
+    pmcid: str,
+    relations: list,
+    raw_pairs: list,
+) -> None:
+    if writer is None:
+        return
+    writer.mark_stage_attempted("relate")
+    try:
+        writer.write_stage_jsonl(
+            "relate", "relations.jsonl",
+            [r.model_dump() for r in relations],
+            pmcid=pmcid, required=True,
+        )
+        writer.write_stage_jsonl(
+            "relate", "raw_pairs.jsonl",
+            [p.model_dump() for p in raw_pairs],
+            pmcid=pmcid, required=True,
+        )
+        # TODO: RelateStage doesn't expose per-pair gate skips today.
+        writer.write_stage_jsonl(
+            "relate", "skipped_pairs.jsonl", [], pmcid=pmcid,
+        )
+        writer.mark_stage_completed("relate")
+    except Exception as exc:
+        writer.write_error(stage="relate", error=str(exc), pmcid=pmcid)
+        raise
+
+
+def persist_resolve_artifacts(
+    writer: "RunArtifactWriter | None",
+    pmcid: str,
+    final_rules: list,
+    relations: list,
+) -> None:
+    if writer is None:
+        return
+    writer.mark_stage_attempted("resolve")
+    try:
+        writer.write_stage_jsonl(
+            "resolve", "final_rules.jsonl",
+            [fr.model_dump() for fr in final_rules],
+            pmcid=pmcid, required=True,
+        )
+        score_rows = [
+            {
+                "final_id":          fr.final_id,
+                "canonical_id":      fr.canonical_id,
+                "group_id":          fr.group_id,
+                "member_normal_ids": list(fr.member_normal_ids or []),
+                "final_score":       fr.final_score,
+                "support_count":     fr.support_count,
+                "contradict_count":  fr.contradict_count,
+                "scope_qualify_count": fr.scope_qualify_count,
+                "is_contradicted":   fr.is_contradicted,
+                "contradicted_by":   list(fr.contradicted_by or []),
+                "mean_grounding_score": fr.mean_grounding_score,
+                "finding_count":     fr.finding_count,
+                "study_coverage":    fr.study_coverage,
+            }
+            for fr in final_rules
+        ]
+        writer.write_stage_jsonl(
+            "resolve", "score_trace.jsonl", score_rows, pmcid=pmcid,
+        )
+        writer.mark_stage_completed("resolve")
+    except Exception as exc:
+        writer.write_error(stage="resolve", error=str(exc), pmcid=pmcid)
+        raise

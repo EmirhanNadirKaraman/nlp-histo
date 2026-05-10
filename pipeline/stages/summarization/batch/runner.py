@@ -30,8 +30,15 @@ import json
 import logging
 from pathlib import Path
 
+from datetime import datetime, timezone
+
 from ..agreement import AgreementChecker, EmbeddingScorer
 from ..config import SummarizationConfig
+from ..current_stages.canonicalize_stage import CanonicalizeStage
+from ..current_stages.group_stage import GroupStage, is_groupable
+from ..current_stages.normalize_stage import NormalizeStage
+from ..current_stages.relate_stage import RelateStage
+from ..current_stages.resolve_stage import ResolveStage
 from ..helpers.contradiction_detector import ContradictionDetector
 from ..helpers.grounding_filter import GroundingFilter
 from ..interfaces.scoring import ChunkDecision
@@ -41,10 +48,21 @@ from ..models import (
     MAP_PROMPT_VERSION,
     MAP_SCHEMA_VERSION,
     MAP_STAGE_NAME,
+    NormalFinding,
     compute_cascade_signature,
 )
 from ..old_stages.reduce_stage import ReduceStage
 from ..old_stages.rule_stage import RuleStage
+from ..persistence import (
+    RunArtifactWriter,
+    RunManifest,
+    persist_canonicalize_artifacts,
+    persist_group_artifacts,
+    persist_map_artifacts,
+    persist_normalize_artifacts,
+    persist_relate_artifacts,
+    persist_resolve_artifacts,
+)
 from .dispatch import OPENAI_MAP_TOOL, build_providers, build_requests, parse_result, submit_level
 from .models import BatchHandle, BatchPhase, BatchResult, ProviderJob, VoterBatchConfig
 
@@ -86,6 +104,10 @@ class BatchSummarizationRunner:
         handle_dir: Path | None = None,
         embed_fn=None,
         cascade_profile: str = "custom",
+        artifact_root: Path | None = None,
+        artifact_run_id: str | None = None,
+        run_modern_pipeline: bool = True,
+        run_reduce: bool = False,
     ) -> None:
         from ..agreement.providers import OpenAIEmbedder
         cfg = config or SummarizationConfig()
@@ -99,18 +121,29 @@ class BatchSummarizationRunner:
             theta=cfg.map.theta,
             reject_theta=cfg.map.reject_theta,
         )
-        self._reduce = ReduceStage(escalation_llm)
-        self._rules = RuleStage(escalation_llm)
+        # ReduceStage/RuleStage call `llm.with_structured_output(...)` in their
+        # ctors, so we only construct them when the legacy REDUCE/RULES block
+        # is enabled. Otherwise the runner can be built with any (or no) LLM —
+        # convenient for tests.
+        self._escalation_llm = escalation_llm
+        self._reduce: ReduceStage | None = (
+            ReduceStage(escalation_llm) if run_reduce else None
+        )
+        self._rules: RuleStage | None = (
+            RuleStage(escalation_llm) if run_reduce else None
+        )
         self._grounding = (
             GroundingFilter(cfg.grounding.threshold)
             if cfg.grounding.threshold is not None else None
         )
+        # ContradictionDetector is only useful with REDUCE/RULES output, so it's
+        # also lazy. Avoids needing a structured-output-capable LLM in tests.
         self._contradiction = (
             ContradictionDetector(
                 escalation_llm,
                 similarity_threshold=cfg.contradiction_similarity_threshold,
             )
-            if cfg.contradiction_similarity_threshold is not None
+            if (run_reduce and cfg.contradiction_similarity_threshold is not None)
             else None
         )
         self._output_dir = output_dir
@@ -127,6 +160,38 @@ class BatchSummarizationRunner:
             + [(v.provider, v.model) for v in self._l2]
             + [(self._l3.provider, self._l3.model)]
         )
+
+        # Modern post-MAP chain. Stateless stages — instantiate once.
+        # When ``run_modern_pipeline`` is False, finalize() falls back to the
+        # legacy REDUCE/RULES-only behaviour.
+        self._cfg_full = cfg
+        self._run_modern_pipeline = run_modern_pipeline
+        self._run_reduce = run_reduce
+        self._normalize = NormalizeStage()
+        self._group = GroupStage()
+        self._canonicalize = CanonicalizeStage()
+        self._relate = RelateStage(
+            entailment_threshold=cfg.relate.entailment_threshold,
+            contradiction_threshold=cfg.relate.contradiction_threshold,
+        )
+        self._resolve = ResolveStage(cfg.resolve)
+
+        # Filesystem artifact persistence — opt-in (mirror of sync runner).
+        self._artifact_root: Path | None = (
+            Path(artifact_root) if artifact_root is not None else None
+        )
+        self._artifact_run_id_override: str | None = artifact_run_id
+
+        # Snapshot of config + cascade for the manifest, mirrors sync runner shape.
+        import dataclasses
+        self._config_snapshot = {
+            **dataclasses.asdict(cfg),
+            "cascade_profile":   cascade_profile,
+            "cascade_signature": self._cascade_signature,
+            "voter_models":         [v.model for v in self._l1],
+            "level2_voter_models":  [v.model for v in self._l2],
+            "escalation_model":     self._l3.model,
+        }
 
     # ── Public API ──────────────────────────────────────────────────────────────
 
@@ -227,7 +292,10 @@ class BatchSummarizationRunner:
 
     def finalize(self, handle: BatchHandle) -> dict:
         """
-        Run REDUCE → RULES synchronously on the batch MAP results.
+        Run the modern post-MAP chain (and optionally REDUCE → RULES) on the
+        batch MAP output, persist filesystem artifacts when configured, and
+        return the assembled result dict.
+
         Only call when ``handle.phase == BatchPhase.COMPLETE``.
         """
         if handle.phase != BatchPhase.COMPLETE:
@@ -240,48 +308,204 @@ class BatchSummarizationRunner:
             AuditableSummary.model_validate(v) for v in handle.finalized.values()
         ]
 
-        if self._grounding is not None:
-            chunk_summaries = [self._grounding.filter_findings(cs) for cs in chunk_summaries]
+        # ── Filesystem persistence setup (opt-in) ─────────────────────────────
+        run_id = self._artifact_run_id_override or self._make_run_id(pmcid)
+        writer = self._make_artifact_writer(run_id, pmcid, handle.cascade_signature)
 
-        logger.info("[%s] REDUCE — %d chunks", pmcid, len(chunk_summaries))
-        master = self._reduce.reduce(chunk_summaries, pmcid)
+        try:
+            # ── Grounding (matches sync ordering) ─────────────────────────────
+            grounding_rejected: list = []
+            if self._grounding is not None:
+                new_summaries = []
+                for cs in chunk_summaries:
+                    kept_cs, dropped = self._grounding.filter_findings_with_scores(cs)
+                    new_summaries.append(kept_cs)
+                    for f in dropped:
+                        grounding_rejected.append((cs.chunk_id, f))
+                chunk_summaries = new_summaries
 
-        logger.info("[%s] RULES", pmcid)
-        rules = self._rules.extract(master, pmcid)
+            # ── MAP artifact persistence ──────────────────────────────────────
+            persist_map_artifacts(writer, pmcid, chunk_summaries, grounding_rejected)
 
-        if self._grounding is not None:
-            rules = self._grounding.filter_rules(rules)
+            # ── Optional modern chain — produces canonical/relate/final ──────
+            normal_findings: list = []
+            finding_groups:  list = []
+            canonical_rules: list = []
+            relations:       list = []
+            relate_raw_pairs: list = []
+            final_rules:     list = []
 
-        contradiction_report = None
-        if self._contradiction is not None:
-            contradiction_report = self._contradiction.detect(rules)
+            if self._run_modern_pipeline:
+                import time as _time  # noqa: PLC0415
+                all_findings = [f for cs in chunk_summaries for f in cs.findings]
+                logger.info("[%s] NORMALIZE — start (%d findings)", pmcid, len(all_findings))
+                t0 = _time.perf_counter()
+                normal_findings = self._normalize.normalize(all_findings, pmcid)
+                logger.info("[%s] NORMALIZE — done [%.1fs] → %d normal findings",
+                            pmcid, _time.perf_counter() - t0, len(normal_findings))
+                persist_normalize_artifacts(writer, pmcid, normal_findings)
 
-        result = {
-            "status": "success",
-            "pmcid": pmcid,
-            "summary": master.narrative_summary,
-            "rules": [r.model_dump() for r in rules.rules],
-            "contradiction_report": contradiction_report.model_dump() if contradiction_report else None,
-            "audit_trail": {
-                "map_chunks": [cs.model_dump() for cs in chunk_summaries],
-                "master_summary": master.model_dump(),
-                "rules_provenance": rules.model_dump(),
-            },
-            "map_run_metadata": {
-                "schema_version":    handle.schema_version or MAP_SCHEMA_VERSION,
-                "prompt_version":    handle.prompt_version or MAP_PROMPT_VERSION,
-                "stage_name":        handle.stage_name or MAP_STAGE_NAME,
-                "cascade_profile":   handle.cascade_profile or self._cascade_profile,
-                "cascade_signature": handle.cascade_signature or self._cascade_signature,
-                "l1_voters": [{"provider": v.provider, "model": v.model} for v in self._l1],
-                "l2_voters": [{"provider": v.provider, "model": v.model} for v in self._l2],
-                "l3_voter":  {"provider": self._l3.provider, "model": self._l3.model},
-            },
-        }
-        out_path = self._summaries_dir / f"{pmcid}.json"
-        out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-        logger.info("[%s] Result saved to %s", pmcid, out_path)
-        return result
+                groupable     = [nf for nf in normal_findings if is_groupable(nf)]
+                non_groupable = [nf for nf in normal_findings if not is_groupable(nf)]
+                logger.info("[%s] GROUP — start (%d groupable, %d non-groupable)",
+                            pmcid, len(groupable), len(non_groupable))
+                t0 = _time.perf_counter()
+                finding_groups = self._group.group(groupable, pmcid)
+                logger.info("[%s] GROUP — done [%.1fs] → %d groups",
+                            pmcid, _time.perf_counter() - t0, len(finding_groups))
+                persist_group_artifacts(writer, pmcid, finding_groups, non_groupable)
+
+                logger.info("[%s] CANONICALIZE — start (%d groups)", pmcid, len(finding_groups))
+                t0 = _time.perf_counter()
+                nf_by_id: dict[str, NormalFinding] = {nf.normal_id: nf for nf in normal_findings}
+                canonical_rules = self._canonicalize.canonicalize(
+                    finding_groups, nf_by_id, pmcid
+                )
+                logger.info("[%s] CANONICALIZE — done [%.1fs] → %d canonical rules",
+                            pmcid, _time.perf_counter() - t0, len(canonical_rules))
+                # UMLS enrichment is a no-op when scispacy is unavailable but
+                # the import itself can take 5-30s on first use.
+                logger.info("[%s] UMLS enrichment — start (loading scispacy may be slow)", pmcid)
+                t0 = _time.perf_counter()
+                from ..helpers.entity_linker import enrich_rules_with_cuis  # noqa: PLC0415
+                enrich_rules_with_cuis(canonical_rules)
+                logger.info("[%s] UMLS enrichment — done [%.1fs]",
+                            pmcid, _time.perf_counter() - t0)
+                persist_canonicalize_artifacts(writer, pmcid, canonical_rules)
+
+                logger.info("[%s] RELATE — start (%d canonical rules)",
+                            pmcid, len(canonical_rules))
+                t0 = _time.perf_counter()
+                if len(canonical_rules) < 2:
+                    logger.info("[%s] RELATE — skipped (need ≥2 rules to compare)", pmcid)
+                relations, relate_raw_pairs = self._relate.relate(canonical_rules, pmcid)
+                logger.info("[%s] RELATE — done [%.1fs] → %d relations, %d raw pairs",
+                            pmcid, _time.perf_counter() - t0,
+                            len(relations), len(relate_raw_pairs))
+                persist_relate_artifacts(writer, pmcid, relations, relate_raw_pairs)
+
+                logger.info("[%s] RESOLVE — start (%d canonical rules, %d relations)",
+                            pmcid, len(canonical_rules), len(relations))
+                t0 = _time.perf_counter()
+                final_rules = self._resolve.resolve(canonical_rules, relations, pmcid)
+                logger.info("[%s] RESOLVE — done [%.1fs] → %d final rules",
+                            pmcid, _time.perf_counter() - t0, len(final_rules))
+                persist_resolve_artifacts(writer, pmcid, final_rules, relations)
+
+            # ── Optional REDUCE → RULES (legacy) ─────────────────────────────
+            master = None
+            rules  = None
+            contradiction_report = None
+            if self._run_reduce:
+                if self._reduce is None or self._rules is None:
+                    raise RuntimeError(
+                        "run_reduce=True but ReduceStage/RuleStage were not built. "
+                        "Reconstruct the runner with run_reduce=True."
+                    )
+                logger.info("[%s] REDUCE — %d chunks", pmcid, len(chunk_summaries))
+                master = self._reduce.reduce(chunk_summaries, pmcid)
+                logger.info("[%s] RULES", pmcid)
+                rules = self._rules.extract(master, pmcid)
+                if self._grounding is not None:
+                    rules = self._grounding.filter_rules(rules)
+                if self._contradiction is not None:
+                    contradiction_report = self._contradiction.detect(rules)
+
+            result = {
+                "status": "success",
+                "run_id": run_id,
+                "pmcid":  pmcid,
+                "summary": master.narrative_summary if master else None,
+                "rules":   [r.model_dump() for r in rules.rules] if rules else [],
+                "contradiction_report":
+                    contradiction_report.model_dump() if contradiction_report else None,
+                "canonical_rules":  [cr.model_dump() for cr in canonical_rules],
+                "relations":        [r.model_dump()  for r in relations],
+                "relate_raw_pairs": [p.model_dump()  for p in relate_raw_pairs],
+                "final_rules":      [fr.model_dump() for fr in final_rules],
+                "audit_trail": {
+                    "map_chunks": [cs.model_dump() for cs in chunk_summaries],
+                    "master_summary":   master.model_dump() if master else None,
+                    "rules_provenance": rules.model_dump()  if rules else None,
+                },
+                "map_run_metadata": {
+                    "schema_version":    handle.schema_version or MAP_SCHEMA_VERSION,
+                    "prompt_version":    handle.prompt_version or MAP_PROMPT_VERSION,
+                    "stage_name":        handle.stage_name or MAP_STAGE_NAME,
+                    "cascade_profile":   handle.cascade_profile or self._cascade_profile,
+                    "cascade_signature": handle.cascade_signature or self._cascade_signature,
+                    "l1_voters": [{"provider": v.provider, "model": v.model} for v in self._l1],
+                    "l2_voters": [{"provider": v.provider, "model": v.model} for v in self._l2],
+                    "l3_voter":  {"provider": self._l3.provider, "model": self._l3.model},
+                },
+            }
+            out_path = self._summaries_dir / f"{pmcid}.json"
+            out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+            logger.info("[%s] Result saved to %s", pmcid, out_path)
+
+            if writer is not None:
+                writer.finalize("completed")
+            return result
+
+        except Exception as exc:
+            if writer is not None:
+                writer.write_error(stage="batch_finalize", error=str(exc), pmcid=pmcid)
+                writer.finalize("failed", error=str(exc))
+            raise
+
+    # ── Filesystem artifact helpers ────────────────────────────────────────────
+
+    def _make_run_id(self, pmcid: str) -> str:
+        """Mirror SummarizationRunner._make_run_id format for consistency."""
+        ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
+        return f"{pmcid}_{ts}"
+
+    def _make_artifact_writer(
+        self, run_id: str, pmcid: str, cascade_signature: str | None = None,
+    ) -> RunArtifactWriter | None:
+        """Build the per-run filesystem writer when ``artifact_root`` is set.
+
+        Returns None when persistence is disabled. Failure is logged but never
+        fatal — filesystem artifacts are observational.
+        """
+        if self._artifact_root is None:
+            return None
+        try:
+            cfg = self._cfg_full
+            thresholds = {
+                "grounding_threshold": (
+                    self._grounding.threshold if self._grounding is not None else None
+                ),
+                "entailment_threshold":   cfg.relate.entailment_threshold,
+                "contradiction_threshold": cfg.relate.contradiction_threshold,
+                "map_theta":              cfg.map.theta,
+                "map_reject_theta":       cfg.map.reject_theta,
+                "contradiction_similarity_threshold": cfg.contradiction_similarity_threshold,
+            }
+            models = {
+                "voter_models":        [v.model for v in self._l1],
+                "level2_voter_models": [v.model for v in self._l2],
+                "escalation_model":    self._l3.model,
+            }
+            manifest = RunManifest(
+                run_id=run_id,
+                artifact_root=self._artifact_root,
+                timestamp_start=datetime.now(tz=timezone.utc).isoformat(),
+                papers=[pmcid],
+                schema_version=MAP_SCHEMA_VERSION,
+                prompt_version=MAP_PROMPT_VERSION,
+                cascade_signature=cascade_signature or self._cascade_signature,
+                config=self._config_snapshot,
+                models=models,
+                thresholds=thresholds,
+                chunk_size=cfg.map.chunk_size,
+            )
+            return RunArtifactWriter(
+                run_id=run_id, root_dir=self._artifact_root, manifest=manifest,
+            )
+        except Exception as exc:
+            logger.warning("[%s] artifact writer setup failed: %s", pmcid, exc)
+            return None
 
     # ── Internal helpers ────────────────────────────────────────────────────────
 

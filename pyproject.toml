@@ -6,6 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "nlp-histo"
 version = "0.1.0"
 
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s %(levelname)s %(name)s %(message)s"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["pipeline*", "database*", "parsers*", "named_entity_recognition*"]

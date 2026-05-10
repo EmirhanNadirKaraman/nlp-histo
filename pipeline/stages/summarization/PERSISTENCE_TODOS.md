@@ -1,5 +1,15 @@
 # Summarization persistence — open TODOs
 
+> **2026-05-10 update**: batch path now writes the full artifact layout via
+> `BatchSummarizationRunner.finalize()` and runs the modern post-MAP chain
+> (NORMALIZE → GROUP → CANONICALIZE → RELATE → RESOLVE). Original "batch
+> persistence missing" item is **CLOSED**. Stage persisters live as free
+> functions in `persistence.py` and are shared by both runners. DB
+> persistence (`Sum*` tables) for batch mode remains a TODO — file artifacts
+> only today.
+
+
+
 Tracks gaps in `persistence.py` / runner integration. Each item is "decide
 whether to do, then do or close". Source files cited inline.
 
