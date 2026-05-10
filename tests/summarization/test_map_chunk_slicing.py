@@ -40,7 +40,7 @@ def _make_stage() -> MapStage:
 @patch("pipeline.stages.summarization.current_stages.map_stage.MapStage._cascade")
 def test_limit_chunks_processes_only_n(mock_cascade):
     stage = _make_stage()
-    mock_cascade.side_effect = lambda chunk, pmcid, chunk_id, **_: _make_summary(chunk_id)
+    mock_cascade.side_effect = lambda chunk, pmcid, chunk_id, **_: (_make_summary(chunk_id), ("test", "mock"))
     sentences = _make_sentences(25)  # 5 chunks of 5
 
     results = stage.process(sentences, "PMC1", limit_chunks=2)
@@ -52,7 +52,7 @@ def test_limit_chunks_processes_only_n(mock_cascade):
 @patch("pipeline.stages.summarization.current_stages.map_stage.MapStage._cascade")
 def test_start_chunk_skips_first_k(mock_cascade):
     stage = _make_stage()
-    mock_cascade.side_effect = lambda chunk, pmcid, chunk_id, **_: _make_summary(chunk_id)
+    mock_cascade.side_effect = lambda chunk, pmcid, chunk_id, **_: (_make_summary(chunk_id), ("test", "mock"))
     sentences = _make_sentences(25)  # 5 chunks of 5
 
     stage.process(sentences, "PMC1", start_chunk=2)
@@ -63,7 +63,7 @@ def test_start_chunk_skips_first_k(mock_cascade):
 @patch("pipeline.stages.summarization.current_stages.map_stage.MapStage._cascade")
 def test_start_and_limit_combined(mock_cascade):
     stage = _make_stage()
-    mock_cascade.side_effect = lambda chunk, pmcid, chunk_id, **_: _make_summary(chunk_id)
+    mock_cascade.side_effect = lambda chunk, pmcid, chunk_id, **_: (_make_summary(chunk_id), ("test", "mock"))
     sentences = _make_sentences(25)  # 5 chunks of 5
 
     stage.process(sentences, "PMC1", start_chunk=1, limit_chunks=2)
@@ -78,7 +78,7 @@ def test_chunk_ids_are_absolute(mock_cascade):
 
     def _side(chunk, pmcid, chunk_id, **_):
         captured_ids.append(chunk_id)
-        return _make_summary(chunk_id)
+        return _make_summary(chunk_id), ("test", "mock")
 
     stage = _make_stage()
     mock_cascade.side_effect = _side

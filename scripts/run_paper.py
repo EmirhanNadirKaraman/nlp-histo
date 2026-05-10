@@ -128,32 +128,41 @@ def build_runner(trace: bool):
         config=SummarizationConfig(),
         output_dir=Path("out/summaries"),
         trace_enabled=trace,
+        voter_specs=[("gemini", GEMINI_L1), ("openai", OPENAI_L1), ("anthropic", CLAUDE_L1)],
+        level2_voter_specs=[("gemini", GEMINI_L2), ("openai", OPENAI_L2), ("anthropic", CLAUDE_L2)],
+        escalation_spec=("anthropic", CLAUDE_L3),
+        cascade_profile="default",
     )
     return runner, token_usage
 
 
 # ── Batch runner ───────────────────────────────────────────────────────────────
 
-def build_batch_runner():
+def build_batch_runner(profile_name: str | None = None):
     from pipeline.stages.summarization.agreement.providers import GeminiEmbedder
     from pipeline.stages.summarization.batch import BatchSummarizationRunner
-    from pipeline.stages.summarization.batch.voter_configs import (
-        CLAUDE_L3, make_l1_voters, make_l2_voters, make_l3_voter,
-    )
+    from pipeline.stages.summarization.batch.voter_configs import get_profile
     from pipeline.stages.summarization.config import SummarizationConfig
-    from pipeline.stages.summarization.llm_providers import anthropic_direct_chat
+    from pipeline.stages.summarization.llm_providers import (
+        anthropic_direct_chat,
+    )
 
-    # REDUCE + RULES still run synchronously (one call per paper at the end)
-    escalation_llm = anthropic_direct_chat(CLAUDE_L3, temperature=0.0)
+    profile = get_profile(profile_name)
+    logger.info("Cascade profile: %s", profile.name)
+
+    # REDUCE + RULES still run synchronously (one call per paper at the end).
+    # The L3 voter model in the active profile is used so smoke profiles stay cheap.
+    escalation_llm = anthropic_direct_chat(profile.l3_voter.model, temperature=0.0)
 
     return BatchSummarizationRunner(
-        l1_voters=make_l1_voters(),
-        l2_voters=make_l2_voters(),
-        l3_model=make_l3_voter(),
+        l1_voters=profile.l1_voters,
+        l2_voters=profile.l2_voters,
+        l3_model=profile.l3_voter,
         escalation_llm=escalation_llm,
         config=SummarizationConfig(),
         output_dir=Path("out/summaries"),
         embed_fn=GeminiEmbedder(),
+        cascade_profile=profile.name,
     )
 
 
@@ -211,7 +220,18 @@ def main():
                         help="Start processing from chunk K (0-based, default 0)")
     parser.add_argument("--poll-interval", type=int, default=60, metavar="S",
                         help="Seconds between batch status polls (default: 60)")
+    parser.add_argument(
+        "--profile", default=None, metavar="NAME",
+        help="Cascade profile (default | smoke_haiku | dev_sonnet). "
+             "Falls back to $NLP_HISTO_PROFILE, then 'default'.",
+    )
     args = parser.parse_args()
+
+    # Make profile available to downstream builders without threading the arg
+    # through every helper. Per voter_configs.get_profile() resolution rules.
+    if args.profile:
+        import os as _os
+        _os.environ["NLP_HISTO_PROFILE"] = args.profile
 
     if args.all:
         pmcids = _all_pmcids()
@@ -224,19 +244,19 @@ def main():
         pmcids = [pmcid]
 
     if args.dry_run:
-        from pipeline.stages.summarization.batch.voter_configs import (
-            make_l1_voters, make_l2_voters, make_l3_voter,
-        )
+        from pipeline.stages.summarization.batch.voter_configs import get_profile
+        profile = get_profile(args.profile)
         mode = "sync" if args.sync else "batch"
-        l1, l2, l3 = make_l1_voters(), make_l2_voters(), make_l3_voter()
-        print(f"PMCIDs: {pmcids}")
-        print(f"Mode:   {mode}")
-        print(f"Trace:  {args.trace} (sync only)")
+        print(f"PMCIDs:  {pmcids}")
+        print(f"Mode:    {mode}")
+        print(f"Profile: {profile.name}")
+        print(f"Trace:   {args.trace} (sync only)")
         print("Models:")
-        for v in l1:
+        for v in profile.l1_voters:
             print(f"  L1  {v.model:<40} (t={v.temperature})  [{v.provider}]")
-        for v in l2:
+        for v in profile.l2_voters:
             print(f"  L2  {v.model:<40} (t={v.temperature})  [{v.provider}]")
+        l3 = profile.l3_voter
         print(f"  L3  {l3.model:<40} (t={l3.temperature})  [{l3.provider}]")
         print("\nEnv vars required: GOOGLE_API_KEY, ANTHROPIC_API_KEY")
         return

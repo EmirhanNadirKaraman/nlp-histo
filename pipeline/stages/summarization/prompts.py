@@ -43,7 +43,15 @@ ONLY extract from: methods, results, discussion, and case descriptions
 </FilterRules>
 
 <StructuredFields>
-For each finding, extract the following fields. Do NOT omit any field. Do NOT leave outcome_entity or direction null if they are clearly inferable from the claim text or verbatim support — only use null when the value is genuinely absent from the text.
+For each finding, ALWAYS include EVERY field below. Never omit a field.
+Use null only for nullable string / object / number fields when the value is genuinely
+absent from the text. Do not use null for relation_type or direction — those have
+explicit "unclear" / "no_direction" values listed below.
+
+For nested objects:
+  - If `scope` is null, omit its sub-fields.
+  - If `scope` is NOT null, include EVERY FindingScope sub-field
+    (use null inside it for individual unknown sub-fields).
 
 subject_entity
   The entity being described, tested, or associated. This is the left-hand side of the relation.
@@ -58,8 +66,13 @@ outcome_entity
   Output null only when no outcome can be identified — not as a default.
 
 relation_type
-  The type of relation. Must be exactly one of the values below. NEVER output null.
-  Use "unclear" only when the relation genuinely does not fit any category.
+  The type of relation. Must be EXACTLY one of:
+    has_feature | expression | prognostic | comparative | demographic | treatment_response | unclear
+  NEVER output null. Use "unclear" only when the relation genuinely does not fit any category.
+
+  IMPORTANT: relation_type uses "demographic" (NO trailing 's').
+             category    uses "demographics" (WITH trailing 's').
+             These are different fields and the spelling differs — do not confuse them.
 
   has_feature        : Entity exhibits, shows, or has a histological or morphological feature.
                        e.g. "idiopathic GA exhibits mucin", "MGA shows no particular pattern",
@@ -77,12 +90,18 @@ relation_type
                        e.g. "R-CHOP achieves CR in 75%", "refractory to conventional therapy"
   unclear            : Relation type genuinely cannot be determined.
 
-direction  (OPTIONAL polarity — output null when not applicable or not inferable)
-  positive : present / expressed / increased / more frequent / better outcome
-  negative : absent / not expressed / decreased / less frequent / worse outcome / inverse
-  absent   : explicitly not present / not seen / lacking / negative staining
-  partial  : focal / patchy / heterogeneous / partial
-  unclear  : indeterminate polarity
+direction
+  Polarity of the relation. Must be EXACTLY one of:
+    positive | negative | absent | partial | unclear | no_direction
+  NEVER output null for this field — use "no_direction" when polarity does not apply.
+
+  positive      : present / expressed / increased / more frequent / better outcome
+  negative      : not expressed / decreased / less frequent / worse outcome / inverse
+  absent        : explicitly not present / not seen / lacking / negative staining
+  partial       : focal / patchy / heterogeneous / partial
+  unclear       : direction should exist but cannot be inferred from the text
+  no_direction  : direction does not apply to this relation
+                  (e.g. demographic age statements, neutral counts, narrative facts)
 
 BAD vs GOOD examples (claim field):
 
@@ -113,7 +132,7 @@ Field mapping examples:
 
   Demographic (demographic):
     "MGA presents in the seventh decade of life"
-      → relation_type: demographic, direction: null
+      → relation_type: demographic, direction: no_direction
     "Women more likely to be affected by GA than men"
       → relation_type: demographic, direction: positive
 
@@ -161,7 +180,7 @@ Return your analysis in this EXACT structure:
       "subject_entity": "<entity_name_or_null>",
       "outcome_entity": "<outcome_name_or_null>",
       "relation_type": "has_feature|expression|prognostic|comparative|demographic|treatment_response|unclear",
-      "direction": "positive|negative|absent|partial|unclear|null",
+      "direction": "positive|negative|absent|partial|unclear|no_direction",
       "scope": {{
         "disease_subtype": "<value_or_null>",
         "cohort_n": <integer_or_null>,

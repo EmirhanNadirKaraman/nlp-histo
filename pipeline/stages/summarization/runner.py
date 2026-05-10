@@ -152,6 +152,10 @@ class SummarizationRunner:
         force_rerun: bool = False,
         run_ner: bool = True,
         run_reduce: bool = False,
+        voter_specs:        list[tuple[str, str]] | None = None,
+        level2_voter_specs: list[tuple[str, str]] | None = None,
+        escalation_spec:    tuple[str, str] | None = None,
+        cascade_profile:    str = "custom",
     ) -> None:
         cfg = config or SummarizationConfig()
         self._output_dir = output_dir
@@ -175,6 +179,10 @@ class SummarizationRunner:
             chunk_overlap=cfg.map.chunk_overlap,
             chunk_workers=cfg.map.chunk_workers,
             scorer=scorer,
+            voter_specs=voter_specs,
+            level2_voter_specs=level2_voter_specs,
+            escalation_spec=escalation_spec,
+            cascade_profile=cascade_profile,
         )
         self._normalize = NormalizeStage()
         self._group = GroupStage()
@@ -544,6 +552,7 @@ class SummarizationRunner:
                     "master_summary": master.model_dump() if master else None,
                     "rules_provenance": rules.model_dump() if rules else None,
                 },
+                "map_run_metadata": self._map.run_metadata_summary(),
                 "rejection_summary": rejection_summary.model_dump(),
             }
             self._finish_pipeline_run(

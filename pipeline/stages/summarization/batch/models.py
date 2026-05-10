@@ -119,6 +119,13 @@ class BatchHandle:
         "l3": {},
     })
 
+    # Run-artifact provenance — populated on submit() and persisted across resumes.
+    schema_version:    str = ""
+    prompt_version:    str = ""
+    stage_name:        str = ""
+    cascade_profile:   str = ""
+    cascade_signature: str = ""
+
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {
@@ -137,6 +144,11 @@ class BatchHandle:
             "l3_chunk_ids": self.l3_chunk_ids,
             "finalized": self.finalized,
             "token_usage": self.token_usage,
+            "schema_version":    self.schema_version,
+            "prompt_version":    self.prompt_version,
+            "stage_name":        self.stage_name,
+            "cascade_profile":   self.cascade_profile,
+            "cascade_signature": self.cascade_signature,
         }
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -167,4 +179,9 @@ class BatchHandle:
             l3_chunk_ids=data.get("l3_chunk_ids", []),
             finalized=data.get("finalized", {}),
             token_usage=token_usage,
+            schema_version=data.get("schema_version", ""),
+            prompt_version=data.get("prompt_version", ""),
+            stage_name=data.get("stage_name", ""),
+            cascade_profile=data.get("cascade_profile", ""),
+            cascade_signature=data.get("cascade_signature", ""),
         )

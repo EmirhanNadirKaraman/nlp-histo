@@ -36,7 +36,13 @@ from ..helpers.contradiction_detector import ContradictionDetector
 from ..helpers.grounding_filter import GroundingFilter
 from ..interfaces.scoring import ChunkDecision
 from ..current_stages.map_stage import _format_sentences
-from ..models import AuditableSummary
+from ..models import (
+    AuditableSummary,
+    MAP_PROMPT_VERSION,
+    MAP_SCHEMA_VERSION,
+    MAP_STAGE_NAME,
+    compute_cascade_signature,
+)
 from ..old_stages.reduce_stage import ReduceStage
 from ..old_stages.rule_stage import RuleStage
 from .dispatch import OPENAI_MAP_TOOL, build_providers, build_requests, parse_result, submit_level
@@ -79,6 +85,7 @@ class BatchSummarizationRunner:
         output_dir: Path = Path("out/summaries"),
         handle_dir: Path | None = None,
         embed_fn=None,
+        cascade_profile: str = "custom",
     ) -> None:
         from ..agreement.providers import OpenAIEmbedder
         cfg = config or SummarizationConfig()
@@ -112,6 +119,15 @@ class BatchSummarizationRunner:
         self._handle_dir = handle_dir or (output_dir / "batch_handles")
         self._handle_dir.mkdir(parents=True, exist_ok=True)
 
+        # Run-artifact provenance — kept on the runner so submit() and
+        # finalize() emit consistent metadata regardless of who calls them.
+        self._cascade_profile = cascade_profile
+        self._cascade_signature = compute_cascade_signature(
+            [(v.provider, v.model) for v in self._l1]
+            + [(v.provider, v.model) for v in self._l2]
+            + [(self._l3.provider, self._l3.model)]
+        )
+
     # ── Public API ──────────────────────────────────────────────────────────────
 
     def handle_path(self, pmcid: str) -> Path:
@@ -140,6 +156,11 @@ class BatchSummarizationRunner:
             l1_strip=[cfg.strip_thinking for cfg in self._l1],
             l2_strip=[cfg.strip_thinking for cfg in self._l2],
             l3_strip=self._l3.strip_thinking,
+            schema_version=MAP_SCHEMA_VERSION,
+            prompt_version=MAP_PROMPT_VERSION,
+            stage_name=MAP_STAGE_NAME,
+            cascade_profile=self._cascade_profile,
+            cascade_signature=self._cascade_signature,
         )
         handle.jobs = submit_level(chunk_map, pmcid, self._l1, level="l1")
         handle.save(self.handle_path(pmcid))
@@ -245,6 +266,16 @@ class BatchSummarizationRunner:
                 "map_chunks": [cs.model_dump() for cs in chunk_summaries],
                 "master_summary": master.model_dump(),
                 "rules_provenance": rules.model_dump(),
+            },
+            "map_run_metadata": {
+                "schema_version":    handle.schema_version or MAP_SCHEMA_VERSION,
+                "prompt_version":    handle.prompt_version or MAP_PROMPT_VERSION,
+                "stage_name":        handle.stage_name or MAP_STAGE_NAME,
+                "cascade_profile":   handle.cascade_profile or self._cascade_profile,
+                "cascade_signature": handle.cascade_signature or self._cascade_signature,
+                "l1_voters": [{"provider": v.provider, "model": v.model} for v in self._l1],
+                "l2_voters": [{"provider": v.provider, "model": v.model} for v in self._l2],
+                "l3_voter":  {"provider": self._l3.provider, "model": self._l3.model},
             },
         }
         out_path = self._summaries_dir / f"{pmcid}.json"

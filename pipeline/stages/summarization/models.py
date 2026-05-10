@@ -9,19 +9,66 @@ from typing import List, Literal
 
 import logging
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from .enum_logging import log_bad_finding, log_enum_observation
 
 _log = logging.getLogger(__name__)
+
+
+# ── Schema / prompt versioning ────────────────────────────────────────────────
+# Bump these whenever the MAP output schema or prompt changes in a
+# behaviour-affecting way. They are included in cache keys / run metadata so
+# stale outputs don't collide with new ones.
+MAP_SCHEMA_VERSION: str = "map_v1_explicit_direction"
+MAP_PROMPT_VERSION: str = "map_prompt_v1_explicit_enums"
+MAP_STAGE_NAME:     str = "map"
+
+
+# ── Cascade signature helper ──────────────────────────────────────────────────
+def compute_cascade_signature(voter_specs: list[tuple[str, str]]) -> str:
+    """Stable short hash of an ordered (provider, model) sequence.
+
+    Used in MAP cache keys and run-artifact metadata so the same chunk under a
+    different cascade configuration is considered a cache miss.
+    """
+    import hashlib
+    import json
+    payload = json.dumps([list(t) for t in voter_specs], separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+class MapRunMetadata(BaseModel):
+    """Provenance attached to every MAP cache entry and run artifact.
+
+    The fields are deliberately strings so they can round-trip through JSON
+    without any custom (de)serialisers. ``cascade_profile`` is the human-
+    readable profile name (``default`` / ``smoke_haiku`` / ``dev_sonnet`` /
+    ``custom``); ``cascade_signature`` is the deterministic content hash that
+    actually drives cache invalidation.
+
+    ``provider`` and ``model`` identify the producer of the *stored* result —
+    in the cascade this is the voter or escalation model whose output was
+    selected, not the cascade as a whole.
+    """
+    schema_version:    str = MAP_SCHEMA_VERSION
+    prompt_version:    str = MAP_PROMPT_VERSION
+    stage_name:        str = MAP_STAGE_NAME
+    provider:          str
+    model:             str
+    cascade_profile:   str = "custom"
+    cascade_signature: str
 
 
 # ── Phase 1: new enums and scope model ────────────────────────────────────────
 
 class DirectionEnum(str, Enum):
-    positive = "positive"
-    negative = "negative"
-    absent   = "absent"
-    partial  = "partial"
-    unclear  = "unclear"
+    positive      = "positive"
+    negative      = "negative"
+    absent        = "absent"
+    partial       = "partial"
+    unclear       = "unclear"
+    no_direction  = "no_direction"
 
 
 class RelationTypeEnum(str, Enum):
@@ -35,16 +82,61 @@ class RelationTypeEnum(str, Enum):
 
 
 
+_SCOPE_FIELDS_DEFAULTS: dict[str, object] = {
+    "disease_subtype":   None,
+    "cohort_n":          None,
+    "assay_method":      None,
+    "biomarker_cutoff":  None,
+    "tissue_site":       None,
+    "treatment_context": None,
+    "endpoint":          None,
+    "study_design":      None,
+    "scope_parsed":      False,
+}
+
+
 class FindingScope(BaseModel):
-    disease_subtype:   str | None = None
-    cohort_n:          int | None = None
-    assay_method:      str | None = None
-    biomarker_cutoff:  str | None = None
-    tissue_site:       str | None = None
-    treatment_context: str | None = None
-    endpoint:          str | None = None
-    study_design:      str | None = None
-    scope_parsed:      bool       = False
+    # No JSON-schema defaults — every sub-field is required when scope is
+    # non-null so the OpenAI strict schema is satisfied. The model is
+    # instructed to emit null for sub-fields it cannot determine.
+    #
+    # Internal Python callers may still construct an empty scope via
+    # ``FindingScope.empty()``; legacy cached payloads with missing keys are
+    # filled in by ``_fill_legacy_defaults`` below.
+    disease_subtype:   str | None
+    cohort_n:          int | None
+    assay_method:      str | None
+    biomarker_cutoff:  str | None
+    tissue_site:       str | None
+    treatment_context: str | None
+    endpoint:          str | None
+    study_design:      str | None
+    scope_parsed:      bool
+
+    @classmethod
+    def empty(cls) -> "FindingScope":
+        return cls(**_SCOPE_FIELDS_DEFAULTS)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_legacy_defaults(cls, data: object) -> object:
+        """Tolerate cached payloads / internal callers that omit sub-fields."""
+        if isinstance(data, dict):
+            for key, default in _SCOPE_FIELDS_DEFAULTS.items():
+                if key not in data:
+                    data[key] = default
+        return data
+
+    @field_validator(
+        "disease_subtype", "assay_method", "biomarker_cutoff",
+        "tissue_site", "treatment_context", "endpoint", "study_design",
+        mode="before",
+    )
+    @classmethod
+    def _empty_string_to_none(cls, v: object) -> object:
+        if v == "null" or v == "":
+            return None
+        return v
 
 
 # ── MAP output ─────────────────────────────────────────────────────────────────
@@ -57,38 +149,95 @@ _CATEGORY_ALIASES: dict[str, str] = {
 class Finding(BaseModel):
     # NOTE: relation_type uses "demographic" (no 's'); category uses "demographics" (with 's').
     # Some models emit the alias — _repair_category_alias normalises it before Pydantic validates.
+    #
+    # Strict-schema invariant: no field has a Pydantic default. Optional fields
+    # are typed as `X | None` so Pydantic emits anyOf:[X,null] and the OpenAI
+    # strict schema can list every property in `required`.
     category: Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"]
     claim: str = Field(description="Atomic, telegraphic medical fact")
     evidence: List[str] = Field(description="Citation IDs, e.g. ['S1|PMC123|456']")
     confidence: Literal["high", "medium", "low"]
     verbatim_support: str = Field(description="Exact quote from source text")
-    # ── Phase 1 additions (optional; populated by updated MAP prompt) ──────────
-    subject_entity:    str | None               = None
-    outcome_entity:    str | None               = None
+    subject_entity:    str | None
+    outcome_entity:    str | None
     relation_type:     RelationTypeEnum
-    direction:         DirectionEnum | None     = None
-    scope:             FindingScope | None      = None
-    grounding_score:   float | None             = None
+    direction:         DirectionEnum
+    scope:             FindingScope | None
+    grounding_score:   float | None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_legacy_defaults(cls, data: object) -> object:
+        """Tolerate cached payloads that omit Phase-1 optional keys."""
+        if isinstance(data, dict):
+            data.setdefault("subject_entity", None)
+            data.setdefault("outcome_entity", None)
+            data.setdefault("scope", None)
+            data.setdefault("grounding_score", None)
+            data.setdefault("relation_type", "unclear")
+            data.setdefault("direction", "no_direction")
+        return data
 
     @field_validator("category", mode="before")
     @classmethod
     def _repair_category_alias(cls, v: object) -> object:
         if isinstance(v, str) and v in _CATEGORY_ALIASES:
-            _log.warning("Repaired category alias %r → %r", v, _CATEGORY_ALIASES[v])
-            return _CATEGORY_ALIASES[v]
+            repaired = _CATEGORY_ALIASES[v]
+            _log.warning("Repaired category alias %r → %r", v, repaired)
+            log_enum_observation(
+                field_name="category",
+                raw_value=v,
+                valid_values=["morphology", "IHC", "molecular_genetics",
+                              "staging", "treatment", "prognosis", "demographics"],
+                coerced_value=repaired,
+                reason="alias_repair",
+            )
+            return repaired
         return v
 
     @field_validator("relation_type", mode="before")
     @classmethod
     def _coerce_invalid_relation_type(cls, v: object) -> object:
-        if isinstance(v, str):
-            valid = {e.value for e in RelationTypeEnum}
-            if v not in valid:
-                _log.warning("Unknown relation_type %r — coercing to 'unclear'", v)
-                return RelationTypeEnum.unclear
+        valid = [e.value for e in RelationTypeEnum]
+        if v is None or v == "null" or v == "":
+            _log.warning("Missing relation_type — coercing to 'unclear'")
+            log_enum_observation(
+                field_name="relation_type", raw_value=v, valid_values=valid,
+                coerced_value=RelationTypeEnum.unclear.value, reason="missing",
+            )
+            return RelationTypeEnum.unclear
+        if isinstance(v, str) and v not in set(valid):
+            _log.warning("Unknown relation_type %r — coercing to 'unclear'", v)
+            log_enum_observation(
+                field_name="relation_type", raw_value=v, valid_values=valid,
+                coerced_value=RelationTypeEnum.unclear.value, reason="unknown_value",
+            )
+            return RelationTypeEnum.unclear
         return v
 
-    @field_validator("direction", "scope", "subject_entity", "outcome_entity",
+    @field_validator("direction", mode="before")
+    @classmethod
+    def _coerce_invalid_direction(cls, v: object) -> object:
+        valid = [e.value for e in DirectionEnum]
+        # Old caches and lenient producers may emit null/""/"null" — those mean
+        # "direction does not apply": coerce to no_direction.
+        if v is None or v == "null" or v == "":
+            log_enum_observation(
+                field_name="direction", raw_value=v, valid_values=valid,
+                coerced_value=DirectionEnum.no_direction.value,
+                reason="null_to_no_direction",
+            )
+            return DirectionEnum.no_direction
+        if isinstance(v, str) and v not in set(valid):
+            _log.warning("Unknown direction %r — coercing to 'unclear'", v)
+            log_enum_observation(
+                field_name="direction", raw_value=v, valid_values=valid,
+                coerced_value=DirectionEnum.unclear.value, reason="unknown_value",
+            )
+            return DirectionEnum.unclear
+        return v
+
+    @field_validator("scope", "subject_entity", "outcome_entity",
                      "grounding_score", mode="before")
     @classmethod
     def _null_string_to_none(cls, v: object) -> object:
@@ -121,6 +270,7 @@ class AuditableSummary(BaseModel):
                 clean.append(item)
             except Exception as exc:
                 _log.warning("Dropping malformed finding: %s", exc)
+                log_bad_finding(raw=item, error=str(exc))
         return clean
 
 

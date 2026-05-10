@@ -1,18 +1,32 @@
 """
 Disk-backed cache for MAP, REDUCE, and RULE outputs.
 
-Keys are derived from text_element_ids (deterministic, collision-free).
-The cache survives kernel restarts and avoids redundant LLM calls when
-rerunning the pipeline on the same data.
+The MAP cache key is keyed on (input_hash, schema_version, prompt_version,
+stage_name, cascade_signature) so a schema/prompt bump or a cascade reshuffle
+naturally invalidates stale entries. Each MAP entry stores the run metadata
+alongside the result (``{"metadata": {...}, "result": {...}}``).
+
+REDUCE / RULE caches are unrelated legacy caches; they retain the old
+key shape. TODO(task-1 follow-up): version-tag those too once their prompts
+are bumped.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
 from typing import Optional
 
-from .models import AuditableSummary, ConsolidatedSummary, ExtractedRules
+from .models import (
+    AuditableSummary,
+    ConsolidatedSummary,
+    ExtractedRules,
+    MAP_PROMPT_VERSION,
+    MAP_SCHEMA_VERSION,
+    MAP_STAGE_NAME,
+    MapRunMetadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +35,15 @@ class PipelineCache:
     """
     Three-tier cache (map / reduce / rule) persisted as a single JSON file.
 
-    Cache key design
-    ----------------
-    MAP   → sorted text_element_ids of the chunk (unique by DB constraint)
+    MAP key components
+    ------------------
+    schema_version + prompt_version + stage_name + cascade_signature + input_hash
+
+    where ``input_hash = sha256(sorted(text_element_ids))`` is the chunk
+    identity. The cascade signature is a stable hash of the ordered
+    (provider, model) sequence used at L1+L2+L3 (see
+    ``models.compute_cascade_signature``).
+
     REDUCE → pmcid + sorted chunk_ids of inputs
     RULE   → pmcid + sorted text_element_ids from the consolidated summary
     """
@@ -64,9 +84,24 @@ class PipelineCache:
     # ── Key builders ───────────────────────────────────────────────────────────
 
     @staticmethod
-    def _map_key(sentences: list[dict]) -> str:
+    def _input_hash(sentences: list[dict]) -> str:
         ids = sorted(s.get("text_element_id", 0) for s in sentences)
-        return ",".join(map(str, ids))
+        payload = ",".join(map(str, ids)).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()[:16]
+
+    @staticmethod
+    def _map_key(sentences: list[dict], metadata: MapRunMetadata) -> str:
+        """Deterministic versioned key for one MAP chunk.
+
+        Format: ``{schema_version}|{prompt_version}|{stage}|{cascade}|{input_hash}``
+        """
+        return "|".join((
+            metadata.schema_version,
+            metadata.prompt_version,
+            metadata.stage_name,
+            metadata.cascade_signature,
+            PipelineCache._input_hash(sentences),
+        ))
 
     @staticmethod
     def _reduce_key(summaries: list, pmcid: str) -> str:
@@ -87,16 +122,43 @@ class PipelineCache:
 
     # ── MAP ────────────────────────────────────────────────────────────────────
 
-    def get_map(self, sentences: list[dict]) -> Optional[AuditableSummary]:
-        key = self._map_key(sentences)
-        if key in self._map:
-            self._hits["map"] += 1
-            return AuditableSummary(**self._map[key])
-        self._misses["map"] += 1
-        return None
+    def get_map(
+        self,
+        sentences: list[dict],
+        metadata: MapRunMetadata,
+    ) -> Optional[AuditableSummary]:
+        """Versioned MAP cache lookup.
 
-    def set_map(self, sentences: list[dict], result: AuditableSummary) -> None:
-        self._map[self._map_key(sentences)] = result.model_dump()
+        Returns a hit only when the stored entry's ``metadata`` matches the
+        caller's ``metadata`` exactly. Old un-wrapped entries are always
+        treated as misses (they will be overwritten on the next ``set_map``).
+        """
+        key = self._map_key(sentences, metadata)
+        entry = self._map.get(key)
+        if entry is None or "result" not in entry or "metadata" not in entry:
+            self._misses["map"] += 1
+            return None
+        # Belt-and-braces: the key includes versions, but if a future bug
+        # writes mismatched metadata under the same key, fail closed.
+        stored_meta = entry["metadata"]
+        for field in ("schema_version", "prompt_version", "stage_name",
+                      "cascade_signature"):
+            if stored_meta.get(field) != getattr(metadata, field):
+                self._misses["map"] += 1
+                return None
+        self._hits["map"] += 1
+        return AuditableSummary(**entry["result"])
+
+    def set_map(
+        self,
+        sentences: list[dict],
+        result: AuditableSummary,
+        metadata: MapRunMetadata,
+    ) -> None:
+        self._map[self._map_key(sentences, metadata)] = {
+            "metadata": metadata.model_dump(),
+            "result":   result.model_dump(),
+        }
 
     # ── REDUCE ─────────────────────────────────────────────────────────────────
 

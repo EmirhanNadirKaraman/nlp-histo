@@ -19,34 +19,141 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _MAP_PROMPT = ChatPromptTemplate([("system", _MAP_SYSTEM), ("user", _MAP_USER)])
 
 
-def _enforce_strict_schema(schema: dict) -> None:
-    """Recursively make a JSON schema compatible with OpenAI strict mode.
+def _add_additional_properties_false(schema: dict) -> None:
+    """Recursively set ``additionalProperties: false`` on every object schema.
 
-    Strict mode requires on every object:
-      1. additionalProperties: false
-      2. required lists every key in properties (optional fields use anyOf with null)
+    Walks ``properties``, ``items``, ``anyOf``/``oneOf``/``allOf``, and
+    ``$defs``/``definitions`` so nested object schemas are all covered.
     """
-    if schema.get("type") == "object":
-        schema.setdefault("additionalProperties", False)
+    if not isinstance(schema, dict):
+        return
+    if schema.get("type") == "object" or "properties" in schema:
+        schema["additionalProperties"] = False
+        for prop in schema.get("properties", {}).values():
+            _add_additional_properties_false(prop)
+    if "items" in schema:
+        _add_additional_properties_false(schema["items"])
+    for key in ("anyOf", "oneOf", "allOf"):
+        for sub in schema.get(key, []):
+            _add_additional_properties_false(sub)
+    for defn in schema.get("$defs", {}).values():
+        _add_additional_properties_false(defn)
+    for defn in schema.get("definitions", {}).values():
+        _add_additional_properties_false(defn)
+
+
+_STRIP_KEYS = ("title", "default", "examples", "example")
+
+
+def _strip_schema_keys(schema: dict) -> None:
+    """Recursively drop keys that confuse OpenAI strict mode (titles/defaults/examples)."""
+    if not isinstance(schema, dict):
+        return
+    for k in _STRIP_KEYS:
+        schema.pop(k, None)
+    for prop in schema.get("properties", {}).values():
+        _strip_schema_keys(prop)
+    if "items" in schema:
+        _strip_schema_keys(schema["items"])
+    for key in ("anyOf", "oneOf", "allOf"):
+        for sub in schema.get(key, []):
+            _strip_schema_keys(sub)
+    for defn in schema.get("$defs", {}).values():
+        _strip_schema_keys(defn)
+    for defn in schema.get("definitions", {}).values():
+        _strip_schema_keys(defn)
+
+
+def _enforce_required_all_keys(schema: dict) -> None:
+    """For every object schema, set ``required`` to every property key."""
+    if not isinstance(schema, dict):
+        return
+    if schema.get("type") == "object" or "properties" in schema:
         props = schema.get("properties", {})
         if props:
             schema["required"] = list(props.keys())
         for prop in props.values():
-            _enforce_strict_schema(prop)
+            _enforce_required_all_keys(prop)
     if "items" in schema:
-        _enforce_strict_schema(schema["items"])
+        _enforce_required_all_keys(schema["items"])
     for key in ("anyOf", "oneOf", "allOf"):
         for sub in schema.get(key, []):
-            _enforce_strict_schema(sub)
+            _enforce_required_all_keys(sub)
     for defn in schema.get("$defs", {}).values():
-        _enforce_strict_schema(defn)
+        _enforce_required_all_keys(defn)
+    for defn in schema.get("definitions", {}).values():
+        _enforce_required_all_keys(defn)
+
+
+def validate_openai_strict_schema(schema: dict, path: str = "$") -> list[str]:
+    """Recursively check OpenAI strict-mode invariants.
+
+    Returns a list of human-readable violation messages. Empty list = valid.
+
+    Invariants checked on every object schema:
+      1. ``additionalProperties`` is explicitly ``False``.
+      2. ``required`` exists and lists every key in ``properties``.
+      3. ``required`` does not name any key absent from ``properties``.
+    """
+    errors: list[str] = []
+    if not isinstance(schema, dict):
+        return errors
+
+    is_object = schema.get("type") == "object" or "properties" in schema
+    if is_object:
+        if schema.get("additionalProperties", None) is not False:
+            errors.append(f"{path}: additionalProperties must be false")
+        props = schema.get("properties", {}) or {}
+        required = schema.get("required", [])
+        if not isinstance(required, list):
+            errors.append(f"{path}: required must be a list")
+            required = []
+        prop_keys = set(props.keys())
+        req_keys = set(required)
+        missing = prop_keys - req_keys
+        if missing:
+            errors.append(
+                f"{path}: properties missing from required: {sorted(missing)}"
+            )
+        unknown = req_keys - prop_keys
+        if unknown:
+            errors.append(
+                f"{path}: required references unknown properties: {sorted(unknown)}"
+            )
+        for k, prop in props.items():
+            errors.extend(validate_openai_strict_schema(prop, f"{path}.{k}"))
+
+    if "items" in schema:
+        errors.extend(validate_openai_strict_schema(schema["items"], f"{path}[]"))
+    for key in ("anyOf", "oneOf", "allOf"):
+        for i, sub in enumerate(schema.get(key, [])):
+            errors.extend(validate_openai_strict_schema(sub, f"{path}.{key}[{i}]"))
+    for name, defn in schema.get("$defs", {}).items():
+        errors.extend(validate_openai_strict_schema(defn, f"$defs.{name}"))
+    for name, defn in schema.get("definitions", {}).items():
+        errors.extend(validate_openai_strict_schema(defn, f"definitions.{name}"))
+    return errors
 
 
 def _build_openai_tool() -> dict:
+    """Build the OpenAI strict tool schema for AuditableSummary.
+
+    Raises ``ValueError`` locally if the produced schema violates OpenAI
+    strict-mode invariants — preferable to a remote batch failure later.
+    """
     from langchain_core.utils.function_calling import convert_to_openai_tool
     tool = convert_to_openai_tool(AuditableSummary)
     tool["function"]["strict"] = True
-    _enforce_strict_schema(tool["function"]["parameters"])
+    params = tool["function"]["parameters"]
+    _strip_schema_keys(params)
+    _add_additional_properties_false(params)
+    _enforce_required_all_keys(params)
+    errors = validate_openai_strict_schema(params)
+    if errors:
+        raise ValueError(
+            "OpenAI strict schema validation failed for AuditableSummary:\n  - "
+            + "\n  - ".join(errors)
+        )
     return tool
 
 

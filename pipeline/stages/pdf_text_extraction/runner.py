@@ -555,7 +555,6 @@ def main() -> None:
     from pipeline.stages.pdf_text_extraction.batch import ParallelBatchRunner
     ParallelBatchRunner(cfg, max_workers=4).run(
         pdf_dir=Path("files/organized_pdfs"),
-        max_docs=5,
     )
 
 

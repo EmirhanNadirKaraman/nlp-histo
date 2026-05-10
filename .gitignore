@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Pipeline JSONL logs (enum observations, bad findings)
+/logs/
+
 # C extensions
 *.so
 

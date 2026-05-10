@@ -27,7 +27,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..agreement import AgreementChecker, EmbeddingScorer, MapOutputScorer
 from ..cache import PipelineCache
 from ..llm_errors import is_non_retryable_llm_error
-from ..models import AuditableSummary
+from ..models import (
+    AuditableSummary,
+    MapRunMetadata,
+    compute_cascade_signature,
+)
 from ..prompts import build_map_chain
 from ..routing import MapOutputRouter
 from ..routing.routing_dataset import RoutingDataset, RoutingRecord
@@ -50,6 +54,22 @@ def _format_sentences(chunk: list[dict]) -> str:
         text = item.get("sentence", "").strip()
         lines.append(f"[S{i}|{pmcid}|{te_id}] {text}")
     return "\n".join(lines)
+
+
+def _llm_fallback_spec(llm) -> tuple[str, str]:
+    """Best-effort (provider, model) extraction when caller did not pass specs.
+
+    The langchain chat clients usually expose ``model_name`` or ``model``;
+    we fall back to the class name. The signature is informational; cache
+    correctness depends on callers passing real specs.
+    """
+    name = getattr(llm, "model_name", None) or getattr(llm, "model", None) or type(llm).__name__
+    provider = type(llm).__name__.replace("Chat", "").lower() or "unknown"
+    return (provider, str(name))
+
+
+def _llm_fallback_specs(llms: list) -> list[tuple[str, str]]:
+    return [_llm_fallback_spec(llm) for llm in llms]
 
 
 def _voter_grounding(v: AuditableSummary) -> tuple[float, float]:
@@ -102,6 +122,10 @@ class MapStage:
         scorer: MapOutputScorer | None = None,
         router: MapOutputRouter | None = None,
         routing_collector: RoutingDataset | None = None,
+        voter_specs:        list[tuple[str, str]] | None = None,
+        level2_voter_specs: list[tuple[str, str]] | None = None,
+        escalation_spec:    tuple[str, str] | None = None,
+        cascade_profile:    str = "custom",
     ) -> None:
         if not voter_llms:
             raise ValueError("voter_llms must contain at least one LLM.")
@@ -122,6 +146,54 @@ class MapStage:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self._chunk_workers = chunk_workers
+
+        # ── Cascade provenance for cache keys / run artifacts ─────────────────
+        # Best-effort fallback: when callers don't pass voter_specs we still
+        # produce a cascade_signature, but it's based on type+id rather than
+        # provider/model so it won't be cross-process stable.
+        self._voter_specs = list(voter_specs)        if voter_specs        else _llm_fallback_specs(voter_llms)
+        self._l2_specs    = list(level2_voter_specs) if level2_voter_specs else _llm_fallback_specs(level2_voter_llms)
+        self._l3_spec     = escalation_spec          if escalation_spec    else _llm_fallback_spec(escalation_llm)
+        self._cascade_profile = cascade_profile
+        self._cascade_signature = compute_cascade_signature(
+            self._voter_specs + self._l2_specs + [self._l3_spec]
+        )
+
+    # ── Run-metadata helpers ────────────────────────────────────────────────────
+
+    def _make_metadata(self, provider: str, model: str) -> MapRunMetadata:
+        return MapRunMetadata(
+            provider=provider,
+            model=model,
+            cascade_profile=self._cascade_profile,
+            cascade_signature=self._cascade_signature,
+        )
+
+    def cascade_lookup_metadata(self) -> MapRunMetadata:
+        """Metadata used for *cache lookups* — provider/model are placeholders.
+
+        Cache keys do NOT include provider/model (they include cascade_signature
+        instead) so any (provider, model) pair works for lookups.
+        """
+        provider, model = self._voter_specs[0] if self._voter_specs else ("unknown", "unknown")
+        return self._make_metadata(provider, model)
+
+    def run_metadata_summary(self) -> dict:
+        """Canonical run-metadata block for inclusion in MAP run artifacts.
+
+        Lists every cascade member (L1 voters + L2 voters + L3) so a downstream
+        consumer can recover the exact configuration that produced the run.
+        """
+        return {
+            "schema_version":    self.cascade_lookup_metadata().schema_version,
+            "prompt_version":    self.cascade_lookup_metadata().prompt_version,
+            "stage_name":        self.cascade_lookup_metadata().stage_name,
+            "cascade_profile":   self._cascade_profile,
+            "cascade_signature": self._cascade_signature,
+            "l1_voters":         [{"provider": p, "model": m} for p, m in self._voter_specs],
+            "l2_voters":         [{"provider": p, "model": m} for p, m in self._l2_specs],
+            "l3_voter":          {"provider": self._l3_spec[0], "model": self._l3_spec[1]},
+        }
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -172,10 +244,11 @@ class MapStage:
         uncached: list[tuple[int, list[dict]]] = []
         cache_hit_indices: list[int] = []
 
+        lookup_md = self.cascade_lookup_metadata()
         for idx, chunk in enumerate(chunks):
             abs_idx = start_chunk + idx  # absolute position in the full paper
             if cache:
-                hit = cache.get_map(chunk)
+                hit = cache.get_map(chunk, lookup_md)
                 if hit:
                     # Always assign chunk_id from current position — cached
                     # chunk_id may be stale (e.g. from a different run or paper).
@@ -215,13 +288,13 @@ class MapStage:
         total_chunks = len(chunks)
         n_cached = len(cache_hit_indices)
 
-        def _process_chunk(args: tuple) -> tuple[int, AuditableSummary | None, float]:
+        def _process_chunk(args: tuple):
             idx, chunk = args
             chunk_id = f"C{start_chunk + idx + 1}"
             t_chunk = time.monotonic()
-            result = self._cascade(chunk, pmcid, chunk_id, collector=collector)
+            result, producer = self._cascade(chunk, pmcid, chunk_id, collector=collector)
             elapsed_ms = (time.monotonic() - t_chunk) * 1000
-            return idx, result, elapsed_ms
+            return idx, result, producer, elapsed_ms
 
         with ThreadPoolExecutor(max_workers=self._chunk_workers) as pool:
             futures = {pool.submit(_process_chunk, (idx, chunk)): (pos, idx, chunk)
@@ -229,7 +302,7 @@ class MapStage:
             for future in as_completed(futures):
                 pos, idx, chunk = futures[future]
                 chunk_id = f"C{start_chunk + idx + 1}"
-                idx_result, result, elapsed_ms = future.result()
+                idx_result, result, producer, elapsed_ms = future.result()
                 n_findings = len(result.findings) if result else 0
                 logger.info(
                     "[%s] MAP chunk %s/%s done (chunk_id=%s) — %d findings  [%.0fms]",
@@ -237,7 +310,8 @@ class MapStage:
                 )
                 results[idx_result] = result
                 if cache and result is not None:
-                    cache.set_map(chunk, result)
+                    prov, model = producer or ("unknown", "unknown")
+                    cache.set_map(chunk, result, self._make_metadata(prov, model))
 
         live_results = [r for r in results if r is not None]
 
@@ -279,7 +353,13 @@ class MapStage:
         pmcid: str,
         chunk_id: str,
         collector=None,  # TraceCollector | None
-    ) -> AuditableSummary | None:
+    ) -> tuple[AuditableSummary | None, tuple[str, str] | None]:
+        """Run the cascade and return ``(result, producer_spec)``.
+
+        ``producer_spec`` is a ``(provider, model)`` tuple identifying which
+        voter / model produced the kept result, so MAP cache entries and run
+        artifacts can carry accurate provenance. ``None`` when no result.
+        """
         inp = {
             "pmcid": pmcid,
             "chunk_id": chunk_id,
@@ -294,6 +374,7 @@ class MapStage:
         _escalated = False
         _escalation_level = 1  # 1=L1 kept, 2=L2 kept, 3=L3 used
         _voter_contexts = None  # list[VoterContext] | None — from router
+        _producer: tuple[str, str] | None = None
 
         # ── Grounding-first router path ─────────────────────────────────────
         if self._router is not None:
@@ -330,6 +411,8 @@ class MapStage:
                     < len(decision.valid_voter_indices)
                     else None
                 )
+                if best_eligible_idx is not None and best_eligible_idx < len(self._voter_specs):
+                    _producer = self._voter_specs[best_eligible_idx]
             else:
                 # Router path escalates L1→L3 directly (no L2 step)
                 _escalated = True
@@ -340,6 +423,7 @@ class MapStage:
                         chunk_id,
                     )
                 result = self._escalation_chain.invoke(inp)
+                _producer = self._l3_spec
                 if decision.valid_voter_indices:
                     valid = [voters[i] for i in decision.valid_voter_indices]
                     best_eligible = self._agreement.best(
@@ -400,6 +484,9 @@ class MapStage:
             if bundle.decision == ChunkDecision.KEEP:
                 logger.debug("Chunk %s: L1 %s → voters accepted", chunk_id, bundle.decision)
                 result = self._agreement.best(voters, bundle=bundle)
+                if (bundle.best_index is not None
+                        and bundle.best_index < len(self._voter_specs)):
+                    _producer = self._voter_specs[bundle.best_index]
             else:
                 # Level 2: mid-tier voters
                 logger.debug("Chunk %s: L1 %s → escalating to L2", chunk_id, bundle.decision)
@@ -413,12 +500,16 @@ class MapStage:
                 if l2_bundle.decision == ChunkDecision.KEEP:
                     logger.debug("Chunk %s: L2 %s → voters accepted", chunk_id, l2_bundle.decision)
                     result = self._agreement.best(l2_voters, bundle=l2_bundle)
+                    if (l2_bundle.best_index is not None
+                            and l2_bundle.best_index < len(self._l2_specs)):
+                        _producer = self._l2_specs[l2_bundle.best_index]
                 else:
                     # Level 3: final escalation model
                     _escalated = True
                     _escalation_level = 3
                     logger.debug("Chunk %s: L2 %s → escalating to L3", chunk_id, l2_bundle.decision)
                     result = self._escalation_chain.invoke(inp)
+                    _producer = self._l3_spec
 
         # ── Build chunk trace ───────────────────────────────────────────────
         if collector is not None:
@@ -456,7 +547,7 @@ class MapStage:
             else:
                 ec["dropped"] += 1
 
-        return result
+        return result, _producer
 
     def _record_chunk_trace(
         self,
