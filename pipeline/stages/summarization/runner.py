@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +59,7 @@ from .helpers.contradiction_detector import ContradictionDetector
 from .helpers.grounding_filter import GroundingFilter
 from .current_stages.group_stage import GroupStage, is_groupable
 from .current_stages.map_stage import MapStage
+from .persistence import RunArtifactWriter, RunManifest
 from .models import (
     CanonicalRule,
     ConsolidatedSummary,
@@ -156,6 +158,8 @@ class SummarizationRunner:
         level2_voter_specs: list[tuple[str, str]] | None = None,
         escalation_spec:    tuple[str, str] | None = None,
         cascade_profile:    str = "custom",
+        artifact_root:      Path | None = None,
+        artifact_run_id:    str | None = None,
     ) -> None:
         cfg = config or SummarizationConfig()
         self._output_dir = output_dir
@@ -215,6 +219,13 @@ class SummarizationRunner:
 
         self._trace_enabled = trace_enabled
         self.trace_dir: Path = trace_dir or (output_dir / "traces")
+
+        # Filesystem artifact persistence — disabled when artifact_root is None.
+        # When enabled, every stage output is mirrored to runs/{run_id}/.
+        self._artifact_root: Path | None = (
+            Path(artifact_root) if artifact_root is not None else None
+        )
+        self._artifact_run_id_override: str | None = artifact_run_id
 
         # Stores post-MAP findings (post-grounding when enabled, raw otherwise).
         # NORMALIZE reads this.
@@ -290,12 +301,18 @@ class SummarizationRunner:
                     flush_collector(collector, self.trace_dir, status="skipped")
                 return existing
 
-        run_id = self._make_run_id(pmcid)
+        run_id = self._artifact_run_id_override or self._make_run_id(pmcid)
         pipeline_run_db_id = self._create_pipeline_run(pmcid, run_id)
 
         collector: TraceCollector | None = (
             self._make_collector(pmcid, run_id) if self._trace_enabled else None
         )
+
+        # Filesystem artifacts — opt-in via artifact_root. Returns None when disabled.
+        writer = self._make_artifact_writer(run_id, pmcid)
+        prev_log_dir = os.environ.get("NLP_HISTO_LOG_DIR")
+        if writer is not None:
+            os.environ["NLP_HISTO_LOG_DIR"] = str(writer.logs_dir())
 
         try:
             t_total = time.perf_counter()
@@ -373,6 +390,11 @@ class SummarizationRunner:
                     f for cs in chunk_summaries for f in cs.findings
                 ]
 
+            # Filesystem MAP artifacts (opt-in)
+            self._persist_map_artifacts(
+                writer, pmcid, chunk_summaries, grounding_rejected,
+            )
+
             # 1b. NORMALIZE — entity normalization + conditional dedup
             n_scored = len(self._scored_map_findings.get(pmcid, []))
             logger.info("[%s] NORMALIZE — %d scored findings", pmcid, n_scored)
@@ -385,6 +407,7 @@ class SummarizationRunner:
             _nf_db_id_map = self._persist_normal_findings(
                 pipeline_run_db_id, pmcid, self._normal_findings[pmcid]
             )
+            self._persist_normalize_artifacts(writer, pmcid, self._normal_findings[pmcid])
 
             # 1c. GROUP — bucket groupable NormalFindings by (subject, outcome, relation_type, category)
             all_normal = self._normal_findings[pmcid]
@@ -400,6 +423,9 @@ class SummarizationRunner:
                         pmcid, time.perf_counter() - t0, len(self._finding_groups[pmcid]))
             _fg_db_id_map = self._persist_finding_groups(
                 pipeline_run_db_id, pmcid, self._finding_groups[pmcid], _nf_db_id_map
+            )
+            self._persist_group_artifacts(
+                writer, pmcid, self._finding_groups[pmcid], non_groupable_nfs,
             )
 
             # 1d. CANONICALIZE — FindingGroup[] → CanonicalRule[]
@@ -421,6 +447,9 @@ class SummarizationRunner:
             _cr_db_id_map = self._persist_canonical_rules(
                 pipeline_run_db_id, pmcid, self._canonical_rules[pmcid], _fg_db_id_map
             )
+            self._persist_canonicalize_artifacts(
+                writer, pmcid, self._canonical_rules[pmcid],
+            )
             self._corpus_relate_incremental(pmcid, self._canonical_rules[pmcid])
 
             # 1e. RELATE — CanonicalRule[] → Relation[]
@@ -437,6 +466,11 @@ class SummarizationRunner:
             self._persist_relations(
                 pipeline_run_db_id, pmcid, self._relations[pmcid], _cr_db_id_map
             )
+            self._persist_relate_artifacts(
+                writer, pmcid,
+                self._relations[pmcid],
+                self._relate_raw_pairs[pmcid],
+            )
 
             # 1f. RESOLVE — CanonicalRule[] + Relation[] → FinalRule[]
             logger.info(
@@ -451,6 +485,9 @@ class SummarizationRunner:
                         pmcid, time.perf_counter() - t0, len(self._final_rules[pmcid]))
             self._persist_final_rules(
                 pipeline_run_db_id, pmcid, self._final_rules[pmcid], _cr_db_id_map
+            )
+            self._persist_resolve_artifacts(
+                writer, pmcid, self._final_rules[pmcid], self._relations[pmcid],
             )
 
             # 2. REDUCE + RULES (optional — disabled by default)
@@ -567,6 +604,9 @@ class SummarizationRunner:
                 collector.add_artifact(result_path, "result_json")
                 flush_collector(collector, self.trace_dir, status="success")
 
+            if writer is not None:
+                writer.finalize("completed")
+
             return result
 
         except KeyboardInterrupt:
@@ -574,13 +614,25 @@ class SummarizationRunner:
             self._finish_pipeline_run(pipeline_run_db_id, "interrupted", error="KeyboardInterrupt")
             if collector is not None:
                 flush_collector(collector, self.trace_dir, status="interrupted", error="KeyboardInterrupt")
+            if writer is not None:
+                writer.finalize("failed", error="KeyboardInterrupt")
             raise
         except Exception as exc:
             logger.exception("[%s] Pipeline failed: %s", pmcid, exc)
             self._finish_pipeline_run(pipeline_run_db_id, "failed", error=str(exc))
             if collector is not None:
                 flush_collector(collector, self.trace_dir, status="error", error=str(exc))
+            if writer is not None:
+                writer.write_error(stage="pipeline", error=str(exc), pmcid=pmcid)
+                writer.finalize("failed", error=str(exc))
             return {"status": "error", "run_id": run_id, "pmcid": pmcid, "error": str(exc)}
+        finally:
+            # Restore NLP_HISTO_LOG_DIR — never leave global env state changed.
+            if writer is not None:
+                if prev_log_dir is None:
+                    os.environ.pop("NLP_HISTO_LOG_DIR", None)
+                else:
+                    os.environ["NLP_HISTO_LOG_DIR"] = prev_log_dir
 
     def process_batch(self, file_data_list: list[dict]) -> list[dict]:
         """
@@ -897,6 +949,347 @@ class SummarizationRunner:
 
         logger.info("[verbatim] replaced %d/%d finding verbatims from DB",
                     replaced, sum(len(cs.findings) for cs in chunk_summaries))
+
+    # ── Filesystem artifact persistence (opt-in) ───────────────────────────────
+
+    def _make_artifact_writer(
+        self, run_id: str, pmcid: str,
+    ) -> RunArtifactWriter | None:
+        """Build the per-run filesystem writer when ``artifact_root`` is set.
+
+        Returns None when persistence is disabled — every artifact helper is a
+        no-op against a None writer. Failure to create the writer is logged but
+        not fatal: filesystem persistence is observational and must never block
+        the pipeline.
+        """
+        if self._artifact_root is None:
+            return None
+        try:
+            from .models import MAP_SCHEMA_VERSION, MAP_PROMPT_VERSION  # noqa: PLC0415
+            cfg = self._cfg
+            map_meta = self._map.run_metadata_summary() or {}
+            cascade_signature = (
+                map_meta.get("cascade_signature")
+                or self._config_snapshot.get("cascade_signature")
+            )
+            # Seed from module constants so the manifest is populated even
+            # when MAP hasn't run yet; richer values from run_metadata_summary
+            # win when present.
+            schema_version = map_meta.get("schema_version") or MAP_SCHEMA_VERSION
+            prompt_version = map_meta.get("prompt_version") or MAP_PROMPT_VERSION
+
+            thresholds = {
+                "grounding_threshold": (
+                    self._grounding.threshold if self._grounding is not None else None
+                ),
+                "entailment_threshold":   cfg.relate.entailment_threshold,
+                "contradiction_threshold": cfg.relate.contradiction_threshold,
+                "map_theta":              cfg.map.theta,
+                "map_reject_theta":       cfg.map.reject_theta,
+                "contradiction_similarity_threshold": cfg.contradiction_similarity_threshold,
+            }
+            models = {
+                "voter_models":         self._config_snapshot.get("voter_models"),
+                "level2_voter_models":  self._config_snapshot.get("level2_voter_models"),
+                "escalation_model":     self._config_snapshot.get("escalation_model"),
+                "scorer":               self._config_snapshot.get("scorer"),
+            }
+            manifest = RunManifest(
+                run_id=run_id,
+                artifact_root=self._artifact_root,
+                timestamp_start=datetime.now(tz=timezone.utc).isoformat(),
+                papers=[pmcid],
+                schema_version=schema_version,
+                prompt_version=prompt_version,
+                cascade_signature=cascade_signature,
+                config=self._config_snapshot,
+                models=models,
+                thresholds=thresholds,
+                chunk_size=cfg.map.chunk_size,
+            )
+            from .persistence import _try_git_commit  # noqa: PLC0415
+            manifest.git_commit = _try_git_commit()
+            writer = RunArtifactWriter(
+                run_id=run_id, root_dir=self._artifact_root, manifest=manifest,
+            )
+            return writer
+        except Exception as exc:
+            logger.warning("[%s] artifact writer setup failed: %s", pmcid, exc)
+            return None
+
+    def _persist_map_artifacts(
+        self,
+        writer: RunArtifactWriter | None,
+        pmcid: str,
+        chunk_summaries: list,
+        grounding_rejected: list,
+    ) -> None:
+        """Write MAP-stage JSONL artifacts. No-op when writer is None."""
+        if writer is None:
+            return
+        writer.add_paper(pmcid)
+        writer.mark_stage_attempted("map")
+        try:
+            # findings.jsonl — one row per finding, with MAP coordinate.
+            # TODO: Finding has no stable finding_id; using (chunk_id, position) as
+            # the v1 MAP coordinate. Add finding_id when introduced.
+            findings_rows: list[dict] = []
+            for cs in chunk_summaries:
+                for pos, f in enumerate(cs.findings):
+                    fd = f.model_dump()
+                    fd["pmcid"] = pmcid
+                    fd["chunk_id"] = cs.chunk_id
+                    fd["position_in_chunk"] = pos
+                    findings_rows.append(fd)
+            writer.write_stage_jsonl(
+                "map", "findings.jsonl", findings_rows, pmcid=pmcid, required=True,
+            )
+
+            chunk_rows = [
+                {
+                    "pmcid": pmcid,
+                    "chunk_id": cs.chunk_id,
+                    "n_findings": len(cs.findings),
+                    "summary_text": cs.summary_text,
+                    "audit_metadata": cs.audit_metadata.model_dump(),
+                }
+                for cs in chunk_summaries
+            ]
+            writer.write_stage_jsonl(
+                "map", "chunks.jsonl", chunk_rows, pmcid=pmcid, required=True,
+            )
+
+            rejected_rows = [
+                {
+                    "pmcid": pmcid,
+                    "chunk_id": chunk_id,
+                    "claim": f.claim,
+                    "category": f.category,
+                    "subject_entity": f.subject_entity,
+                    "outcome_entity": f.outcome_entity,
+                    "relation_type": f.relation_type.value if f.relation_type else None,
+                    "direction": f.direction.value if f.direction else None,
+                    "grounding_score": f.grounding_score,
+                    "evidence": list(f.evidence) if f.evidence else [],
+                    "verbatim_support": f.verbatim_support,
+                    "reason": "grounding_score_below_threshold",
+                }
+                for chunk_id, f in grounding_rejected
+            ]
+            writer.write_stage_jsonl(
+                "map", "rejected_findings.jsonl", rejected_rows, pmcid=pmcid,
+            )
+
+            # bad_findings.jsonl + enum_observations.jsonl come from enum_logging
+            # (NLP_HISTO_LOG_DIR redirected to writer.logs_dir()). We copy them
+            # into the per-PMCID dir for convenience; missing files are OK.
+            self._copy_enum_logs(writer, pmcid)
+
+            writer.mark_stage_completed("map")
+        except Exception as exc:
+            writer.write_error(stage="map", error=str(exc), pmcid=pmcid)
+            raise
+
+    def _copy_enum_logs(self, writer: RunArtifactWriter, pmcid: str) -> None:
+        """Copy logs/{enum_observations,bad_findings}.jsonl into the run dir.
+
+        Best-effort: missing files are silently skipped.
+        """
+        for name in ("enum_observations.jsonl", "bad_findings.jsonl"):
+            src = writer.logs_dir() / name
+            if not src.exists():
+                continue
+            try:
+                dst = writer.stage_path("map", pmcid, name)
+                dst.write_bytes(src.read_bytes())
+            except Exception as exc:
+                logger.debug("[%s] enum log copy failed for %s: %s", pmcid, name, exc)
+
+    def _persist_normalize_artifacts(
+        self,
+        writer: RunArtifactWriter | None,
+        pmcid: str,
+        normal_findings: list,
+    ) -> None:
+        if writer is None:
+            return
+        writer.mark_stage_attempted("normalize")
+        try:
+            writer.write_stage_jsonl(
+                "normalize", "normal_findings.jsonl",
+                [nf.model_dump() for nf in normal_findings],
+                pmcid=pmcid, required=True,
+            )
+            entity_links = [
+                {
+                    "normal_id": nf.normal_id,
+                    "subject_entity": nf.subject_entity,
+                    "subject_cui":    nf.subject_cui,
+                    "outcome_entity": nf.outcome_entity,
+                    "outcome_cui":    nf.outcome_cui,
+                }
+                for nf in normal_findings
+            ]
+            writer.write_stage_jsonl(
+                "normalize", "entity_links.jsonl", entity_links, pmcid=pmcid,
+            )
+            # TODO: NormalFinding.source_finding_ids is reserved but unpopulated.
+            # v1 dedup_trace lists evidence-span coordinates instead.
+            dedup_rows = [
+                {
+                    "normal_id": nf.normal_id,
+                    "n_evidence_spans": len(nf.evidence) if nf.evidence else 0,
+                    "evidence_coords": [
+                        {
+                            "sentence_id": s.sentence_id,
+                            "pmcid": s.pmcid,
+                            "text_element_id": s.text_element_id,
+                        }
+                        for s in (nf.evidence or [])
+                    ],
+                    "source_finding_ids": list(nf.source_finding_ids or []),
+                }
+                for nf in normal_findings
+            ]
+            writer.write_stage_jsonl(
+                "normalize", "dedup_trace.jsonl", dedup_rows, pmcid=pmcid,
+            )
+            writer.mark_stage_completed("normalize")
+        except Exception as exc:
+            writer.write_error(stage="normalize", error=str(exc), pmcid=pmcid)
+            raise
+
+    def _persist_group_artifacts(
+        self,
+        writer: RunArtifactWriter | None,
+        pmcid: str,
+        groups: list,
+        non_groupable_nfs: list,
+    ) -> None:
+        if writer is None:
+            return
+        writer.mark_stage_attempted("group")
+        try:
+            writer.write_stage_jsonl(
+                "group", "groups.jsonl",
+                [g.model_dump() for g in groups],
+                pmcid=pmcid, required=True,
+            )
+            non_groupable_rows = [
+                {
+                    "normal_id": nf.normal_id,
+                    "subject_entity": nf.subject_entity,
+                    "outcome_entity": nf.outcome_entity,
+                    "relation_type": nf.relation_type.value if nf.relation_type else None,
+                    "category": nf.category,
+                    "predicate_text": nf.predicate_text,
+                    "reason": _non_groupable_reason(nf),
+                }
+                for nf in non_groupable_nfs
+            ]
+            writer.write_stage_jsonl(
+                "group", "non_groupable.jsonl", non_groupable_rows, pmcid=pmcid,
+            )
+            writer.mark_stage_completed("group")
+        except Exception as exc:
+            writer.write_error(stage="group", error=str(exc), pmcid=pmcid)
+            raise
+
+    def _persist_canonicalize_artifacts(
+        self,
+        writer: RunArtifactWriter | None,
+        pmcid: str,
+        canonical_rules: list,
+    ) -> None:
+        if writer is None:
+            return
+        writer.mark_stage_attempted("canonicalize")
+        try:
+            writer.write_stage_jsonl(
+                "canonicalize", "canonical_rules.jsonl",
+                [cr.model_dump() for cr in canonical_rules],
+                pmcid=pmcid, required=True,
+            )
+            writer.mark_stage_completed("canonicalize")
+            # TODO: canonicalize_trace.jsonl when the stage exposes per-rule
+            # predicate-selection / fallback / LLM trace.
+        except Exception as exc:
+            writer.write_error(stage="canonicalize", error=str(exc), pmcid=pmcid)
+            raise
+
+    def _persist_relate_artifacts(
+        self,
+        writer: RunArtifactWriter | None,
+        pmcid: str,
+        relations: list,
+        raw_pairs: list,
+    ) -> None:
+        if writer is None:
+            return
+        writer.mark_stage_attempted("relate")
+        try:
+            writer.write_stage_jsonl(
+                "relate", "relations.jsonl",
+                [r.model_dump() for r in relations],
+                pmcid=pmcid, required=True,
+            )
+            writer.write_stage_jsonl(
+                "relate", "raw_pairs.jsonl",
+                [p.model_dump() for p in raw_pairs],
+                pmcid=pmcid, required=True,
+            )
+            # TODO: skipped_pairs.jsonl — RelateStage currently only logs gate
+            # rejection counts, not per-pair details. Once exposed, persist them
+            # here. For now, write an empty file so the layout is uniform.
+            writer.write_stage_jsonl(
+                "relate", "skipped_pairs.jsonl", [], pmcid=pmcid,
+            )
+            writer.mark_stage_completed("relate")
+        except Exception as exc:
+            writer.write_error(stage="relate", error=str(exc), pmcid=pmcid)
+            raise
+
+    def _persist_resolve_artifacts(
+        self,
+        writer: RunArtifactWriter | None,
+        pmcid: str,
+        final_rules: list,
+        relations: list,
+    ) -> None:
+        if writer is None:
+            return
+        writer.mark_stage_attempted("resolve")
+        try:
+            writer.write_stage_jsonl(
+                "resolve", "final_rules.jsonl",
+                [fr.model_dump() for fr in final_rules],
+                pmcid=pmcid, required=True,
+            )
+            score_rows = [
+                {
+                    "final_id":          fr.final_id,
+                    "canonical_id":      fr.canonical_id,
+                    "group_id":          fr.group_id,
+                    "member_normal_ids": list(fr.member_normal_ids or []),
+                    "final_score":       fr.final_score,
+                    "support_count":     fr.support_count,
+                    "contradict_count":  fr.contradict_count,
+                    "scope_qualify_count": fr.scope_qualify_count,
+                    "is_contradicted":   fr.is_contradicted,
+                    "contradicted_by":   list(fr.contradicted_by or []),
+                    "mean_grounding_score": fr.mean_grounding_score,
+                    "finding_count":     fr.finding_count,
+                    "study_coverage":    fr.study_coverage,
+                }
+                for fr in final_rules
+            ]
+            writer.write_stage_jsonl(
+                "resolve", "score_trace.jsonl", score_rows, pmcid=pmcid,
+            )
+            writer.mark_stage_completed("resolve")
+        except Exception as exc:
+            writer.write_error(stage="resolve", error=str(exc), pmcid=pmcid)
+            raise
 
     def _persist_map_findings(
         self,

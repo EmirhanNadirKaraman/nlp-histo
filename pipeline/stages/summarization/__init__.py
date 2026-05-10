@@ -16,6 +16,7 @@ from .config import (
 )
 from .runner import SummarizationRunner
 from .batch import BatchSummarizationRunner, BatchHandle, BatchPhase, VoterBatchConfig
+from .persistence import RunArtifactWriter, RunManifest
 from .models import (
     AuditableSummary,
     ConsolidatedSummary,
@@ -49,4 +50,6 @@ __all__ = [
     "CascadedCompositeScorer",
     "ScoreBundle",
     "ChunkDecision",
+    "RunArtifactWriter",
+    "RunManifest",
 ]
