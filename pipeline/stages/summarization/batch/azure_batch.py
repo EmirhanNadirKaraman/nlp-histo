@@ -112,6 +112,12 @@ class AzureBatchProvider:
             else:
                 content = msg.get("content") or ""
 
-            results.append(BatchResult(custom_id=custom_id, content=content))
+            usage = body.get("usage", {})
+            results.append(BatchResult(
+                custom_id=custom_id,
+                content=content,
+                input_tokens=usage.get("prompt_tokens", 0),
+                output_tokens=usage.get("completion_tokens", 0),
+            ))
 
         return results

@@ -112,11 +112,11 @@ class BatchHandle:
     # Final per-chunk AuditableSummary (serialised) — populated incrementally
     finalized: dict[str, dict] = field(default_factory=dict)
 
-    # Actual token usage accumulated from API responses, keyed by level
-    token_usage: dict[str, dict[str, int]] = field(default_factory=lambda: {
-        "l1": {"input": 0, "output": 0},
-        "l2": {"input": 0, "output": 0},
-        "l3": {"input": 0, "output": 0},
+    # Actual token usage from API responses: level → model_id → {input, output}
+    token_usage: dict[str, dict[str, dict[str, int]]] = field(default_factory=lambda: {
+        "l1": {},
+        "l2": {},
+        "l3": {},
     })
 
     def save(self, path: Path) -> None:
@@ -143,6 +143,14 @@ class BatchHandle:
     @classmethod
     def load(cls, path: Path) -> BatchHandle:
         data = json.loads(path.read_text(encoding="utf-8"))
+        token_usage = data.get("token_usage", {"l1": {}, "l2": {}, "l3": {}})
+        # Detect old flat schema: {"l1": {"input": N, "output": N}, ...}
+        for level_val in token_usage.values():
+            if isinstance(level_val, dict) and "input" in level_val:
+                raise ValueError(
+                    f"Handle at {path} has old token_usage schema (flat per-level). "
+                    "Delete it and re-run to regenerate with per-model tracking."
+                )
         return cls(
             pmcid=data["pmcid"],
             phase=BatchPhase(data["phase"]),
@@ -158,9 +166,5 @@ class BatchHandle:
             l2_chunk_ids=data.get("l2_chunk_ids", []),
             l3_chunk_ids=data.get("l3_chunk_ids", []),
             finalized=data.get("finalized", {}),
-            token_usage=data.get("token_usage", {
-                "l1": {"input": 0, "output": 0},
-                "l2": {"input": 0, "output": 0},
-                "l3": {"input": 0, "output": 0},
-            }),
+            token_usage=token_usage,
         )

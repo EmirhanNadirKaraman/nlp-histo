@@ -3,25 +3,26 @@ Process one or more histopathology papers through the summarization pipeline.
 
 Usage
 -----
-python scripts/run_paper.py PMC1234567
-python scripts/run_paper.py PMC1234567 --trace      # enable JSONL traces
+python scripts/run_paper.py PMC1234567              # batch mode (default)
+python scripts/run_paper.py PMC1234567 --sync       # sync (live) mode
+python scripts/run_paper.py PMC1234567 --trace      # enable JSONL traces (sync only)
 python scripts/run_paper.py PMC1234567 --dry-run    # print config and exit
-python scripts/run_paper.py PMC1234567 --batch      # async batch mode (50 % discount)
 
 # Omit PMCID to auto-sample from eval/data/source_cases.jsonl:
 python scripts/run_paper.py                         # 2 random PMCIDs, seed=42
 python scripts/run_paper.py --sample 3 --seed 7    # 3 random PMCIDs, seed=7
 python scripts/run_paper.py --all                   # all PMCIDs in source_cases.jsonl
-python scripts/run_paper.py --all --batch           # all papers, batch mode
 
 Requires: GOOGLE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -43,7 +44,43 @@ logger = logging.getLogger("run_paper")
 
 # ── Sync runner ────────────────────────────────────────────────────────────────
 
+
+def _make_token_callback(model_id: str, store: dict, lock: threading.Lock):
+    """Return a BaseCallbackHandler that accumulates per-model token counts.
+
+    One callback per LLM; multiple callbacks share the same store dict and lock
+    so totals accumulate safely across threads.
+    """
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    class _CB(BaseCallbackHandler):
+        raise_error = False
+
+        def on_llm_end(self, response, **kwargs) -> None:  # type: ignore[override]
+            for gen_list in response.generations:
+                for gen in gen_list:
+                    msg = getattr(gen, "message", None)
+                    usage = getattr(msg, "usage_metadata", None) if msg is not None else None
+                    if usage is not None:
+                        inp = int(usage.get("input_tokens", 0) or 0)
+                        out = int(usage.get("output_tokens", 0) or 0)
+                    elif response.llm_output:
+                        lu = response.llm_output.get("token_usage", {})
+                        inp = int(lu.get("prompt_tokens", 0) or 0)
+                        out = int(lu.get("completion_tokens", 0) or 0)
+                    else:
+                        continue
+                    if inp or out:
+                        with lock:
+                            entry = store.setdefault(model_id, {"input": 0, "output": 0})
+                            entry["input"]  += inp
+                            entry["output"] += out
+
+    return _CB()
+
+
 def build_runner(trace: bool):
+    """Return (runner, token_usage) where token_usage is {level: {model: {input, output}}}."""
     from pipeline.stages.summarization import SummarizationRunner
     from pipeline.stages.summarization.agreement.providers import OpenAIEmbedder
     from pipeline.stages.summarization.batch.voter_configs import (
@@ -56,21 +93,34 @@ def build_runner(trace: bool):
         openai_direct_chat,
     )
 
+    l1_store: dict = {}
+    l2_store: dict = {}
+    l3_store: dict = {}
+    lock = threading.Lock()
+
+    def with_cb(llm, model_id: str, store: dict):
+        cb = _make_token_callback(model_id, store, lock)
+        return llm.with_config(callbacks=[cb])
+
     voter_llms = [                                        # Level 1 — cheapest
-        gemini_direct_chat(GEMINI_L1,  temperature=0.1),
-        openai_direct_chat(OPENAI_L1,  temperature=0.1),
-        anthropic_direct_chat(CLAUDE_L1, temperature=0.1),
+        with_cb(gemini_direct_chat(GEMINI_L1,    temperature=0.1), GEMINI_L1, l1_store),
+        with_cb(openai_direct_chat(OPENAI_L1,    temperature=0.1), OPENAI_L1, l1_store),
+        with_cb(anthropic_direct_chat(CLAUDE_L1, temperature=0.1), CLAUDE_L1, l1_store),
     ]
 
     level2_voter_llms = [                                # Level 2 — mid-tier
-        gemini_direct_chat(GEMINI_L2,  temperature=0.1),
-        openai_direct_chat(OPENAI_L2,  temperature=0.1),
-        anthropic_direct_chat(CLAUDE_L2, temperature=0.3),
+        with_cb(gemini_direct_chat(GEMINI_L2,    temperature=0.1), GEMINI_L2, l2_store),
+        with_cb(openai_direct_chat(OPENAI_L2,    temperature=0.1), OPENAI_L2, l2_store),
+        with_cb(anthropic_direct_chat(CLAUDE_L2, temperature=0.3), CLAUDE_L2, l2_store),
     ]
 
-    escalation_llm = anthropic_direct_chat(CLAUDE_L3, temperature=0.0)  # Level 3
+    escalation_llm = with_cb(                           # Level 3
+        anthropic_direct_chat(CLAUDE_L3, temperature=0.0), CLAUDE_L3, l3_store
+    )
 
-    return SummarizationRunner(
+    token_usage = {"l1": l1_store, "l2": l2_store, "l3": l3_store}
+
+    runner = SummarizationRunner(
         voter_llms=voter_llms,
         level2_voter_llms=level2_voter_llms,
         escalation_llm=escalation_llm,
@@ -79,6 +129,7 @@ def build_runner(trace: bool):
         output_dir=Path("out/summaries"),
         trace_enabled=trace,
     )
+    return runner, token_usage
 
 
 # ── Batch runner ───────────────────────────────────────────────────────────────
@@ -152,12 +203,14 @@ def main():
     parser.add_argument("--seed",         type=int, default=42,
                         help="Random seed for PMCID sampling (default: 42)")
     parser.add_argument("--trace",        action="store_true", help="Write JSONL traces (sync mode only)")
-    parser.add_argument("--batch",        action="store_true", help="Async batch mode (50 %% discount)")
-    parser.add_argument("--dry-run",      action="store_true", help="Print config and exit without API calls")
-    parser.add_argument("--limit-chunks", type=int, default=None, metavar="N",
+    parser.add_argument("--sync",         action="store_true", help="Use sync (live) mode instead of batch")
+    parser.add_argument("--dry-run",       action="store_true", help="Print config and exit without API calls")
+    parser.add_argument("--limit-chunks",  type=int, default=None, metavar="N",
                         help="Process at most N MAP chunks (useful for cheap iteration)")
-    parser.add_argument("--start-chunk",  type=int, default=0, metavar="K",
+    parser.add_argument("--start-chunk",   type=int, default=0, metavar="K",
                         help="Start processing from chunk K (0-based, default 0)")
+    parser.add_argument("--poll-interval", type=int, default=60, metavar="S",
+                        help="Seconds between batch status polls (default: 60)")
     args = parser.parse_args()
 
     if args.all:
@@ -174,7 +227,7 @@ def main():
         from pipeline.stages.summarization.batch.voter_configs import (
             make_l1_voters, make_l2_voters, make_l3_voter,
         )
-        mode = "batch" if args.batch else "sync"
+        mode = "sync" if args.sync else "batch"
         l1, l2, l3 = make_l1_voters(), make_l2_voters(), make_l3_voter()
         print(f"PMCIDs: {pmcids}")
         print(f"Mode:   {mode}")
@@ -188,13 +241,13 @@ def main():
         print("\nEnv vars required: GOOGLE_API_KEY, ANTHROPIC_API_KEY")
         return
 
-    if args.batch and len(pmcids) > 1:
-        _run_all_batch(pmcids)
+    if not args.sync and len(pmcids) > 1:
+        _run_all_batch(pmcids, poll_interval=args.poll_interval)
     else:
         for pmcid in pmcids:
             logger.info("─── Processing %s (%d/%d) ───", pmcid, pmcids.index(pmcid) + 1, len(pmcids))
-            if args.batch:
-                _run_batch(pmcid)
+            if not args.sync:
+                _run_batch(pmcid, poll_interval=args.poll_interval)
             else:
                 _run_sync(pmcid, trace=args.trace,
                           start_chunk=args.start_chunk, limit_chunks=args.limit_chunks)
@@ -203,7 +256,7 @@ def main():
 def _run_sync(pmcid: str, trace: bool,
               start_chunk: int = 0, limit_chunks: int | None = None) -> None:
     logger.info("Building sync runner…")
-    runner = build_runner(trace=trace)
+    runner, token_usage = build_runner(trace=trace)
 
     logger.info("Loading paper %s from database…", pmcid)
     try:
@@ -225,6 +278,9 @@ def _run_sync(pmcid: str, trace: bool,
     logger.info("Done — %d rules extracted", len(rules))
     logger.info("Result saved to out/summaries/summaries/%s.json", pmcid)
 
+    stats = _escalation_stats_sync(pmcid, token_usage, runner)
+    _save_escalation_report([stats], Path("out/summaries/reports"))
+
     print(f"\n{'─' * 60}")
     print(f"Summary for {pmcid}")
     print(f"{'─' * 60}")
@@ -232,28 +288,52 @@ def _run_sync(pmcid: str, trace: bool,
     print(f"\n{len(rules)} rules extracted.")
 
 
-# Pricing per 1M tokens (USD) — batch input and output rates per level.
-# See voter_configs.py for model assignments.
-# L1: GEMINI_L1 + OPENAI_L1 + CLAUDE_L1   (batch pricing ≈ 50 % off standard)
-# L2: GEMINI_L2 + OPENAI_L2 + CLAUDE_L2
-# L3: CLAUDE_L3
-# Weighted averages across the 3 voters per level.
-_INPUT_PRICE_PER_M = {
-    "l1": (0.10  + 0.075 + 0.80) / 3,   # ≈ 0.325
-    "l2": (0.15  + 0.20  + 0.80) / 3,   # ≈ 0.383
-    "l3":  3.00,
-}
-_OUTPUT_PRICE_PER_M = {
-    "l1": (0.40  + 0.30  + 4.00) / 3,   # ≈ 1.567
-    "l2": (0.60  + 0.80  + 4.00) / 3,   # ≈ 1.800
-    "l3": 15.00,
+# Per-model batch pricing (USD per 1M tokens).
+# Keys match model IDs in voter_configs.py.
+_MODEL_PRICE: dict[str, tuple[float, float]] = {
+    # model_id: (input_per_M, output_per_M) — batch / discounted rates
+    "gemini-2.5-flash-lite":      (0.10,   0.40),
+    "gpt-4o-mini":                (0.075,  0.30),
+    "claude-haiku-4-5-20251001":  (0.80,   4.00),
+    "gemini-2.5-flash":           (0.15,   0.60),
+    "gpt-4.1-mini":               (0.20,   0.80),
+    "claude-sonnet-4-6-20251001": (3.00,  15.00),
 }
 
 
 def _level_cost(usage: dict, level: str) -> float:
-    inp = usage.get(level, {}).get("input", 0)
-    out = usage.get(level, {}).get("output", 0)
-    return (inp * _INPUT_PRICE_PER_M[level] + out * _OUTPUT_PRICE_PER_M[level]) / 1_000_000
+    """Exact cost for one level using per-model pricing.
+
+    usage format: {level: {model_id: {input, output}}}
+    Falls back to 0 for unknown models (logs nothing; add to _MODEL_PRICE to fix).
+    """
+    total = 0.0
+    for model_id, counts in usage.get(level, {}).items():
+        inp = counts.get("input", 0)
+        out = counts.get("output", 0)
+        price = _MODEL_PRICE.get(model_id)
+        if price:
+            total += (inp * price[0] + out * price[1]) / 1_000_000
+    return total
+
+
+def _baseline_cost(usage: dict) -> float:
+    """Counterfactual cost if all chunks had gone straight to L3 (no cascade).
+
+    Estimate per-chunk tokens from L1 totals divided by voter count, then price
+    at the L3 rate.  This is inherently approximate — we never actually sent all
+    chunks to L3 — but it gives a consistent, reproducible savings baseline.
+    """
+    from pipeline.stages.summarization.batch.voter_configs import make_l1_voters
+    n_l1_voters = len(make_l1_voters())
+    l3_model = next(iter(usage.get("l3", {}).keys()), "claude-sonnet-4-6-20251001")
+    l3_price = _MODEL_PRICE.get(l3_model, (3.00, 15.00))
+
+    l1_total_inp = sum(c.get("input", 0) for c in usage.get("l1", {}).values())
+    l1_total_out = sum(c.get("output", 0) for c in usage.get("l1", {}).values())
+    baseline_inp = l1_total_inp / n_l1_voters if n_l1_voters else 0
+    baseline_out = l1_total_out / n_l1_voters if n_l1_voters else 0
+    return (baseline_inp * l3_price[0] + baseline_out * l3_price[1]) / 1_000_000
 
 
 def _escalation_stats(pmcid: str, handle) -> dict:
@@ -268,21 +348,11 @@ def _escalation_stats(pmcid: str, handle) -> dict:
 
     usage = handle.token_usage
     actual_cost = sum(_level_cost(usage, lvl) for lvl in ("l1", "l2", "l3"))
-
-    # Baseline: all chunks processed by L3 only (no cascade), 1 voter per chunk.
-    # L1 token totals are across all 3 voters, so divide by voter count to get
-    # the per-chunk token estimate before scaling to L3 price.
-    from pipeline.stages.summarization.batch.voter_configs import make_l1_voters
-    n_l1_voters = len(make_l1_voters())
-    l1_inp = usage.get("l1", {}).get("input", 0)
-    l1_out = usage.get("l1", {}).get("output", 0)
-    baseline_inp = l1_inp / n_l1_voters
-    baseline_out = l1_out / n_l1_voters
-    baseline_cost = (baseline_inp * _INPUT_PRICE_PER_M["l3"] + baseline_out * _OUTPUT_PRICE_PER_M["l3"]) / 1_000_000
-    saved = baseline_cost - actual_cost
+    saved = _baseline_cost(usage) - actual_cost
 
     return {
         "pmcid":            pmcid,
+        "mode":             "batch",
         "total_chunks":     total,
         "l1_kept":          l1_kept,
         "l2_escalated":     l2_esc,
@@ -298,9 +368,47 @@ def _escalation_stats(pmcid: str, handle) -> dict:
     }
 
 
+def _escalation_stats_sync(pmcid: str, token_usage: dict, runner) -> dict:
+    """Compute cost stats for a sync (real-time) pipeline run.
+
+    token_usage: {level: {model_id: {input, output}}} — same schema as batch.
+    runner: SummarizationRunner — used to read last_map_escalation_counts.
+    """
+    ec = runner.last_map_escalation_counts
+    total     = ec.get("total", 0)
+    l1_kept   = ec.get("l1_kept", 0)
+    l2_esc    = ec.get("l2_escalated", 0)
+    l2_kept   = ec.get("l2_kept", 0)
+    l3_esc    = ec.get("l3_escalated", 0)
+    l3_kept   = ec.get("l3_kept", 0)
+    finalized = ec.get("finalized", 0)
+    dropped   = ec.get("dropped", 0)
+
+    actual_cost = sum(_level_cost(token_usage, lvl) for lvl in ("l1", "l2", "l3"))
+    saved = _baseline_cost(token_usage) - actual_cost
+
+    return {
+        "pmcid":            pmcid,
+        "mode":             "sync",
+        "total_chunks":     total,
+        "l1_kept":          l1_kept,
+        "l2_escalated":     l2_esc,
+        "l2_kept":          l2_kept,
+        "l3_escalated":     l3_esc,
+        "l3_kept":          l3_kept,
+        "finalized":        finalized,
+        "dropped":          dropped,
+        "l1_pct":           round(100 * l1_kept / total, 1) if total else 0.0,
+        "token_usage":      token_usage,
+        "est_cost_usd":     round(actual_cost, 6),
+        "est_saved_usd":    round(saved, 6),
+    }
+
+
 def _save_escalation_report(stats: list[dict], output_dir: Path) -> None:
     totals = {
         "pmcid":         "TOTAL",
+        "mode":          "mixed" if len({s.get("mode") for s in stats}) > 1 else (stats[0].get("mode", "") if stats else ""),
         "total_chunks":  sum(s["total_chunks"]  for s in stats),
         "l1_kept":       sum(s["l1_kept"]       for s in stats),
         "l2_escalated":  sum(s["l2_escalated"]  for s in stats),
@@ -309,45 +417,66 @@ def _save_escalation_report(stats: list[dict], output_dir: Path) -> None:
         "l3_kept":       sum(s["l3_kept"]        for s in stats),
         "finalized":     sum(s["finalized"]      for s in stats),
         "dropped":       sum(s["dropped"]        for s in stats),
-        "est_cost_usd":  round(sum(s["est_cost_usd"]  for s in stats), 4),
-        "est_saved_usd": round(sum(s["est_saved_usd"] for s in stats), 4),
+        "est_cost_usd":  round(sum(s["est_cost_usd"]  for s in stats), 6),
+        "est_saved_usd": round(sum(s["est_saved_usd"] for s in stats), 6),
     }
     t = totals["total_chunks"]
     totals["l1_pct"] = round(100 * totals["l1_kept"] / t, 1) if t else 0.0
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "note": (
+            "est_saved_usd is vs an all-L3 baseline where each chunk is processed "
+            "once by L3 (per-chunk tokens estimated as L1 total / n_l1_voters)."
+        ),
         "papers": stats,
         "totals": totals,
     }
 
     output_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    path = output_dir / f"escalation_report_{ts}.json"
-    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    logger.info("Escalation report saved → %s", path)
 
-    # Print summary table
+    # ── JSON ─────────────────────────────────────────────────────────────────
+    json_path = output_dir / f"escalation_report_{ts}.json"
+    json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    logger.info("Escalation report (JSON) → %s", json_path)
+
+    # ── CSV ──────────────────────────────────────────────────────────────────
+    csv_path = output_dir / f"escalation_report_{ts}.csv"
+    _csv_fields = [
+        "pmcid", "mode", "total_chunks", "l1_kept", "l1_pct",
+        "l2_escalated", "l2_kept", "l3_escalated", "l3_kept",
+        "finalized", "dropped", "est_cost_usd", "est_saved_usd",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=_csv_fields, extrasaction="ignore")
+        w.writeheader()
+        for s in stats:
+            w.writerow(s)
+        w.writerow(totals)
+    logger.info("Escalation report (CSV)  → %s", csv_path)
+
+    # ── Console ───────────────────────────────────────────────────────────────
     print(f"\n{'─' * 80}")
     print("Cascade Escalation Report")
     print(f"{'─' * 80}")
-    print(f"{'PMCID':<45} {'Total':>5} {'L1%':>5} {'→L2':>4} {'→L3':>4} {'Drop':>4} {'Cost$':>7} {'Saved$':>7}")
+    print(f"{'PMCID':<45} {'Md':>2} {'Total':>5} {'L1%':>5} {'→L2':>4} {'→L3':>4} {'Drop':>4} {'Cost$':>8} {'Saved$':>8}")
     print(f"{'─' * 80}")
     for s in stats:
         print(
-            f"{s['pmcid']:<45} {s['total_chunks']:>5} {s['l1_pct']:>4.0f}%"
+            f"{s['pmcid']:<45} {s.get('mode','?')[0]:>2} {s['total_chunks']:>5} {s['l1_pct']:>4.0f}%"
             f" {s['l2_escalated']:>4} {s['l3_escalated']:>4} {s['dropped']:>4}"
-            f" {s['est_cost_usd']:>7.4f} {s['est_saved_usd']:>7.4f}"
+            f" {s['est_cost_usd']:>8.5f} {s['est_saved_usd']:>8.5f}"
         )
     print(f"{'─' * 80}")
     print(
-        f"{'TOTAL':<45} {totals['total_chunks']:>5} {totals['l1_pct']:>4.0f}%"
+        f"{'TOTAL':<45} {'':>2} {totals['total_chunks']:>5} {totals['l1_pct']:>4.0f}%"
         f" {totals['l2_escalated']:>4} {totals['l3_escalated']:>4} {totals['dropped']:>4}"
-        f" {totals['est_cost_usd']:>7.4f} {totals['est_saved_usd']:>7.4f}"
+        f" {totals['est_cost_usd']:>8.5f} {totals['est_saved_usd']:>8.5f}"
     )
     print(f"{'─' * 80}")
-    print(f"\nEstimated cost:  ${totals['est_cost_usd']:.4f}")
-    print(f"Estimated saved: ${totals['est_saved_usd']:.4f} vs all-L3 baseline")
+    print(f"\nActual cost:    ${totals['est_cost_usd']:.5f}")
+    print(f"Saved vs L3-only baseline: ${totals['est_saved_usd']:.5f}")
 
 
 def _run_all_batch(pmcids: list[str], poll_interval: int = 20) -> None:
@@ -432,7 +561,7 @@ def _run_all_batch(pmcids: list[str], poll_interval: int = 20) -> None:
     _save_escalation_report(escalation_stats, Path("out/summaries/reports"))
 
 
-def _run_batch(pmcid: str) -> None:
+def _run_batch(pmcid: str, poll_interval: int = 60) -> None:
     from pipeline.stages.summarization.batch import BatchPhase
     from pipeline.stages.summarization.runner import SummarizationRunner
 
@@ -448,36 +577,24 @@ def _run_batch(pmcid: str) -> None:
 
     handle = runner.load_or_submit(file_data)
 
-    if handle.phase == BatchPhase.COMPLETE:
-        logger.info("[%s] All batches already complete — finalising…", pmcid)
-        _save_escalation_report([_escalation_stats(pmcid, handle)], Path("out/summaries/reports"))
-        result = runner.finalize(handle)
-        rules = result.get("rules", [])
-        print(f"\n{'─' * 60}")
-        print(f"Summary for {pmcid}")
-        print(f"{'─' * 60}")
-        print(result.get("summary", "(no summary)"))
-        print(f"\n{len(rules)} rules extracted.")
-        return
-
-    # Try to advance
-    handle = runner.advance(handle)
-
-    if handle.phase == BatchPhase.COMPLETE:
-        logger.info("[%s] All batches complete — finalising…", pmcid)
-        _save_escalation_report([_escalation_stats(pmcid, handle)], Path("out/summaries/reports"))
-        result = runner.finalize(handle)
-        rules = result.get("rules", [])
-        print(f"\n{'─' * 60}")
-        print(f"Summary for {pmcid}")
-        print(f"{'─' * 60}")
-        print(result.get("summary", "(no summary)"))
-        print(f"\n{len(rules)} rules extracted.")
-    else:
+    while handle.phase != BatchPhase.COMPLETE:
+        handle = runner.advance(handle)
+        if handle.phase == BatchPhase.COMPLETE:
+            break
         n_pending = sum(1 for j in handle.jobs if j.status not in ("completed", "failed"))
-        print(f"\n[{pmcid}] Phase: {handle.phase.value}  |  {n_pending} job(s) still running.")
-        print("Run this command again to check progress and advance when ready.")
-        print(f"Handle: {runner.handle_path(pmcid)}")
+        logger.info("[%s] Phase: %s  |  %d job(s) still running — sleeping %ds…",
+                    pmcid, handle.phase.value, n_pending, poll_interval)
+        time.sleep(poll_interval)
+
+    logger.info("[%s] All batches complete — finalising…", pmcid)
+    _save_escalation_report([_escalation_stats(pmcid, handle)], Path("out/summaries/reports"))
+    result = runner.finalize(handle)
+    rules = result.get("rules", [])
+    print(f"\n{'─' * 60}")
+    print(f"Summary for {pmcid}")
+    print(f"{'─' * 60}")
+    print(result.get("summary", "(no summary)"))
+    print(f"\n{len(rules)} rules extracted.")
 
 
 if __name__ == "__main__":

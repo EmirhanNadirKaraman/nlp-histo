@@ -65,7 +65,7 @@ class Finding(BaseModel):
     # ── Phase 1 additions (optional; populated by updated MAP prompt) ──────────
     subject_entity:    str | None               = None
     outcome_entity:    str | None               = None
-    relation_type:     RelationTypeEnum         = RelationTypeEnum.unclear
+    relation_type:     RelationTypeEnum
     direction:         DirectionEnum | None     = None
     scope:             FindingScope | None      = None
     grounding_score:   float | None             = None

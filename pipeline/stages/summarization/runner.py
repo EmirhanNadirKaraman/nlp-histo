@@ -238,6 +238,11 @@ class SummarizationRunner:
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
+    @property
+    def last_map_escalation_counts(self) -> dict[str, int]:
+        """Escalation counts from the most recent process() call's MAP stage."""
+        return self._map.last_escalation_counts
+
     def process(
         self,
         file_data: dict,

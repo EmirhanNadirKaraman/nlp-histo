@@ -290,14 +290,19 @@ class BatchSummarizationRunner:
             chunk_id = parts[1] if len(parts) > 1 else "unknown"
             by_chunk.setdefault(chunk_id, []).append(res)
 
-        # Store raw content for debugging and accumulate token usage
+        # Store raw content for debugging and accumulate token usage per model
         raw_store = getattr(handle, f"{level}_raw")
-        level_usage = handle.token_usage.setdefault(level, {"input": 0, "output": 0})
+        current_voters = self._l1 if level == "l1" else self._l2
+        level_usage = handle.token_usage.setdefault(level, {})
         for res in raw_results:
             if res.content:
                 raw_store[res.custom_id] = res.content
-            level_usage["input"]  += res.input_tokens
-            level_usage["output"] += res.output_tokens
+            parts = res.custom_id.split("__")
+            voter_idx = int(parts[-1]) if len(parts) >= 4 and parts[-1].isdigit() else 0
+            model_id = current_voters[voter_idx].model if voter_idx < len(current_voters) else "unknown"
+            m = level_usage.setdefault(model_id, {"input": 0, "output": 0})
+            m["input"]  += res.input_tokens
+            m["output"] += res.output_tokens
 
         # ── Pass 1: parse all voter outputs for every chunk ───────────────────
         chunk_voters: dict[str, list[AuditableSummary]] = {}
@@ -402,12 +407,14 @@ class BatchSummarizationRunner:
             chunk_id = parts[1] if len(parts) > 1 else "unknown"
             by_chunk.setdefault(chunk_id, []).append(res)
 
-        l3_usage = handle.token_usage.setdefault("l3", {"input": 0, "output": 0})
+        l3_model = self._l3.model
+        l3_level = handle.token_usage.setdefault("l3", {})
+        l3_m = l3_level.setdefault(l3_model, {"input": 0, "output": 0})
         for res in raw_results:
             if res.content:
                 handle.l3_raw[res.custom_id] = res.content
-            l3_usage["input"]  += res.input_tokens
-            l3_usage["output"] += res.output_tokens
+            l3_m["input"]  += res.input_tokens
+            l3_m["output"] += res.output_tokens
 
         for chunk_id in targets:
             results = by_chunk.get(chunk_id, [])

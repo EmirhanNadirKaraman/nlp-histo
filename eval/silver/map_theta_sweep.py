@@ -236,7 +236,6 @@ def run_prime(cases: list[SourceCase], primer_path: Path = PRIMER_PATH) -> Prime
     handle.save(primer_path)  # write skeleton so partial progress survives a crash
 
     providers = build_providers({k[0] for k in by_prov_model})
-    already_submitted = {j["job_id"] for j in handle.jobs}  # empty on first run
 
     for (prov, model), reqs in by_prov_model.items():
         job = providers[prov].submit(reqs, OPENAI_MAP_TOOL)
@@ -245,6 +244,83 @@ def run_prime(cases: list[SourceCase], primer_path: Path = PRIMER_PATH) -> Prime
         handle.save(primer_path)  # persist after each successful submission
     handle.save(primer_path)
     logger.info("Primer state saved → %s", primer_path)
+    return handle
+
+
+# ── RETRY FAILED ──────────────────────────────────────────────────────────────
+
+def run_retry_failed(primer_path: Path = PRIMER_PATH) -> PrimerHandle:
+    """Resubmit only the failed batch jobs, preserving all already-collected raw results.
+
+    Identifies failed jobs by (provider, model), rebuilds the exact same requests
+    (preserving voter indices so custom_ids are identical to the originals), and
+    replaces the failed job entries in primer.json with the new job IDs.
+    Run ``collect`` afterwards to retrieve results and rebuild the voter cache.
+    """
+    from pipeline.stages.summarization.batch.dispatch import build_requests, build_providers, OPENAI_MAP_TOOL
+    from pipeline.stages.summarization.batch.models import ProviderJob
+
+    handle = PrimerHandle.load(primer_path)
+    L1, L2, L3 = _make_voters()
+
+    # Build (provider, model) → (level, full voter list) so voter indices are preserved
+    level_voter_map: dict[tuple[str, str], tuple[str, list]] = {}
+    for v in L1:
+        level_voter_map[(v.provider, v.model)] = ("l1", L1)
+    for v in L2:
+        level_voter_map[(v.provider, v.model)] = ("l2", L2)
+    level_voter_map[(L3.provider, L3.model)] = ("l3", [L3])
+
+    failed_jobs = [ProviderJob.from_dict(j) for j in handle.jobs if j["status"] == "failed"]
+    if not failed_jobs:
+        logger.info("No failed jobs in primer — nothing to retry.")
+        return handle
+
+    logger.info("Retrying %d failed job(s):", len(failed_jobs))
+    for j in failed_jobs:
+        logger.info("  %s / %s  job_id=%s", j.provider, j.model, j.job_id)
+
+    # Build requests for each failed (provider, model), passing the full voter list
+    # so custom_id voter indices (e.g. __l1__1) match the original submission exactly.
+    by_key: dict[tuple[str, str], list] = {}
+    for job in failed_jobs:
+        key = (job.provider, job.model)
+        if key not in level_voter_map:
+            logger.warning(
+                "Cannot determine level for %s/%s — skipping (add to level_voter_map if needed)",
+                job.provider, job.model,
+            )
+            continue
+        level, voters = level_voter_map[key]
+        for safe_id, cmap in handle.chunk_maps.items():
+            all_reqs = build_requests(cmap, safe_id, voters, level=level)
+            # Keep only requests belonging to this specific (provider, model)
+            by_key.setdefault(key, []).extend(
+                r for r in all_reqs if r.provider == job.provider and r.model == job.model
+            )
+
+    if not by_key:
+        logger.warning("No requests built — aborting retry.")
+        return handle
+
+    for (prov, model), reqs in by_key.items():
+        logger.info("  %s / %s  → %d requests to resubmit", prov, model, len(reqs))
+
+    # Remove failed entries from handle; clear them from retrieved_job_ids too
+    failed_ids = {j.job_id for j in failed_jobs}
+    handle.jobs = [j for j in handle.jobs if j["job_id"] not in failed_ids]
+    handle.retrieved_job_ids = [jid for jid in handle.retrieved_job_ids if jid not in failed_ids]
+    handle.phase = "submitted"
+
+    providers = build_providers({k[0] for k in by_key})
+    for (prov, model), reqs in by_key.items():
+        job = providers[prov].submit(reqs, OPENAI_MAP_TOOL)
+        logger.info("Resubmitted %s/%s: job_id=%s (%d requests)", prov, model, job.job_id, len(reqs))
+        handle.jobs.append(job.to_dict())
+        handle.save(primer_path)  # persist after each submission so a crash loses at most one job
+
+    handle.save(primer_path)
+    logger.info("Primer updated → %s  (run 'collect' to retrieve results)", primer_path)
     return handle
 
 
@@ -649,7 +725,7 @@ def _print_table(rows: list[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="MAP theta sweep harness")
-    parser.add_argument("mode", choices=["prime", "collect", "rebuild-cache", "sweep", "all"])
+    parser.add_argument("mode", choices=["prime", "collect", "rebuild-cache", "retry-failed", "sweep", "all"])
     parser.add_argument("--source",        default=str(SOURCE_PATH))
     parser.add_argument("--silver",        default=str(SILVER_PATH))
     parser.add_argument("--reports",       default=str(REPORTS_DIR))
@@ -706,6 +782,15 @@ def main() -> None:
         print("Voter cache rebuilt from saved primer. Ready to sweep.")
         return
 
+    # ── RETRY FAILED ──
+    if args.mode == "retry-failed":
+        if not primer_path.exists():
+            print(f"No primer found at {primer_path}. Run `prime` first.", file=sys.stderr)
+            sys.exit(1)
+        run_retry_failed(primer_path)
+        print("Failed jobs resubmitted. Run `collect` to retrieve results.")
+        return
+
     # ── COLLECT / poll loop ──
     if args.mode == "collect":
         if not primer_path.exists():
@@ -757,7 +842,8 @@ def main() -> None:
         if args.embedder == "gemini":
             api_key = os.environ.get("GOOGLE_API_KEY")
             if not api_key:
-                print("GOOGLE_API_KEY not set", file=sys.stderr); sys.exit(1)
+                print("GOOGLE_API_KEY not set", file=sys.stderr)
+                sys.exit(1)
             embedder = GeminiEmbedder(api_key)
             embed_cache_path = Path(args.embed_cache) if args.embed_cache else DEFAULT_GEMINI_CACHE_PATH
             embed_cache = EmbeddingCache(embed_cache_path, GEMINI_EMBEDDING_MODEL)
@@ -769,7 +855,8 @@ def main() -> None:
             from pipeline.stages.summarization.agreement.providers import OpenAIEmbedder as AgreementOpenAIEmbedder
             api_key = os.environ.get("OPENAI_API_KEY")
             if not api_key:
-                print("OPENAI_API_KEY not set", file=sys.stderr); sys.exit(1)
+                print("OPENAI_API_KEY not set", file=sys.stderr)
+                sys.exit(1)
             embedder = OpenAIEmbedder(api_key)
             embed_cache_path = Path(args.embed_cache) if args.embed_cache else DEFAULT_CACHE_PATH
             embed_cache = EmbeddingCache(embed_cache_path, EMBEDDING_MODEL)

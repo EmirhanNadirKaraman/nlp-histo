@@ -21,6 +21,7 @@ escalates directly from Level 1 to Level 3.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..agreement import AgreementChecker, EmbeddingScorer, MapOutputScorer
@@ -115,6 +116,8 @@ class MapStage:
         self._escalation_chain = build_map_chain(escalation_llm)
         self._agreement = AgreementChecker(scorer=scorer or EmbeddingScorer(), theta=theta, reject_theta=reject_theta)
         self._router = router
+        self._escalation_lock = threading.Lock()
+        self._last_escalation_counts: dict[str, int] = {}
         self._routing_collector = routing_collector
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -147,6 +150,12 @@ class MapStage:
             None means process all remaining chunks.
         """
         from ..observability.models import ChunkTrace
+
+        with self._escalation_lock:
+            self._last_escalation_counts = {
+                "total": 0, "l1_kept": 0, "l2_escalated": 0, "l2_kept": 0,
+                "l3_escalated": 0, "l3_kept": 0, "finalized": 0, "dropped": 0,
+            }
 
         all_chunks = self._make_chunks(sentences)
         total_paper_chunks = len(all_chunks)
@@ -427,6 +436,26 @@ class MapStage:
                 escalation_level=_escalation_level,
             )
 
+        # ── Escalation counter (thread-safe) ────────────────────────────────
+        with self._escalation_lock:
+            ec = self._last_escalation_counts
+            ec["total"] += 1
+            if result is not None:
+                ec["finalized"] += 1
+                if _escalation_level == 1:
+                    ec["l1_kept"] += 1
+                elif _escalation_level == 2:
+                    ec["l2_escalated"] += 1
+                    ec["l2_kept"] += 1
+                elif _escalation_level == 3:
+                    if self._router is None:
+                        # Legacy cascade: went through L2 before L3
+                        ec["l2_escalated"] += 1
+                    ec["l3_escalated"] += 1
+                    ec["l3_kept"] += 1
+            else:
+                ec["dropped"] += 1
+
         return result
 
     def _record_chunk_trace(
@@ -654,6 +683,12 @@ class MapStage:
             )
 
         return [r for r in results if r is not None], timings  # type: ignore[return-value]
+
+    @property
+    def last_escalation_counts(self) -> dict[str, int]:
+        """Return escalation counters from the most recent process() call."""
+        with self._escalation_lock:
+            return dict(self._last_escalation_counts)
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 

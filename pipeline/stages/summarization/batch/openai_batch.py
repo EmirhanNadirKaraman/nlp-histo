@@ -68,9 +68,18 @@ class OpenAIBatchProvider:
 
     def check(self, job: ProviderJob) -> ProviderJob:
         batch = self._client.batches.retrieve(job.job_id)
-        if batch.status == "completed" and batch.output_file_id:
-            job.status = "completed"
-            job.output_location = batch.output_file_id
+        if batch.status == "completed":
+            if batch.output_file_id:
+                job.status = "completed"
+                job.output_location = batch.output_file_id
+            else:
+                # All requests failed — treat as failed so the runner doesn't hang
+                job.status = "failed"
+                logger.warning(
+                    "OpenAI batch %s completed but output_file_id is None "
+                    "(all %d requests likely failed); error_file_id=%s",
+                    job.job_id, job.request_count, batch.error_file_id,
+                )
         elif batch.status in ("failed", "cancelled", "expired"):
             job.status = "failed"
         else:

@@ -19,10 +19,34 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _MAP_PROMPT = ChatPromptTemplate([("system", _MAP_SYSTEM), ("user", _MAP_USER)])
 
 
+def _enforce_strict_schema(schema: dict) -> None:
+    """Recursively make a JSON schema compatible with OpenAI strict mode.
+
+    Strict mode requires on every object:
+      1. additionalProperties: false
+      2. required lists every key in properties (optional fields use anyOf with null)
+    """
+    if schema.get("type") == "object":
+        schema.setdefault("additionalProperties", False)
+        props = schema.get("properties", {})
+        if props:
+            schema["required"] = list(props.keys())
+        for prop in props.values():
+            _enforce_strict_schema(prop)
+    if "items" in schema:
+        _enforce_strict_schema(schema["items"])
+    for key in ("anyOf", "oneOf", "allOf"):
+        for sub in schema.get(key, []):
+            _enforce_strict_schema(sub)
+    for defn in schema.get("$defs", {}).values():
+        _enforce_strict_schema(defn)
+
+
 def _build_openai_tool() -> dict:
     from langchain_core.utils.function_calling import convert_to_openai_tool
     tool = convert_to_openai_tool(AuditableSummary)
     tool["function"]["strict"] = True
+    _enforce_strict_schema(tool["function"]["parameters"])
     return tool
 
 
