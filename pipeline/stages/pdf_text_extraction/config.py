@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 
+
 class TableDetectorType(str, Enum):
     TATR = "tatr"
     DOCLING = "docling"

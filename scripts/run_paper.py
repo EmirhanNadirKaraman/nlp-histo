@@ -222,8 +222,11 @@ def main():
                         help="Seconds between batch status polls (default: 60)")
     parser.add_argument(
         "--profile", default=None, metavar="NAME",
-        help="Cascade profile (default | smoke_haiku | dev_sonnet). "
-             "Falls back to $NLP_HISTO_PROFILE, then 'default'.",
+        help="Cascade profile: smoke_haiku (default — Haiku-only smoke) | "
+             "dev_sonnet (Haiku→Sonnet→Sonnet, dev quality) | "
+             "final_opus (Haiku→Sonnet→Opus, calibration only — never auto) | "
+             "default (legacy heterogeneous Gemini+OpenAI+Claude). "
+             "Falls back to $NLP_HISTO_PROFILE, then smoke_haiku.",
     )
     args = parser.parse_args()
 

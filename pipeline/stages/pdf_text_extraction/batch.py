@@ -38,6 +38,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from tqdm import tqdm
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from pipeline.stages.pdf_text_extraction.blacklist import BlacklistManager
@@ -193,16 +195,24 @@ class ParallelBatchRunner:
                     for pdf, pmcid in work
                 }
 
-                for future in as_completed(future_to_pmcid):
-                    pmcid = future_to_pmcid[future]
-                    try:
-                        outcome = future.result()
-                    except Exception as exc:  # noqa: BLE001
-                        logger.error("Unhandled worker exception for %s: %s", pmcid, exc)
-                        outcome = "failed"
+                with tqdm(total=len(future_to_pmcid), unit="pdf", desc="PDF extraction") as pbar:
+                    for future in as_completed(future_to_pmcid):
+                        pmcid = future_to_pmcid[future]
+                        try:
+                            outcome = future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            logger.error("Unhandled worker exception for %s: %s", pmcid, exc)
+                            outcome = "failed"
 
-                    with self._stats_lock:
-                        self._stats[outcome] += 1
+                        with self._stats_lock:
+                            self._stats[outcome] += 1
+
+                        pbar.update(1)
+                        pbar.set_postfix(
+                            ok=self._stats["processed"],
+                            fail=self._stats["failed"],
+                            skip=self._stats["skipped"],
+                        )
 
         except KeyboardInterrupt:
             logger.warning("Interrupted — waiting for active threads to finish…")

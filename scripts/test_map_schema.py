@@ -248,10 +248,11 @@ def test_bad_finding_logged_when_dropped():
 
 def test_profiles():
     from pipeline.stages.summarization.batch.voter_configs import (
-        get_profile, list_profiles, CLAUDE_HAIKU, CLAUDE_SONNET,
+        get_profile, list_profiles, CLAUDE_HAIKU, CLAUDE_SONNET, CLAUDE_OPUS,
+        DEFAULT_PROFILE_NAME,
     )
-    assert "smoke_haiku" in list_profiles()
-    assert "dev_sonnet" in list_profiles()
+    for name in ("smoke_haiku", "dev_sonnet", "final_opus", "default"):
+        assert name in list_profiles(), f"profile {name!r} missing"
 
     smoke = get_profile("smoke_haiku")
     assert all(v.model == CLAUDE_HAIKU for v in smoke.l1_voters)
@@ -262,6 +263,51 @@ def test_profiles():
     assert all(v.model == CLAUDE_HAIKU for v in dev.l1_voters)
     assert dev.l2_voters[0].model == CLAUDE_SONNET
     assert dev.l3_voter.model == CLAUDE_SONNET
+
+    final = get_profile("final_opus")
+    assert all(v.model == CLAUDE_HAIKU for v in final.l1_voters)
+    assert final.l2_voters[0].model == CLAUDE_SONNET
+    assert final.l3_voter.model == CLAUDE_OPUS
+
+    # Default fallback must be smoke_haiku, never anything more expensive.
+    assert DEFAULT_PROFILE_NAME == "smoke_haiku"
+
+
+def test_default_profile_is_smoke_haiku_when_unset():
+    """get_profile() with no arg and NLP_HISTO_PROFILE unset → smoke_haiku."""
+    import os as _os
+    from pipeline.stages.summarization.batch.voter_configs import get_profile
+
+    saved = _os.environ.pop("NLP_HISTO_PROFILE", None)
+    try:
+        prof = get_profile(None)
+        assert prof.name == "smoke_haiku", (
+            f"unconfigured fallback must be smoke_haiku, got {prof.name!r}"
+        )
+    finally:
+        if saved is not None:
+            _os.environ["NLP_HISTO_PROFILE"] = saved
+
+
+def test_final_opus_not_auto_selected():
+    """final_opus must require an explicit name — never returned by fallback."""
+    import os as _os
+    from pipeline.stages.summarization.batch.voter_configs import get_profile
+
+    saved = _os.environ.pop("NLP_HISTO_PROFILE", None)
+    try:
+        # No env, no arg
+        assert get_profile().name != "final_opus"
+        # Empty string env (treated as unset by `or` chain)
+        _os.environ["NLP_HISTO_PROFILE"] = ""
+        assert get_profile().name != "final_opus"
+        # Only an explicit name returns it
+        _os.environ["NLP_HISTO_PROFILE"] = "final_opus"
+        assert get_profile().name == "final_opus"
+    finally:
+        _os.environ.pop("NLP_HISTO_PROFILE", None)
+        if saved is not None:
+            _os.environ["NLP_HISTO_PROFILE"] = saved
 
 
 def test_version_constants():
@@ -399,7 +445,9 @@ ALL_TESTS = [
     ("Invalid relation_type → unclear",           test_invalid_relation_type_coerces_to_unclear),
     ("category 'demographic' → 'demographics'",   test_demographic_alias_repair),
     ("Bad finding is logged then dropped",        test_bad_finding_logged_when_dropped),
-    ("Profiles smoke_haiku / dev_sonnet",         test_profiles),
+    ("Profiles smoke_haiku / dev_sonnet / final_opus", test_profiles),
+    ("Default fallback is smoke_haiku",           test_default_profile_is_smoke_haiku_when_unset),
+    ("final_opus is opt-in only",                 test_final_opus_not_auto_selected),
     ("Version constants present",                 test_version_constants),
     ("compute_cascade_signature stable+sensitive", test_cascade_signature_stable_and_sensitive),
     ("MAP cache key includes versions+cascade",   test_map_cache_key_includes_versions_and_cascade),

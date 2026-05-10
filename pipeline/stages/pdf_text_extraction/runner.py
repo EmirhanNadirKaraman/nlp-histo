@@ -534,7 +534,7 @@ def main() -> None:
     cfg.database.enabled = True  # set to True to ingest; db_url auto-loaded from .env
     cfg.text.write_raw_text = True
     cfg.two_pass.enabled = True  # use two-pass ghost-text detection instead of standard masking
-    cfg.runtime.skip_existing_in_db = False
+    cfg.runtime.skip_existing_in_db = True
     cfg.prepare()
 
     # ── Single document ────────────────────────────────────────────────────────

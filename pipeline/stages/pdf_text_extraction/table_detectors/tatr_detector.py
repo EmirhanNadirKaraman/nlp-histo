@@ -65,10 +65,9 @@ class TATRTableDetector:
 
             logger.info("Loading TATR model (%s)…", self._config.model_name)
             _SHARED_PROCESSOR = AutoImageProcessor.from_pretrained(self._config.model_name)
-            _SHARED_MODEL = AutoModelForObjectDetection.from_pretrained(
-                self._config.model_name,
-                device_map="cpu",
-            )
+            device = self._config.device
+            _SHARED_MODEL = AutoModelForObjectDetection.from_pretrained(self._config.model_name)
+            _SHARED_MODEL = _SHARED_MODEL.to(device)
             _SHARED_MODEL.eval()
             logger.info("TATR model loaded.")
 
@@ -111,6 +110,7 @@ class TATRTableDetector:
             img = PILImage.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
             inputs = self._processor(images=img, return_tensors="pt")
+            inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
             with torch.no_grad():
                 outputs = self._model(**inputs)
 

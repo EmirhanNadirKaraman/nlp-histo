@@ -6,6 +6,7 @@ from datetime import datetime
 import threading
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -202,38 +203,33 @@ def batch_process_all_documents(min_chars: int = 50, force: bool = False, limit:
                 for item in work_items
             }
 
-            print(f"Submitted {len(future_to_pmcid)} NER tasks to thread pool\n")
-
             # Collect results as they complete
-            for future in as_completed(future_to_pmcid):
-                pmcid = future_to_pmcid[future]
+            with tqdm(total=len(future_to_pmcid), unit="doc", desc="NER") as pbar:
+                for future in as_completed(future_to_pmcid):
+                    pmcid = future_to_pmcid[future]
 
-                try:
-                    result = future.result()
-                    results.append(result)
+                    try:
+                        result = future.result()
+                        results.append(result)
 
-                    # Status emoji
-                    status_emoji = {
-                        'processed': '✓',
-                        'skipped': '⊘',
-                        'error': '✗'
-                    }.get(result['status'], '?')
+                        # Periodic cache save
+                        if save_interval > 0:
+                            new_since_save = len(entity_cache) - last_save_size
+                            if new_since_save >= save_interval:
+                                with cache_lock:
+                                    save_entity_cache(entity_cache)
+                                    last_save_size = len(entity_cache)
 
-                    # Progress logging
-                    cache_info = f" (cache: {len(entity_cache)})" if result['status'] == 'processed' else ""
-                    print(f"{status_emoji} {result['pmcid']:15s} - {result['status']:12s} ({len(results):3d}/{len(pmcids):3d} completed){cache_info}")
+                    except Exception as e:
+                        tqdm.write(f"✗ Future exception for {pmcid}: {e}")
+                        results.append({'status': 'error', 'pmcid': pmcid, 'error': str(e)})
 
-                    # Periodic cache save
-                    if save_interval > 0:
-                        new_since_save = len(entity_cache) - last_save_size
-                        if new_since_save >= save_interval:
-                            with cache_lock:
-                                save_entity_cache(entity_cache)
-                                last_save_size = len(entity_cache)
-
-                except Exception as e:
-                    print(f"✗ Future exception for {pmcid}: {e}")
-                    results.append({'status': 'error', 'pmcid': pmcid, 'error': str(e)})
+                    done = len(results)
+                    ok = sum(1 for r in results if r.get('status') == 'processed')
+                    skip = sum(1 for r in results if r.get('status') == 'skipped')
+                    fail = sum(1 for r in results if r.get('status') == 'error')
+                    pbar.update(1)
+                    pbar.set_postfix(ok=ok, skip=skip, fail=fail, cache=len(entity_cache))
 
     except KeyboardInterrupt:
         interrupted = True
