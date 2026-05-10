@@ -1,0 +1,308 @@
+"""ILP-selector tests.
+
+Use synthetic fingerprints and exercise the ILP entry points end-to-end.
+PuLP is required; the suite is skipped when it is not installed.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+pulp = pytest.importorskip("pulp")
+
+from eval.paper_selection.fingerprints import build_fingerprints
+from eval.paper_selection.ilp_selectors import (
+    ILPConfig,
+    select_calibration_set_ilp,
+    select_diverse_papers_ilp,
+    select_hard_papers_ilp,
+    select_related_papers_ilp,
+)
+from eval.paper_selection.loaders import RawEntity, RawPaper
+from eval.paper_selection.metrics import Hardness, Relatedness
+from eval.paper_selection.selectors import SelectionConfig, select_calibration_set
+
+
+# ── Fixture builders ─────────────────────────────────────────────────────────
+
+def _ent(text, *, label="ENTITY", cui=None, semtypes=None, score=0.95):
+    return RawEntity(
+        text=text, label=label, umls_cui=cui,
+        canonical_name=text, semantic_types=list(semtypes or []),
+        umls_score=score,
+    )
+
+
+def _lymphoma_paper(pmcid: str, *, n_paragraphs: int = 12) -> RawPaper:
+    body = (
+        "DLBCL with strong CD20 expression. CD30 was negative. "
+        "BCL2 high (Ki-67 60%) prognostic for worse OS. "
+    )
+    paragraphs = [body for _ in range(n_paragraphs)]
+    entities = [
+        _ent("DLBCL",                        cui="C0024301", semtypes=["T191"]),
+        _ent("diffuse large b-cell lymphoma", cui="C0079744", semtypes=["T191"]),
+        _ent("CD20", cui="C0054945", semtypes=["T116"]),
+        _ent("CD30", cui="C0054916", semtypes=["T116"]),
+        _ent("BCL2", cui="C1366512", semtypes=["T028"]),
+        _ent("lymph node", cui="C0024204", semtypes=["T023"]),
+        _ent("immunohistochemistry", cui="C0021044", semtypes=["T060"]),
+        _ent("overall survival", cui="C0282416", semtypes=["T201"]),
+    ]
+    return RawPaper(pmcid=pmcid, title=f"Paper {pmcid}",
+                    text_elements=paragraphs, entities=entities,
+                    n_figures=2, n_tables=1, n_captions=3)
+
+
+def _make_unrelated_paper(pmcid: str, extra: list[RawEntity] | None = None) -> RawPaper:
+    body = (
+        "Granuloma annulare presents with erythematous plaques. "
+        "Histology shows mucin and palisaded histiocytes. "
+        "Treatment with topical corticosteroids. "
+    )
+    paragraphs = [body for _ in range(10)]
+    entities = [
+        _ent("granuloma annulare", cui="C0085074", semtypes=["T047"]),
+        _ent("mucin",      cui="C0026727", semtypes=["T116"]),
+        _ent("histiocyte", cui="C0019625", semtypes=["T025"]),
+        _ent("skin",       cui="C0037293", semtypes=["T023"]),
+        _ent("corticosteroid", cui="C0001617", semtypes=["T123"]),
+    ]
+    if extra:
+        entities.extend(extra)
+    return RawPaper(pmcid=pmcid, title=f"Paper {pmcid}",
+                    text_elements=paragraphs, entities=entities,
+                    n_figures=1, n_tables=0, n_captions=1)
+
+
+def _hard_paper(pmcid: str) -> RawPaper:
+    """Many tables, dense entities, fragmented paragraphs — high absolute hardness."""
+    short_paragraphs = [f"CD{i} positive." for i in range(3, 80)]
+    long_paragraphs = ["x " * 1000]
+    entities = [
+        _ent(f"CD{i}", cui=f"C00000{i:02}", semtypes=["T116"]) for i in range(3, 60)
+    ] + [
+        _ent("DLBCL", cui="C0024301", semtypes=["T191"]),
+        _ent("Burkitt lymphoma", cui="C0006413", semtypes=["T191"]),
+        _ent("MYC",  semtypes=["T028"]),
+        _ent("BCL6", semtypes=["T028"]),
+        _ent("immunohistochemistry", semtypes=["T060"]),
+        _ent("FISH", semtypes=["T060"]),
+        _ent("overall survival", semtypes=["T201"]),
+    ]
+    return RawPaper(pmcid=pmcid, title=f"Paper {pmcid}",
+                    text_elements=[*short_paragraphs, *long_paragraphs],
+                    entities=entities,
+                    n_figures=10, n_tables=12, n_captions=20)
+
+
+def _medium_hard_paper(pmcid: str) -> RawPaper:
+    body = "DLBCL with CD20 and BCL2 expression. " * 10
+    entities = [
+        _ent("DLBCL", cui="C0024301", semtypes=["T191"]),
+        _ent("CD20",  cui="C0054945", semtypes=["T116"]),
+        _ent("BCL2",  cui="C1366512", semtypes=["T028"]),
+        _ent("immunohistochemistry", semtypes=["T060"]),
+    ]
+    return RawPaper(pmcid=pmcid, title=f"Paper {pmcid}",
+                    text_elements=[body] * 8, entities=entities,
+                    n_figures=2, n_tables=2, n_captions=2)
+
+
+def _make_corpus() -> list[RawPaper]:
+    """7 lymphoma + 6 unrelated (varied diseases) + 5 hard + 3 medium-hard."""
+    papers: list[RawPaper] = []
+    for i in range(1, 8):
+        papers.append(_lymphoma_paper(f"PMC100{i}"))
+
+    extras = [
+        [_ent("psoriasis", cui="C0033860", semtypes=["T047"])],
+        [_ent("melanoma", cui="C0025202", semtypes=["T191"])],
+        [_ent("hepatocellular carcinoma", cui="C2239176", semtypes=["T191"])],
+        [_ent("breast cancer", cui="C0006142", semtypes=["T191"])],
+        [_ent("renal cell carcinoma", cui="C0007134", semtypes=["T191"])],
+        [_ent("glioblastoma", cui="C0017636", semtypes=["T191"])],
+    ]
+    for i, e in enumerate(extras, start=1):
+        papers.append(_make_unrelated_paper(f"PMC200{i}", extra=e))
+
+    for i in range(1, 6):
+        papers.append(_hard_paper(f"PMC300{i}"))
+    for i in range(1, 4):
+        papers.append(_medium_hard_paper(f"PMC400{i}"))
+    return papers
+
+
+def _loose_cfg() -> SelectionConfig:
+    return SelectionConfig(
+        max_sentences_related=10_000,
+        max_sentences_diverse=10_000,
+        min_sentences=1,
+        min_useful_entities=1,
+    )
+
+
+# ── Tests ────────────────────────────────────────────────────────────────────
+
+def test_related_ilp_chooses_lymphoma_cluster():
+    fps = build_fingerprints(_make_corpus())
+    chosen, rationale = select_related_papers_ilp(
+        fps, k=5, config=_loose_cfg(), ilp_config=ILPConfig(candidate_limit=50),
+    )
+    pmcids = {p.pmcid for p in chosen}
+    assert len(chosen) == 5
+    # All selections must come from the lymphoma cluster (PMC100*)
+    assert all(pid.startswith("PMC100") for pid in pmcids), pmcids
+    # Rationale records ILP metadata
+    for entry in rationale.values():
+        assert "ilp_objective" in entry
+        assert entry["ilp_status"] in {"Optimal", "Not Solved", "Infeasible",
+                                        "Unbounded", "Undefined"}
+
+
+def test_related_ilp_beats_or_matches_greedy_pair_relatedness():
+    """ILP optimum cannot be worse than greedy on the same pool."""
+    fps = build_fingerprints(_make_corpus())
+    cfg = _loose_cfg()
+    rel = Relatedness()
+
+    def _pair_sum(pmcids: list[str]) -> float:
+        by = {fp.pmcid: fp for fp in fps}
+        ps = [by[p] for p in pmcids if p in by]
+        return sum(rel.score(ps[i], ps[j])
+                   for i in range(len(ps)) for j in range(i + 1, len(ps)))
+
+    greedy = select_calibration_set(fps, config=cfg)
+    ilp_chosen, _ = select_related_papers_ilp(fps, k=5, config=cfg)
+    assert _pair_sum([p.pmcid for p in ilp_chosen]) >= _pair_sum(greedy.related) - 1e-6
+
+
+def test_diverse_ilp_avoids_near_duplicates_and_covers_concepts():
+    # Build a corpus where 5 of the lymphoma papers are near-duplicates and
+    # 5 unrelated papers cover entirely different concepts.
+    papers = [_lymphoma_paper(f"PMCDUP{i}") for i in range(1, 6)]
+    extras = [
+        [_ent("psoriasis", cui="C0033860", semtypes=["T047"])],
+        [_ent("melanoma", cui="C0025202", semtypes=["T191"])],
+        [_ent("hepatocellular carcinoma", cui="C2239176", semtypes=["T191"])],
+        [_ent("breast cancer", cui="C0006142", semtypes=["T191"])],
+        [_ent("renal cell carcinoma", cui="C0007134", semtypes=["T191"])],
+    ]
+    for i, e in enumerate(extras, start=1):
+        papers.append(_make_unrelated_paper(f"PMCDIV{i}", extra=e))
+    fps = build_fingerprints(papers)
+
+    chosen, _ = select_diverse_papers_ilp(
+        fps, k=5, config=_loose_cfg(), ilp_config=ILPConfig(candidate_limit=50),
+    )
+    assert len(chosen) == 5
+    # ILP should pick at most one of the near-duplicate cluster.
+    dup_count = sum(1 for p in chosen if p.pmcid.startswith("PMCDUP"))
+    assert dup_count <= 1, f"diverse ILP picked {dup_count} near-duplicates: {[p.pmcid for p in chosen]}"
+
+
+def test_hard_ilp_satisfies_composition_constraints():
+    fps = build_fingerprints(_make_corpus())
+    cfg = _loose_cfg()
+    ilp_cfg = ILPConfig(candidate_limit=50,
+                        hard_top_normalized_pool=8,
+                        hard_top_absolute_pool=8)
+    chosen, _ = select_hard_papers_ilp(fps, k=5, config=cfg, ilp_config=ilp_cfg)
+    assert len(chosen) == 5
+
+    # Recompute the same sub-pools the ILP used to verify constraints held.
+    h = Hardness()
+    breakdowns = {fp.pmcid: h.breakdown(fp) for fp in fps if not fp.is_empty()}
+    candidates = [fp for fp in fps if not fp.is_empty()]
+    pool = sorted(candidates, key=lambda p: -breakdowns[p.pmcid].absolute_hardness)[:50]
+
+    by_norm = sorted(pool, key=lambda p: -breakdowns[p.pmcid].normalized_hardness)
+    by_abs  = sorted(pool, key=lambda p: -breakdowns[p.pmcid].absolute_hardness)
+    by_med  = sorted(pool, key=lambda p:  breakdowns[p.pmcid].normalized_hardness)
+    top_norm = {p.pmcid for p in by_norm[:ilp_cfg.hard_top_normalized_pool]}
+    top_abs  = {p.pmcid for p in by_abs[: ilp_cfg.hard_top_absolute_pool]}
+    n = len(by_med)
+    lo = int(n * ilp_cfg.hard_medium_pool_low_pct)
+    hi = max(int(n * ilp_cfg.hard_medium_pool_high_pct), lo + 1)
+    medium_band = {p.pmcid for p in by_med[lo:hi]}
+
+    chosen_ids = {p.pmcid for p in chosen}
+    assert len(chosen_ids & top_norm) >= min(2, len(top_norm))
+    assert len(chosen_ids & top_abs)  >= min(2, len(top_abs))
+    assert len(chosen_ids & medium_band) >= min(1, len(medium_band))
+
+
+def test_calibration_ilp_returns_15_unique():
+    fps = build_fingerprints(_make_corpus())
+    cfg = _loose_cfg()
+    res = select_calibration_set_ilp(
+        fps, config=cfg, ilp_config=ILPConfig(candidate_limit=50), allow_overlap=False,
+    )
+    assert len(res.related) == 5
+    assert len(res.diverse) == 5
+    assert len(res.hard) == 5
+    assert len(set(res.all_pmcids())) == 15
+    assert all(entry.get("strategy") == "ilp" for entry in res.rationale.values())
+
+
+def test_greedy_calibration_also_returns_15_unique():
+    fps = build_fingerprints(_make_corpus())
+    cfg = _loose_cfg()
+    res = select_calibration_set(fps, config=cfg, allow_overlap=False)
+    assert len(set(res.all_pmcids())) == 15
+
+
+def test_cli_strategy_ilp_on_jsonl_fixture(tmp_path: Path):
+    """Run `python -m eval.paper_selection.run_select --strategy ilp` end-to-end."""
+    corpus = _make_corpus()
+    jsonl_path = tmp_path / "papers.jsonl"
+    with jsonl_path.open("w", encoding="utf-8") as fh:
+        for paper in corpus:
+            fh.write(json.dumps({
+                "pmcid": paper.pmcid,
+                "title": paper.title,
+                "text_elements": paper.text_elements,
+                "entities": [
+                    {
+                        "text": e.text, "label": e.label,
+                        "umls_cui": e.umls_cui,
+                        "canonical_name": e.canonical_name,
+                        "semantic_types": e.semantic_types,
+                        "umls_score": e.umls_score,
+                    } for e in paper.entities
+                ],
+                "n_figures": paper.n_figures,
+                "n_tables":  paper.n_tables,
+                "n_captions": paper.n_captions,
+            }) + "\n")
+
+    repo_root = Path(__file__).resolve().parents[2]
+    export_dir = tmp_path / "out"
+    cmd = [
+        sys.executable, "-m", "eval.paper_selection.run_select",
+        "--jsonl", str(jsonl_path),
+        "--strategy", "ilp",
+        "--candidate-limit", "50",
+        "--time-limit-seconds", "10",
+        "--max-sentences-related", "10000",
+        "--max-sentences-diverse", "10000",
+        "--min-sentences", "1",
+        "--output-version", "v_ilp_test",
+        "--export-dir", str(export_dir),
+        "--log-level", "WARNING",
+    ]
+    proc = subprocess.run(cmd, cwd=repo_root, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"CLI failed: stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    payload = json.loads((export_dir / "v_ilp_test_rationale.json").read_text(encoding="utf-8"))
+    assert payload["version"] == "v_ilp_test"
+    assert len(payload["papers"]) == 15
+    # Verify the ILP path actually ran (vs silent fallback to greedy):
+    # ILP rationale strings always start with "ILP <bucket>:".
+    reasons = [p["selection_reason"] or "" for p in payload["papers"].values()]
+    assert any(r.startswith("ILP ") for r in reasons), reasons

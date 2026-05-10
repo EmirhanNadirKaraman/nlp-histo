@@ -17,6 +17,11 @@ from pathlib import Path
 
 from .export import write_calibration_set
 from .fingerprints import FingerprintConfig, build_fingerprints
+from .ilp_selectors import (
+    ILPConfig,
+    pulp_available,
+    select_calibration_set_ilp,
+)
 from .loaders import DBLoader, JSONLLoader
 from .models import PaperFingerprint, SelectionResult
 from .selectors import SelectionConfig, select_calibration_set
@@ -126,6 +131,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-overlap", default="false",
                    help="Allow a paper to appear in more than one bucket (true|false).")
 
+    p.add_argument("--strategy", choices=("greedy", "ilp"), default="greedy",
+                   help="Selection strategy. 'ilp' requires PuLP (pip install pulp).")
+    p.add_argument("--time-limit-seconds", type=float, default=None,
+                   help="Per-bucket ILP solver time budget. Ignored under --strategy greedy.")
+    p.add_argument("--candidate-limit", type=int, default=200,
+                   help="Max candidates kept per bucket before building the ILP.")
+    p.add_argument("--ilp-fallback-greedy", action="store_true",
+                   help="If PuLP is missing, silently fall back to greedy instead of erroring.")
+
     p.add_argument("--dry-run", action="store_true",
                    help="Compute and print the selection but do not write files.")
     p.add_argument("--log-level", default="INFO")
@@ -172,7 +186,28 @@ def main(argv: list[str] | None = None) -> int:
         min_sentences=args.min_sentences,
     )
     allow_overlap = _yes(args.allow_overlap)
-    result = select_calibration_set(fingerprints, config=sel_cfg, allow_overlap=allow_overlap)
+
+    if args.strategy == "ilp":
+        if not pulp_available() and not args.ilp_fallback_greedy:
+            logger.error(
+                "PuLP not installed. Install with `pip install pulp` "
+                "or rerun with --strategy greedy / --ilp-fallback-greedy."
+            )
+            return 3
+        ilp_cfg = ILPConfig(
+            candidate_limit=args.candidate_limit,
+            time_limit_seconds=args.time_limit_seconds,
+        )
+        logger.info("Using ILP strategy (candidate_limit=%d, time_limit=%s)",
+                    ilp_cfg.candidate_limit, ilp_cfg.time_limit_seconds)
+        result = select_calibration_set_ilp(
+            fingerprints, config=sel_cfg, ilp_config=ilp_cfg,
+            allow_overlap=allow_overlap,
+            fallback_to_greedy=args.ilp_fallback_greedy,
+        )
+    else:
+        logger.info("Using greedy strategy")
+        result = select_calibration_set(fingerprints, config=sel_cfg, allow_overlap=allow_overlap)
 
     # ── Print summary ───────────────────────────────────────────────────────
     print(f"\n=== Calibration set: {args.output_version} ===")
