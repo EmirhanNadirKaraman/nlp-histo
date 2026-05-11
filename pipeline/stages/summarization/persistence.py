@@ -227,6 +227,38 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
+def compute_pipeline_config_hash(
+    *,
+    config: Any = None,
+    thresholds: Any = None,
+    models: Any = None,
+    schema_version: str | None = None,
+    prompt_version: str | None = None,
+    cascade_signature: str | None = None,
+) -> str:
+    """Stable 16-char hash over the run-defining configuration.
+
+    Used in `manifest.extra["pipeline_config_hash"]` so two runs that differ
+    only in `run_id` / timestamps but share the same effective config produce
+    the same hash (and the converse: any threshold / model / schema / prompt
+    change flips the hash).
+
+    All inputs are coerced via `_to_jsonable` so Pydantic models, dataclasses
+    and enums hash deterministically. Keys are emitted in sorted order.
+    """
+    import hashlib
+    payload = {
+        "config":            _to_jsonable(config),
+        "thresholds":        _to_jsonable(thresholds),
+        "models":            _to_jsonable(models),
+        "schema_version":    schema_version,
+        "prompt_version":    prompt_version,
+        "cascade_signature": cascade_signature,
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
 def _try_git_commit() -> str | None:
     """Best-effort git HEAD lookup. Never raises."""
     try:
@@ -502,12 +534,14 @@ def persist_map_artifacts(
     writer.add_paper(pmcid)
     writer.mark_stage_attempted("map")
     try:
-        # TODO: Finding has no stable finding_id; using (chunk_id, position)
-        # as the v1 MAP coordinate. Add finding_id when introduced.
+        # finding_id is a PrivateAttr on Finding so it does not appear in
+        # model_dump(); persist it explicitly. (chunk_id, position_in_chunk)
+        # remain for human-readable coordinates.
         findings_rows: list[dict] = []
         for cs in chunk_summaries:
             for pos, f in enumerate(cs.findings):
                 fd = f.model_dump()
+                fd["finding_id"] = f.finding_id
                 fd["pmcid"] = pmcid
                 fd["chunk_id"] = cs.chunk_id
                 fd["position_in_chunk"] = pos
@@ -534,6 +568,7 @@ def persist_map_artifacts(
             {
                 "pmcid": pmcid,
                 "chunk_id": chunk_id,
+                "finding_id": f.finding_id,
                 "claim": f.claim,
                 "category": f.category,
                 "subject_entity": f.subject_entity,
@@ -672,6 +707,7 @@ def persist_relate_artifacts(
     pmcid: str,
     relations: list,
     raw_pairs: list,
+    skipped_pairs: list | None = None,
 ) -> None:
     if writer is None:
         return
@@ -687,9 +723,13 @@ def persist_relate_artifacts(
             [p.model_dump() for p in raw_pairs],
             pmcid=pmcid, required=True,
         )
-        # TODO: RelateStage doesn't expose per-pair gate skips today.
+        # Pre-NLI gate rejections. Default to [] when caller did not supply
+        # them so legacy callers preserve their existing on-disk shape.
+        skipped_rows = (
+            [s.model_dump() for s in (skipped_pairs or [])]
+        )
         writer.write_stage_jsonl(
-            "relate", "skipped_pairs.jsonl", [], pmcid=pmcid,
+            "relate", "skipped_pairs.jsonl", skipped_rows, pmcid=pmcid,
         )
         writer.mark_stage_completed("relate")
     except Exception as exc:

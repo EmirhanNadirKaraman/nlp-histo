@@ -83,6 +83,7 @@ from .models import (
     RejectedFinding,
     RejectionSummary,
     RelationTypeEnum,
+    compute_finding_id,
 )
 from .current_stages.normalize_stage import NormalizeStage
 from .observability import TraceCollector, flush_collector
@@ -250,6 +251,8 @@ class SummarizationRunner:
         self._relations: dict[str, list[Relation]] = {}
         # Stores raw NLI scores for all eligible pairs (including UNRELATED).
         self._relate_raw_pairs: dict[str, list] = {}
+        # Stores pre-NLI gate skips per pmcid (SkippedPair[]).
+        self._relate_skipped_pairs: dict[str, list] = {}
         # Stores RESOLVE output per pmcid. Final knowledge base.
         self._final_rules: dict[str, list[FinalRule]] = {}
 
@@ -359,6 +362,16 @@ class SummarizationRunner:
             # Track total MAP findings for rejection summary (before any filtering)
             map_findings_total = sum(len(cs.findings) for cs in chunk_summaries)
 
+            # Assign stable finding_id BEFORE grounding so downstream stages
+            # (and rejected-finding artifacts) share the same lineage key. The
+            # id is deterministic over (pmcid, chunk_id, position, claim), so
+            # grounding-induced drops do not shift surviving ids.
+            for cs in chunk_summaries:
+                for pos, f in enumerate(cs.findings):
+                    f.set_finding_id(
+                        compute_finding_id(pmcid, cs.chunk_id, pos, f.claim)
+                    )
+
             # 1a-pre. Replace LLM-paraphrased verbatim_support with actual source text from DB.
             # Evidence strings carry the text_element_id; we batch-query TextElement.text_content
             # so NLI grounding scores real paragraphs rather than LLM paraphrases.
@@ -467,12 +480,19 @@ class SummarizationRunner:
                 "[%s] RELATE — %d canonical rules", pmcid, len(self._canonical_rules[pmcid])
             )
             t0 = time.perf_counter()
-            self._relations[pmcid], self._relate_raw_pairs[pmcid] = self._relate.relate(
-                self._canonical_rules[pmcid], pmcid
+            (
+                self._relations[pmcid],
+                self._relate_raw_pairs[pmcid],
+                relate_skipped,
+            ) = self._relate.relate(self._canonical_rules[pmcid], pmcid)
+            self._relate_skipped_pairs[pmcid] = relate_skipped
+            logger.info(
+                "[%s] RELATE done [%.1fs] — %d relations, %d raw pairs, %d gate-skipped",
+                pmcid, time.perf_counter() - t0,
+                len(self._relations[pmcid]),
+                len(self._relate_raw_pairs[pmcid]),
+                len(relate_skipped),
             )
-            logger.info("[%s] RELATE done [%.1fs] — %d relations, %d raw pairs",
-                        pmcid, time.perf_counter() - t0,
-                        len(self._relations[pmcid]), len(self._relate_raw_pairs[pmcid]))
             self._persist_relations(
                 pipeline_run_db_id, pmcid, self._relations[pmcid], _cr_db_id_map
             )
@@ -480,6 +500,7 @@ class SummarizationRunner:
                 writer, pmcid,
                 self._relations[pmcid],
                 self._relate_raw_pairs[pmcid],
+                self._relate_skipped_pairs[pmcid],
             )
 
             # 1f. RESOLVE — CanonicalRule[] + Relation[] → FinalRule[]
@@ -1017,8 +1038,16 @@ class SummarizationRunner:
                 thresholds=thresholds,
                 chunk_size=cfg.map.chunk_size,
             )
-            from .persistence import _try_git_commit  # noqa: PLC0415
+            from .persistence import _try_git_commit, compute_pipeline_config_hash  # noqa: PLC0415
             manifest.git_commit = _try_git_commit()
+            manifest.extra["pipeline_config_hash"] = compute_pipeline_config_hash(
+                config=self._config_snapshot,
+                thresholds=thresholds,
+                models=models,
+                schema_version=schema_version,
+                prompt_version=prompt_version,
+                cascade_signature=cascade_signature,
+            )
             writer = RunArtifactWriter(
                 run_id=run_id, root_dir=self._artifact_root, manifest=manifest,
             )
@@ -1041,8 +1070,8 @@ class SummarizationRunner:
     def _persist_canonicalize_artifacts(self, writer, pmcid, canonical_rules) -> None:
         persist_canonicalize_artifacts(writer, pmcid, canonical_rules)
 
-    def _persist_relate_artifacts(self, writer, pmcid, relations, raw_pairs) -> None:
-        persist_relate_artifacts(writer, pmcid, relations, raw_pairs)
+    def _persist_relate_artifacts(self, writer, pmcid, relations, raw_pairs, skipped_pairs=None) -> None:
+        persist_relate_artifacts(writer, pmcid, relations, raw_pairs, skipped_pairs)
 
     def _persist_resolve_artifacts(self, writer, pmcid, final_rules, relations) -> None:
         persist_resolve_artifacts(writer, pmcid, final_rules, relations)

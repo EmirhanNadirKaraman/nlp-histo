@@ -253,7 +253,7 @@ class CorpusRelateStage:
             corpus_relations: list[CorpusRelation] = []
             raw_pairs_corpus: list = []
         else:
-            raw_relations, raw_pairs_corpus = self._relate.relate(
+            raw_relations, raw_pairs_corpus, _ = self._relate.relate(
                 all_rules, pmcid="corpus", gate=_should_compare_cross_paper,
             )
             logger.info(
@@ -349,7 +349,7 @@ class CorpusRelateStage:
             "CORPUS RELATE [%s]: comparing %d new rules × %d existing rules",
             new_pmcid, len(new_rules), len(existing_rules),
         )
-        raw_cross, _raw_pairs_cross = self._relate.relate(
+        raw_cross, _raw_pairs_cross, _ = self._relate.relate(
             all_rules, pmcid="corpus", gate=_incremental_gate,
         )
 
@@ -359,7 +359,7 @@ class CorpusRelateStage:
         # to produce the intra-paper neighborhood for the reprocessed paper.
         raw_intra: list[Relation] = []
         if len(new_rules) >= 2:
-            raw_intra, _raw_pairs_intra = self._relate.relate(
+            raw_intra, _raw_pairs_intra, _ = self._relate.relate(
                 new_rules, pmcid="corpus_intra", gate=_should_compare_cross_paper,
             )
 

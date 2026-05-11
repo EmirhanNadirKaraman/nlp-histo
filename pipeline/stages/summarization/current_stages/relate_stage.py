@@ -31,6 +31,7 @@ from __future__ import annotations
 import itertools
 import logging
 
+from ..artifact_models import SkippedPair
 from ..models import CanonicalRule, RawNLIPair, Relation, RelationTypeLabel
 
 logger = logging.getLogger(__name__)
@@ -279,7 +280,7 @@ class RelateStage:
         rules: list[CanonicalRule],
         pmcid: str = "",
         gate=None,
-    ) -> tuple[list[Relation], list[RawNLIPair]]:
+    ) -> tuple[list[Relation], list[RawNLIPair], list[SkippedPair]]:
         """
         Compare all eligible pairs of CanonicalRules.
 
@@ -297,13 +298,15 @@ class RelateStage:
 
         Returns
         -------
-        (relations, raw_pairs)
-            relations  — non-UNRELATED Relation objects (SUPPORT | CONTRADICT | SCOPE_QUALIFY).
-            raw_pairs  — RawNLIPair for every eligible pair including UNRELATED, with all
-                         four NLI scores, so thresholds can be swept offline.
+        (relations, raw_pairs, skipped_pairs)
+            relations     — non-UNRELATED Relation objects (SUPPORT | CONTRADICT | SCOPE_QUALIFY).
+            raw_pairs     — RawNLIPair for every eligible pair including UNRELATED, with all
+                            four NLI scores, so thresholds can be swept offline.
+            skipped_pairs — one SkippedPair per pre-NLI gate rejection, for offline debug
+                            when `raw_pairs` is empty or smaller than expected.
         """
         if len(rules) < 2:
-            return [], []
+            return [], [], []
 
         _gate = gate if gate is not None else _should_compare
         pipe = _get_nli_pipe(self._model_name, self._batch_size, self._device)
@@ -311,6 +314,7 @@ class RelateStage:
         # Generate eligible pairs
         eligible: list[tuple[int, int]] = []
         rejection_counts: dict[str, int] = {}
+        skipped_pairs: list[SkippedPair] = []
         all_pairs = list(itertools.combinations(range(len(rules)), 2))
 
         for i, j in all_pairs:
@@ -319,11 +323,26 @@ class RelateStage:
                 eligible.append((i, j))
             else:
                 rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+                a, b = rules[i], rules[j]
+                skipped_pairs.append(SkippedPair(
+                    rule_id_a=a.canonical_id,
+                    rule_id_b=b.canonical_id,
+                    reason=reason,
+                    pmcid=pmcid or None,
+                    category_a=a.category,
+                    category_b=b.category,
+                    relation_type_a=a.relation_type.value if a.relation_type else None,
+                    relation_type_b=b.relation_type.value if b.relation_type else None,
+                    subject_entity_a=a.subject_entity,
+                    subject_entity_b=b.subject_entity,
+                    outcome_entity_a=a.outcome_entity,
+                    outcome_entity_b=b.outcome_entity,
+                ))
                 logger.debug(
                     "[%s] RELATE skip (%s): [%s/%s] %r  vs  [%s/%s] %r",
                     pmcid, reason,
-                    rules[i].category, rules[i].relation_type, rules[i].subject_entity,
-                    rules[j].category, rules[j].relation_type, rules[j].subject_entity,
+                    a.category, a.relation_type, a.subject_entity,
+                    b.category, b.relation_type, b.subject_entity,
                 )
 
         if rejection_counts:
@@ -336,7 +355,7 @@ class RelateStage:
             )
 
         if not eligible:
-            return [], []
+            return [], [], skipped_pairs
 
         # Build bidirectional NLI input
         nli_inputs_ab: list[tuple[str, str]] = []
@@ -400,4 +419,4 @@ class RelateStage:
             sum(1 for r in relations if r.relation_type == RelationTypeLabel.CONTRADICT),
             sum(1 for r in relations if r.relation_type == RelationTypeLabel.SCOPE_QUALIFY),
         )
-        return relations, raw_pairs
+        return relations, raw_pairs, skipped_pairs

@@ -9,7 +9,7 @@ from typing import List, Literal
 
 import logging
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from .enum_logging import log_bad_finding, log_enum_observation
 
@@ -26,6 +26,24 @@ MAP_STAGE_NAME:     str = "map"
 
 
 # ── Cascade signature helper ──────────────────────────────────────────────────
+def compute_finding_id(
+    pmcid: str,
+    chunk_id: str,
+    position_in_chunk: int,
+    claim: str,
+) -> str:
+    """Stable 12-char hash identifying a MAP Finding.
+
+    Deterministic over (pmcid, chunk_id, position_in_chunk, normalized claim).
+    Whitespace in the claim is collapsed and case-folded so cosmetic
+    re-serialisation does not change the id.
+    """
+    import hashlib
+    normalized_claim = " ".join((claim or "").lower().split())
+    payload = f"{pmcid}|{chunk_id}|{position_in_chunk}|{normalized_claim}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
 def compute_cascade_signature(voter_specs: list[tuple[str, str]]) -> str:
     """Stable short hash of an ordered (provider, model) sequence.
 
@@ -164,6 +182,20 @@ class Finding(BaseModel):
     direction:         DirectionEnum
     scope:             FindingScope | None
     grounding_score:   float | None
+
+    # Pipeline-assigned stable identifier. Kept as a PrivateAttr so it never
+    # appears in the OpenAI strict schema generated from this model, and so
+    # cached LLM outputs that omit it parse cleanly. The runner fills it via
+    # `set_finding_id` after MAP completes; persistence reads it via the
+    # `finding_id` property.
+    _finding_id: str | None = PrivateAttr(default=None)
+
+    @property
+    def finding_id(self) -> str | None:
+        return self._finding_id
+
+    def set_finding_id(self, value: str) -> None:
+        self._finding_id = value
 
     @model_validator(mode="before")
     @classmethod

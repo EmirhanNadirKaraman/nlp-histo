@@ -378,11 +378,17 @@ class BatchSummarizationRunner:
                 t0 = _time.perf_counter()
                 if len(canonical_rules) < 2:
                     logger.info("[%s] RELATE — skipped (need ≥2 rules to compare)", pmcid)
-                relations, relate_raw_pairs = self._relate.relate(canonical_rules, pmcid)
-                logger.info("[%s] RELATE — done [%.1fs] → %d relations, %d raw pairs",
-                            pmcid, _time.perf_counter() - t0,
-                            len(relations), len(relate_raw_pairs))
-                persist_relate_artifacts(writer, pmcid, relations, relate_raw_pairs)
+                relations, relate_raw_pairs, relate_skipped = self._relate.relate(
+                    canonical_rules, pmcid,
+                )
+                logger.info(
+                    "[%s] RELATE — done [%.1fs] → %d relations, %d raw pairs, %d gate-skipped",
+                    pmcid, _time.perf_counter() - t0,
+                    len(relations), len(relate_raw_pairs), len(relate_skipped),
+                )
+                persist_relate_artifacts(
+                    writer, pmcid, relations, relate_raw_pairs, relate_skipped,
+                )
 
                 logger.info("[%s] RESOLVE — start (%d canonical rules, %d relations)",
                             pmcid, len(canonical_rules), len(relations))
@@ -487,6 +493,7 @@ class BatchSummarizationRunner:
                 "level2_voter_models": [v.model for v in self._l2],
                 "escalation_model":    self._l3.model,
             }
+            cascade_sig = cascade_signature or self._cascade_signature
             manifest = RunManifest(
                 run_id=run_id,
                 artifact_root=self._artifact_root,
@@ -494,11 +501,20 @@ class BatchSummarizationRunner:
                 papers=[pmcid],
                 schema_version=MAP_SCHEMA_VERSION,
                 prompt_version=MAP_PROMPT_VERSION,
-                cascade_signature=cascade_signature or self._cascade_signature,
+                cascade_signature=cascade_sig,
                 config=self._config_snapshot,
                 models=models,
                 thresholds=thresholds,
                 chunk_size=cfg.map.chunk_size,
+            )
+            from ..persistence import compute_pipeline_config_hash  # noqa: PLC0415
+            manifest.extra["pipeline_config_hash"] = compute_pipeline_config_hash(
+                config=self._config_snapshot,
+                thresholds=thresholds,
+                models=models,
+                schema_version=MAP_SCHEMA_VERSION,
+                prompt_version=MAP_PROMPT_VERSION,
+                cascade_signature=cascade_sig,
             )
             return RunArtifactWriter(
                 run_id=run_id, root_dir=self._artifact_root, manifest=manifest,

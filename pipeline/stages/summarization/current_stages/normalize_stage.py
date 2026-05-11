@@ -400,6 +400,24 @@ def _mean_score(findings: list[Finding]) -> float | None:
     return sum(scores) / len(scores) if scores else None
 
 
+def _collect_source_ids(findings: list[Finding]) -> list[str]:
+    """Stable, de-duplicated list of source finding_ids from MAP.
+
+    Skips findings whose finding_id was never assigned (e.g. legacy cached
+    payloads consumed in isolation, or unit tests that bypass the runner).
+    Order follows first-seen order across `findings` so the result is
+    reproducible across runs.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for f in findings:
+        fid = getattr(f, "finding_id", None)
+        if fid and fid not in seen:
+            seen.add(fid)
+            out.append(fid)
+    return out
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 class NormalizeStage:
@@ -548,7 +566,7 @@ class NormalizeStage:
             category=rep.category,
             predicate_text=rep.claim,
             scope=rep.scope or FindingScope(),
-            source_finding_ids=[],   # populated by Phase 3+ when finding_id exists
+            source_finding_ids=_collect_source_ids(findings),
             evidence=spans,
             pmcids=unique_pmcids,
             mean_grounding_score=_mean_score(findings),
@@ -581,7 +599,7 @@ class NormalizeStage:
             category=f.category,
             predicate_text=f.claim,
             scope=f.scope or FindingScope(),
-            source_finding_ids=[],
+            source_finding_ids=_collect_source_ids([f]),
             evidence=spans,
             pmcids=unique_pmcids,
             mean_grounding_score=f.grounding_score,
