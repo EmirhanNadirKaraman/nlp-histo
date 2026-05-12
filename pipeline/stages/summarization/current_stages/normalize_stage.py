@@ -6,8 +6,9 @@ Two operations:
    Resolution order:
      a. Hand-curated synonym dictionary (_SYNONYMS) — covers rare entities
         that UMLS does not link (CEAN, MGA, …).
-     b. UMLS linker via scispaCy (en_core_sci_lg, threshold 0.85) — loaded
-        lazily and cached at module level; skipped if scispaCy unavailable.
+     b. UMLS linker via scispaCy (en_core_sci_lg, threshold 0.85) —
+        process-wide singleton from ``..umls_resources``; per-text results
+        cached in ``_UMLS_CACHE``.  Skipped if scispaCy unavailable.
      c. Identity fallback — stripped input returned unchanged.
 
 2. Conditional dedup — findings that share the same

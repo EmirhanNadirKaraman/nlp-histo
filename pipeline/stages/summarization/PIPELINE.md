@@ -100,6 +100,23 @@ Orchestrates the full pipeline for one paper. Entry point: `runner.process(file_
 - `db=None` is valid and fully supported — pipeline runs without any DB connection.
 - The `_scored_map_findings`, `_normal_findings`, etc. dicts are keyed by pmcid — `process_batch()` accumulates across papers in the same runner instance.
 
+### Memory checkpoint logging
+Every stage call inside `process()` is wrapped in a `MemoryLogger` context manager (`pipeline/utils/memory_logging.py`). Each run emits a sequence of grep-friendly lines like:
+
+```
+MEMORY pmcid=PMC1448691 stage=pipeline event=start rss_mb=… vms_mb=… elapsed_s=0.0
+MEMORY pmcid=PMC1448691 stage=MAP event=before rss_mb=… elapsed_s=0.1
+MEMORY pmcid=PMC1448691 stage=MAP event=after rss_mb=… elapsed_s=83.2 delta_rss_mb=+263.4
+MEMORY pmcid=PMC1448691 stage=NORMALIZE event=before …
+…
+MEMORY pmcid=PMC1448691 stage=UMLS event=before_scispaCy_load …
+MEMORY pmcid=PMC1448691 stage=UMLS event=after_scispaCy_load …
+MEMORY pmcid=PMC1448691 stage=pipeline event=end …
+```
+
+- On exception: emits `event=failed` for the offending stage (context manager) and again from the outer `except` so the very last MEMORY line in a crashed run always names the killing stage.
+- Requires `psutil`. If missing, a one-time warning is logged and the rss/vms/delta fields are omitted — the timeline still works.
+
 ---
 
 ## `map_stage.py` — `MapStage`

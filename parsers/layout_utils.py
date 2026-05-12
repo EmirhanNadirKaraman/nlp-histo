@@ -1,6 +1,9 @@
 """
-Layout processing utilities shared between combined_pipeline.py and
-PDF_Processing_Pipeline.ipynb.
+Shared layout processing utilities.
+
+The active consumer is ``pipeline/stages/pdf_text_extraction/`` (its text
+assembler + artifact-filter components delegate here).  The legacy demo
+notebook ``notebooks/PDF_Processing_Pipeline.ipynb`` also imports from here.
 
 Covers:
   - Element-type constants   (DOCLING_MASK_TYPES, TEXT_ELEMENT_TYPES, …)

@@ -2,14 +2,16 @@
 Lightweight stage-level memory checkpoint logging.
 
 Each ``checkpoint`` call emits a single grep-friendly ``MEMORY`` line with the
-process RSS / VMS, the stage name, the event, elapsed time since the previous
-checkpoint, and the RSS delta since the previous checkpoint.
+stage name, the event, elapsed time since the previous checkpoint, and — when
+``psutil`` is installed — process RSS / VMS in MB plus the RSS delta since the
+previous checkpoint.
 
 Designed to be cheap (one ``psutil.Process().memory_info()`` call) so it can be
 sprinkled liberally without affecting pipeline behaviour.
 
-If ``psutil`` is not installed, the logger warns once and then becomes a
-no-op — pipelines must keep running.
+If ``psutil`` is not installed, the logger warns once and continues emitting
+MEMORY lines with the stage/event/elapsed fields only — the rss_mb / vms_mb /
+delta_rss_mb fields are omitted.  Pipelines never crash for lack of psutil.
 """
 from __future__ import annotations
 
@@ -35,8 +37,9 @@ def _warn_psutil_missing_once(logger: logging.Logger) -> None:
         return
     _PSUTIL_WARNED = True
     logger.warning(
-        "MEMORY logging disabled: psutil not installed — "
-        "`pip install psutil` to enable RSS/VMS checkpoints",
+        "MEMORY logging degraded (no RSS/VMS): psutil not installed — "
+        "`pip install psutil` to enable memory metrics; "
+        "MEMORY lines will still report stage/event/elapsed",
     )
 
 
@@ -92,7 +95,12 @@ class MemoryLogger:
         event: str,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        """Emit one ``MEMORY`` line.  Safe to call when psutil is missing."""
+        """Emit one ``MEMORY`` line for the given stage/event.
+
+        Always safe to call: when psutil is unavailable the rss_mb / vms_mb /
+        delta_rss_mb fields are omitted but stage/event/elapsed are still
+        logged, so the timeline of stage transitions stays intact.
+        """
         self._last_stage = stage
         rss_mb, vms_mb = self._sample()
         now = time.perf_counter()

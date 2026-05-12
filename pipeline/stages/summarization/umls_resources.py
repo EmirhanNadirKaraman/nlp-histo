@@ -52,15 +52,6 @@ def _quiet_nmslib() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-def _rss_mb() -> float | None:
-    """Resident set size in MB, or None when psutil is not installed."""
-    try:
-        import psutil  # type: ignore
-        return psutil.Process().memory_info().rss / (1024 * 1024)
-    except Exception:
-        return None
-
-
 def _log_memory(label: str) -> None:
     """Emit a MEMORY checkpoint with stage=UMLS for the given label.
 
@@ -84,6 +75,8 @@ def get_nlp(
     global _NLP, _LINKER, _AVAILABLE
 
     if _AVAILABLE is not None:
+        if _AVAILABLE and _NLP is not None:
+            logger.debug("UMLS: reusing existing scispaCy model/linker")
         return _NLP
 
     if umls_disabled():

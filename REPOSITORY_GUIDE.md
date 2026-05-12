@@ -17,16 +17,18 @@ A complete file-by-file reference for the nlp-histo codebase. Organized by folde
 5. [`alembic/` — schema migrations](#alembic--schema-migrations)
 6. [`parsers/` — PDF / XML / text utilities](#parsers--pdf--xml--text-utilities)
 7. [`named_entity_recognition/` — scispaCy + UMLS](#named_entity_recognition--scispacy--umls)
-8. [`pipeline/stages/pdf_text_extraction/` — main PDF→DB pipeline](#pipelinestagespdf_text_extraction--main-pdfdb-pipeline)
-9. [`pipeline/stages/summarization/` — LLM summarization pipeline](#pipelinestagessummarization--llm-summarization-pipeline)
-10. [`eval/` — evaluation harness](#eval--evaluation-harness)
-11. [`scripts/` — utilities, runners, inspectors](#scripts--utilities-runners-inspectors)
-12. [`tests/` — pytest suite](#tests--pytest-suite)
-13. [`langchain-summarization/` — legacy LangChain stack](#langchain-summarization--legacy-langchain-stack)
-14. [`misc/` — repo introspection utilities](#misc--repo-introspection-utilities)
-15. [`pdffigures2/` — Allen AI evaluation harness (vendored)](#pdffigures2--allen-ai-evaluation-harness-vendored)
-16. [`.agents/` — Claude Code skills](#agents--claude-code-skills)
-17. [`READMEs/` — specialized documentation](#readmes--specialized-documentation)
+8. [`pipeline/utils/` — shared pipeline utilities](#pipelineutils--shared-pipeline-utilities)
+9. [`pipeline/stages/pdf_text_extraction/` — main PDF→DB pipeline](#pipelinestagespdf_text_extraction--main-pdfdb-pipeline)
+10. [`pipeline/stages/summarization/` — LLM summarization pipeline](#pipelinestagessummarization--llm-summarization-pipeline)
+11. [`eval/` — evaluation harness](#eval--evaluation-harness)
+12. [`scripts/` — utilities, runners, inspectors](#scripts--utilities-runners-inspectors)
+13. [`notebooks/` — standalone demo / workflow notebooks](#notebooks--standalone-demo--workflow-notebooks)
+14. [`tests/` — pytest suite](#tests--pytest-suite)
+15. [`langchain-summarization/` — legacy LangChain stack](#langchain-summarization--legacy-langchain-stack)
+16. [`misc/` — repo introspection utilities](#misc--repo-introspection-utilities)
+17. [`pdffigures2/` — Allen AI evaluation harness (vendored)](#pdffigures2--allen-ai-evaluation-harness-vendored)
+18. [`.agents/` — Claude Code skills](#agents--claude-code-skills)
+19. [`READMEs/` — specialized documentation](#readmes--specialized-documentation)
 
 ---
 
@@ -207,6 +209,16 @@ Medical entity extraction layered on top of `database.TextElement.text_content`.
 
 ---
 
+## `pipeline/utils/` — shared pipeline utilities
+
+Cross-cutting helpers shared by both the PDF-extraction and summarization pipelines.
+
+| File | Role |
+|---|---|
+| `memory_logging.py` | `MemoryLogger` + `get_default_memory_logger()` — emits grep-friendly `MEMORY stage=… event=… rss_mb=… vms_mb=… elapsed_s=… delta_rss_mb=…` lines at pipeline checkpoints. Uses `psutil`; degrades to stage/event/elapsed only when psutil is unavailable. Used by `summarization/runner.py` (before/after every stage) and `summarization/umls_resources.py` (scispaCy load/enrich events). |
+
+---
+
 ## `pipeline/stages/pdf_text_extraction/` — main PDF→DB pipeline
 
 The production pipeline that turns one PDF into rows in the database. Eight steps:
@@ -334,6 +346,11 @@ sentences ─► MAP ─► GROUNDING ─► NORMALIZE ─► GROUP ─► CANON
 | `llm_providers.py` | LLM instantiation helpers (Azure / Vertex / Anthropic). |
 | `llm_errors.py` | Retryable vs. non-retryable LLM exception classification. |
 | `umls_utils.py` | UMLS lookup utilities. |
+| `umls_resources.py` | Process-wide singleton loader for scispaCy + UMLS linker (loaded at most once per process). |
+| `persistence.py` | DB persistence helpers used by `runner.py` to write per-stage results. |
+| `artifact_models.py` | Pydantic schemas for on-disk pipeline artifacts (rejection summaries, audit dumps). |
+| `enum_logging.py` | Helper for logging Enum values without their repr. |
+| `synonyms.yaml` | Curated subject/outcome surface-form synonyms used by `normalize_stage`. |
 | `current_stages/` | Active stage implementations. |
 | `old_stages/` | Optional REDUCE + RULES (off by default). |
 | `helpers/` | Cross-stage helpers: grounding filter, contradiction detector, corpus relate, entity linker. |
@@ -345,7 +362,7 @@ sentences ─► MAP ─► GROUNDING ─► NORMALIZE ─► GROUP ─► CANON
 
 ### `pipeline/stages/summarization/` root
 
-- **`runner.py`** — `SummarizationRunner.process(file_data)` runs one paper through every stage, persisting intermediate outputs to the `Sum*` tables under a single `PipelineRun` row. Skips re-processing when a cached result JSON exists (override with `force_rerun=True`). Replaces LLM-paraphrased `verbatim_support` with the actual `TextElement.text_content` from the DB before grounding (so NLI scores real paragraphs, not paraphrases). Optionally runs scispaCy NER + UMLS linking after the pipeline. The optional REDUCE→RULES block is disabled by default. Static helper `load_paper_from_db(pmcid)` returns a `{pmcid, sentences_with_provenance}` dict ready for `process()`.
+- **`runner.py`** — `SummarizationRunner.process(file_data)` runs one paper through every stage, persisting intermediate outputs to the `Sum*` tables under a single `PipelineRun` row. Skips re-processing when a cached result JSON exists (override with `force_rerun=True`). Replaces LLM-paraphrased `verbatim_support` with the actual `TextElement.text_content` from the DB before grounding (so NLI scores real paragraphs, not paraphrases). Optionally runs scispaCy NER + UMLS linking after the pipeline. The optional REDUCE→RULES block is disabled by default. Wraps every stage call in a `MemoryLogger` context manager so each run emits a sequence of grep-friendly `MEMORY stage=X event=before/after/failed …` lines for OOM diagnosis. Static helper `load_paper_from_db(pmcid)` returns a `{pmcid, sentences_with_provenance}` dict ready for `process()`.
 - **`config.py`** — `SummarizationConfig` is a single dataclass holding nested configs for every stage. Every numeric/boolean knob (theta, reject_theta, chunk_size, NLI thresholds, grounding threshold, scoring weights, …) lives here. Use `dataclasses.replace()` to override specific fields.
 - **`models.py`** — Pydantic schemas for the entire pipeline. Highlights: `DirectionEnum`, `RelationTypeEnum`, `FindingScope` (typed scope with `disease_subtype`, `cohort_n`, `assay_method`, `biomarker_cutoff`, `tissue_site`, `treatment_context`, `endpoint`, `study_design`), `Finding` (raw MAP output with claim/verbatim_support/evidence/scope/confidence), `AuditableSummary` (one chunk's findings + voter trace), `NormalFinding`, `FindingGroup`, `CanonicalRule`, `Relation`, `FinalRule`, `RejectionSummary` + `RejectedFinding`, plus `ConsolidatedSummary` and `ExtractedRules` for the legacy REDUCE/RULES block.
 - **`prompts.py`** — LangChain `ChatPromptTemplate`s plus chain factories. MAP prompt instructs voters to extract atomic findings with verbatim source + evidence refs `S{i}|{pmcid}|{te_id}` and a strict typed scope. REDUCE / RULES / JUDGE prompts also live here. All chains use `.with_structured_output()` for reliable JSON parsing.
@@ -353,6 +370,10 @@ sentences ─► MAP ─► GROUNDING ─► NORMALIZE ─► GROUP ─► CANON
 - **`llm_providers.py`** — Helper factories for instantiating LangChain chat models for Azure OpenAI, Vertex / Gemini, Anthropic, etc. Handles auth / region / endpoint plumbing.
 - **`llm_errors.py`** — Exception classification: distinguishes transient (rate-limit, 5xx, network) from permanent (auth, schema validation) errors so retry logic can be smart.
 - **`umls_utils.py`** — Helpers for UMLS lookups used by `helpers/entity_linker.py` and `current_stages/normalize_stage.py`.
+- **`umls_resources.py`** — `get_nlp()` / `get_linker()` return a process-wide scispaCy + UMLS singleton. Loading the ~5 GB KB twice was a reliable way to OOM-kill the pipeline; every component that needs the linker obtains it through this module. Silent-failing: returns `None` when scispaCy/UMLS is unavailable or has been disabled via `$NLP_HISTO_DISABLE_UMLS`. Emits `MEMORY stage=UMLS event=before_scispaCy_load / after_scispaCy_load` checkpoints through the shared `MemoryLogger`.
+- **`persistence.py`** — SQLAlchemy persistence helpers (`_persist_map_findings`, `_persist_normal_findings`, `_persist_finding_groups`, …) that `runner.py` calls between stages to materialize per-stage results into the `Sum*` tables.
+- **`artifact_models.py`** — Pydantic schemas for the per-stage artifacts written to disk (rejection summaries, audit dumps) when an artifact-writer root is configured.
+- **`enum_logging.py`** — Utility for logging Enum values as `.value` so `RelationTypeEnum.SUPPORTS` shows up as `SUPPORTS` instead of `<RelationTypeEnum.SUPPORTS: 'SUPPORTS'>`.
 
 ### `pipeline/stages/summarization/current_stages/`
 
@@ -377,7 +398,7 @@ Optional secondary block. Disabled by default (`run_reduce=False`).
 - **`grounding_filter.py`** — `GroundingFilter` runs an NLI cross-encoder (DeBERTa) on `(verbatim_support, claim)` pairs. Threshold-based drop (default 0.5). Used after MAP to drop ungrounded findings, and optionally after RULES to drop ungrounded rules.
 - **`contradiction_detector.py`** — Two-step contradiction detection between `Rule[]` outputs: pairwise embedding similarity selects candidate pairs above `similarity_threshold`, then an LLM judge confirms whether each pair genuinely contradicts. Produces `ContradictionReport`.
 - **`corpus_relate.py`** — `CorpusRelateStage` pools `CanonicalRule[]` from many papers and runs the same NLI comparison as `RelateStage`. Each output `CorpusRelation` is labelled `intra_paper` or `cross_paper`. `relate_incremental()` does the cross-paper diff for a newly processed paper without re-running the whole corpus.
-- **`entity_linker.py`** — Lazy-loaded scispaCy + UMLS singleton. `enrich_rules_with_cuis(rules)` fills in `subject_cui` / `outcome_cui` in-place; silently no-ops when the linker is unavailable.
+- **`entity_linker.py`** — `enrich_rules_with_cuis(rules)` fills in `subject_cui` / `outcome_cui` on `CanonicalRule[]` in-place. Delegates model loading to `umls_resources.get_nlp()` so scispaCy + UMLS is loaded at most once per process. Silently no-ops when the linker is unavailable, or when `$NLP_HISTO_SKIP_UMLS_ENRICHMENT` is set. Emits `MEMORY stage=UMLS event=before_UMLS_enrichment / after_UMLS_enrichment` checkpoints.
 
 ### `pipeline/stages/summarization/agreement/`
 
@@ -575,6 +596,18 @@ A grab-bag of one-off scripts: production runners, debugging inspectors, evaluat
 - **`fit_routing_threshold.py`** — Reads `routing_records.jsonl` (with `keep_ok` labels), sweeps thresholds, writes `metrics.csv` + `summary.json` (recommended theta), and optionally a curve PNG. Optimizes max-false-accept against a min-recall floor.
 - **`run_paper_single_model.py`** — Bypasses the ABC cascade by wiring the same model into all voter slots with `theta=0.0` and no escalation; used for cost-sensitive smoke tests.
 - **`docling_files/mask_tables.py`** — PDF masking via PyMuPDF using Docling JSON bboxes. Reconstructs tables from raw elements, overlays white rectangles, categorizes elements as text vs maskable.
+
+---
+
+## `notebooks/` — standalone demo / workflow notebooks
+
+Jupyter notebooks that are independent of the production pipeline runners. Useful for one-off exploration; not loaded by any production code.
+
+| File | Role |
+|---|---|
+| `PDF_Processing_Pipeline.ipynb` | End-to-end demo: layout extraction → table reconstruction → masking → text extraction → DB ingestion. Imports from `parsers/layout_utils.py`. |
+
+> Legacy LangChain-stack notebooks (`langchain_summarization.ipynb`, `test_pipeline_50_docs.ipynb`) live under [`langchain-summarization/`](#langchain-summarization--legacy-langchain-stack).
 
 ---
 

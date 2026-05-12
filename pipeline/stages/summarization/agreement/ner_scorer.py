@@ -1,8 +1,14 @@
-"""NERScorer — pairwise entity Jaccard overlap using scispaCy."""
+"""NERScorer — pairwise entity Jaccard overlap using scispaCy.
+
+Delegates model loading to ``pipeline.stages.summarization.umls_resources`` so
+the scispaCy model is loaded at most once per process.  Previously this module
+held its own copy of ``en_core_sci_lg``; combined with the NORMALIZE/UMLS
+linker load that meant ~2 copies of the model resident at once, which OOM-killed
+runs at the post-CANONICALIZE UMLS enrichment step.
+"""
 from __future__ import annotations
 
 import logging
-import threading
 from itertools import combinations
 
 from pipeline.stages.summarization.interfaces.scoring import AgreementContext, ScoreBundle
@@ -10,23 +16,11 @@ from pipeline.stages.summarization.models import AuditableSummary
 
 logger = logging.getLogger(__name__)
 
-_nlp = None
-_nlp_lock = threading.Lock()
-
 
 def _get_nlp():
-    """Lazy-load scispaCy model (module-level singleton, thread-safe)."""
-    global _nlp
-    if _nlp is None:
-        with _nlp_lock:
-            if _nlp is None:  # second check inside lock
-                import scispacy  # noqa: F401 — registers scispacy pipeline components
-                import spacy
-                _nlp = spacy.load(
-                    "en_core_sci_lg",
-                    disable=["parser", "attribute_ruler", "lemmatizer"],
-                )
-    return _nlp
+    """Return the shared scispaCy nlp (or None when UMLS is unavailable)."""
+    from pipeline.stages.summarization.umls_resources import get_nlp  # noqa: PLC0415
+    return get_nlp()
 
 
 def _extract_entities(claims: list[str]) -> frozenset[str]:
@@ -34,7 +28,16 @@ def _extract_entities(claims: list[str]) -> frozenset[str]:
     if not claims:
         return frozenset()
     nlp = _get_nlp()
-    doc = nlp(" ".join(claims))
+    if nlp is None:
+        return frozenset()
+    text = " ".join(claims)
+    # Skip the linker — NER scorer only needs ``doc.ents``, and running the
+    # scispacy_linker on every voter pair during MAP would be wasted work.
+    if "scispacy_linker" in nlp.pipe_names:
+        with nlp.select_pipes(disable=["scispacy_linker"]):
+            doc = nlp(text)
+    else:
+        doc = nlp(text)
     return frozenset(ent.text.lower() for ent in doc.ents)
 
 
