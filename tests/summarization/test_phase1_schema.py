@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pipeline.stages.summarization.grounding_filter import (
+from pipeline.stages.summarization.helpers.grounding_filter import (
     filter_atomic_findings,
     score_findings,
 )
@@ -35,14 +35,50 @@ def _make_finding(**kwargs) -> Finding:
     return Finding(**defaults)
 
 
-def _fake_pipe(scores: list[float]):
+class _StubTokenizer:
+    """Whitespace tokenizer that satisfies the surface ``grounding_filter`` uses:
+    callable returning ``{"input_ids": [...]}``, ``.decode``, ``.model_max_length``
+    and ``.num_special_tokens_to_add(pair=True)``.  Premises in these tests are
+    short enough that ``_split_windows`` returns a single window per pair, so we
+    never exercise the truncation path — but we implement it correctly anyway.
+    """
+
+    model_max_length = 512
+
+    def __call__(self, text: str, add_special_tokens: bool = False) -> dict:
+        return {"input_ids": text.split()}
+
+    def decode(self, ids, skip_special_tokens: bool = True) -> str:
+        return " ".join(ids)
+
+    def num_special_tokens_to_add(self, pair: bool = True) -> int:
+        return 3
+
+
+class _FakeNliPipe:
+    """Mock HF NLI pipeline.  Emits the supplied entailment scores in order,
+    one per (premise, hypothesis) call.  Exposes the ``.tokenizer`` attribute
+    that ``_score_pairs`` reaches into for windowed tokenization.
+    """
+
+    def __init__(self, scores: list[float]) -> None:
+        self._scores = list(scores)
+        self.tokenizer = _StubTokenizer()
+
+    def __call__(self, inputs, truncation: bool = True):
+        results = []
+        for _ in inputs:
+            s = self._scores.pop(0)
+            results.append([
+                {"label": "entailment", "score": s},
+                {"label": "contradiction", "score": 1 - s},
+            ])
+        return results
+
+
+def _fake_pipe(scores: list[float]) -> _FakeNliPipe:
     """Return a mock NLI pipe that emits the given entailment scores in order."""
-    def pipe(inputs):
-        return [
-            [{"label": "entailment", "score": s}, {"label": "contradiction", "score": 1 - s}]
-            for s in scores
-        ]
-    return pipe
+    return _FakeNliPipe(scores)
 
 
 # ── Schema construction ────────────────────────────────────────────────────────
@@ -61,10 +97,10 @@ def test_finding_new_fields_construct():
 
 
 def test_finding_new_fields_default_none():
-    """relation_type defaults to unclear; direction defaults to None; others default to None."""
+    """relation_type defaults to unclear; direction defaults to no_direction; other optional fields default to None."""
     f = _make_finding()
     assert f.relation_type == RelationTypeEnum.unclear
-    assert f.direction is None
+    assert f.direction == DirectionEnum.no_direction
     assert f.scope is None
     assert f.subject_entity is None
     assert f.outcome_entity is None
@@ -129,7 +165,7 @@ def test_pre_phase1_cache_entry_loads():
     }
     s = AuditableSummary(**old_payload)
     assert s.findings[0].relation_type == RelationTypeEnum.unclear  # default when absent from cache
-    assert s.findings[0].direction is None
+    assert s.findings[0].direction == DirectionEnum.no_direction  # legacy-default coercion
     assert s.findings[0].scope is None
 
 

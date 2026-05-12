@@ -367,7 +367,7 @@ class TestAgreementCheckerBest:
 class TestCascadeRejectPath:
     def test_reject_calls_escalation_not_none(self):
         """Router REJECT must fall back to the escalation model, not drop chunk."""
-        from pipeline.stages.summarization.map_stage import MapStage
+        from pipeline.stages.summarization.current_stages.map_stage import MapStage
 
         mock_voter_llm = MagicMock()
         mock_escalation_llm = MagicMock()
@@ -379,17 +379,30 @@ class TestCascadeRejectPath:
 
         # Patch build_map_chain so we can control voter and escalation outputs
         with patch(
-            "pipeline.stages.summarization.map_stage.build_map_chain"
+            "pipeline.stages.summarization.current_stages.map_stage.build_map_chain"
         ) as mock_build:
             voter_chain = MagicMock()
             voter_chain.invoke.return_value = _summary([_finding()])
-            mock_build.side_effect = [voter_chain, mock_escalation_llm_chain]
+            # 1 L1 voter + 1 L2 voter + 1 L3 escalation = 3 build_map_chain calls
+            mock_build.side_effect = [
+                voter_chain,
+                voter_chain,
+                mock_escalation_llm_chain,
+            ]
 
             stage = MapStage(
                 voter_llms=[mock_voter_llm],
+                level2_voter_llms=[mock_voter_llm],
                 escalation_llm=mock_escalation_llm,
                 router=mock_router,
             )
+
+        # _cascade() expects _last_escalation_counts to be seeded by process();
+        # initialize it directly so we can test _cascade() in isolation.
+        stage._last_escalation_counts = {
+            "total": 0, "l1_kept": 0, "l2_escalated": 0, "l2_kept": 0,
+            "l3_escalated": 0, "l3_kept": 0, "finalized": 0, "dropped": 0,
+        }
 
         # Router says REJECT
         from pipeline.stages.summarization.routing.models import (

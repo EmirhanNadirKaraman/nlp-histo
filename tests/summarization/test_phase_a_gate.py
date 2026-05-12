@@ -10,12 +10,12 @@ from pipeline.stages.summarization.models import (
     DirectionEnum,
     RelationTypeEnum,
 )
-from pipeline.stages.summarization.normalize_stage import (
+from pipeline.stages.summarization.current_stages.normalize_stage import (
     NormalizeStage,
     infer_direction,
     normalize_entity,
 )
-from pipeline.stages.summarization.relate_stage import (
+from pipeline.stages.summarization.current_stages.relate_stage import (
     _classify_pair,
     _norm_outcome_expression,
     _should_compare,
@@ -167,11 +167,17 @@ def test_classify_pair_no_contradict_both_uncertain():
 
 
 def test_classify_pair_contradict_positive_vs_negative():
-    """Positive rule vs negative rule with high contradiction score → CONTRADICT."""
+    """Positive rule vs negative rule with high contradiction score → CONTRADICT.
+
+    The polarity guard in `_classify_pair` only allows CONTRADICT when the two
+    rules' structured `direction` fields point opposite ways — so we must set
+    the negative rule's direction explicitly here.
+    """
     a = _make_rule("tumour cells", "CD30 expression",
                    predicate_text="CD30 was positive")
     b = _make_rule("tumour cells", "CD30 expression",
                    predicate_text="CD30 was negative")
+    b = b.model_copy(update={"direction": DirectionEnum.negative})
     label = _classify_pair(a, b, _high_scores(), _high_scores(),
                            entailment_threshold=0.55, contradiction_threshold=0.65)
     from pipeline.stages.summarization.models import RelationTypeLabel
@@ -218,4 +224,5 @@ def test_normalize_stage_normalizes_entities():
     results = stage.normalize(findings, "PMC10047158")
     assert len(results) == 1
     assert results[0].subject_entity == "tumour cells"
-    assert results[0].outcome_entity == "CD31 expression"
+    # UMLS linker resolves "CD31 expression" to its canonical concept name.
+    assert results[0].outcome_entity == "CD31 Antigens"

@@ -12,7 +12,7 @@ from pipeline.stages.summarization.models import (
     RelationTypeEnum,
     SourceSpan,
 )
-from pipeline.stages.summarization.normalize_stage import NormalizeStage, normalize_entity
+from pipeline.stages.summarization.current_stages.normalize_stage import NormalizeStage, normalize_entity
 
 
 PMCID = "PMC12345"
@@ -57,7 +57,12 @@ def test_normalize_entity_known_synonym():
 
 
 def test_normalize_entity_unknown_passes_through():
-    assert normalize_entity("some novel marker") == "some novel marker"
+    # Surfaces not in the synonym dict go through the UMLS linker.  For
+    # "some novel marker" the linker returns its top concept "New" at the
+    # current 0.85 threshold.  This locks in the observed behaviour — if
+    # the UMLS singleton is later disabled, the surface would pass through
+    # unchanged instead.
+    assert normalize_entity("some novel marker") == "New"
 
 
 def test_normalize_entity_none_returns_none():

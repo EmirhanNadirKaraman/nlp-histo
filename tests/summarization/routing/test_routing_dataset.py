@@ -162,7 +162,7 @@ class TestMapStageRoutingCollector:
     """Verify that _cascade() writes RoutingRecord to collector on the router path."""
 
     def _make_map_stage(self, routing_collector=None, agreement_decision=ChunkDecision.KEEP):
-        from pipeline.stages.summarization.map_stage import MapStage
+        from pipeline.stages.summarization.current_stages.map_stage import MapStage
         from pipeline.stages.summarization.routing.router import MapOutputRouter
 
         mock_voter_llm = MagicMock()
@@ -188,16 +188,19 @@ class TestMapStageRoutingCollector:
 
         router = MapOutputRouter(agreement_checker=mock_checker)
 
-        with patch("pipeline.stages.summarization.map_stage.build_map_chain") as mock_build:
-            # Two voter chains + one escalation chain
+        with patch("pipeline.stages.summarization.current_stages.map_stage.build_map_chain") as mock_build:
+            # 2 L1 voters + 2 L2 voters + 1 L3 escalation = 5 build_map_chain calls
             mock_build.side_effect = [
+                mock_voter_chain,
+                mock_voter_chain,
                 mock_voter_chain,
                 mock_voter_chain,
                 mock_escalation_chain,
             ]
             stage = MapStage(
-                voter_llms=[mock_voter_llm, mock_voter_llm],  # 2 voters → N_eligible >= 2
-                escalation_llm=mock_escalation_llm,
+                voter_llms=[mock_voter_llm, mock_voter_llm],         # L1 (2 voters)
+                level2_voter_llms=[mock_voter_llm, mock_voter_llm],  # L2 (2 voters)
+                escalation_llm=mock_escalation_llm,                  # L3
                 router=router,
                 routing_collector=routing_collector,
             )
@@ -205,7 +208,16 @@ class TestMapStageRoutingCollector:
         # Inject the mocked checker and chains
         stage._agreement = mock_checker
         stage._voter_chains = [mock_voter_chain, mock_voter_chain]
+        stage._level2_voter_chains = [mock_voter_chain, mock_voter_chain]
         stage._escalation_chain = mock_escalation_chain
+
+        # _cascade() reads from _last_escalation_counts, which is normally
+        # initialized in process().  Seed it here so we can call _cascade()
+        # directly without going through the full pipeline.
+        stage._last_escalation_counts = {
+            "total": 0, "l1_kept": 0, "l2_escalated": 0, "l2_kept": 0,
+            "l3_escalated": 0, "l3_kept": 0, "finalized": 0, "dropped": 0,
+        }
 
         return stage
 
