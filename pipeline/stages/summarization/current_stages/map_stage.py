@@ -205,6 +205,7 @@ class MapStage:
         collector=None,  # TraceCollector | None
         start_chunk: int = 0,
         limit_chunks: int | None = None,
+        usage_collector=None,  # costing.UsageCollector | None
     ) -> list[AuditableSummary]:
         """
         Map all sentences for one paper, returning one AuditableSummary per chunk.
@@ -229,6 +230,32 @@ class MapStage:
                 "l3_escalated": 0, "l3_kept": 0, "finalized": 0, "dropped": 0,
             }
 
+        # Thread the usage collector onto the instance for the duration of
+        # this paper. Reset in a finally so an exception cannot leave a stale
+        # collector reference visible to a future caller.
+        self._usage_collector = usage_collector
+        self._usage_pmcid = pmcid
+
+        try:
+            return self._process_inner(
+                sentences, pmcid, cache, collector, start_chunk, limit_chunks,
+                usage_collector,
+            )
+        finally:
+            self._usage_collector = None
+            self._usage_pmcid = None
+
+    def _process_inner(
+        self,
+        sentences,
+        pmcid,
+        cache,
+        collector,
+        start_chunk,
+        limit_chunks,
+        usage_collector,
+    ):
+        from ..observability.models import ChunkTrace
         all_chunks = self._make_chunks(sentences)
         total_paper_chunks = len(all_chunks)
         if start_chunk or limit_chunks is not None:
@@ -255,6 +282,12 @@ class MapStage:
                     hit = hit.model_copy(update={"chunk_id": f"C{abs_idx + 1}"})
                     results.append(hit)
                     cache_hit_indices.append(idx)
+                    if usage_collector is not None:
+                        usage_collector.record_cache_hit(
+                            stage="MAP", role="voter",
+                            substage="cache_hit",
+                            item_id=f"C{abs_idx + 1}",
+                        )
                     continue
             results.append(None)
             uncached.append((idx, chunk))
@@ -422,7 +455,15 @@ class MapStage:
                         "Chunk %s rejected by router — escalating to strong model.",
                         chunk_id,
                     )
-                result = self._escalation_chain.invoke(inp)
+                cfg_l3 = None
+                if getattr(self, "_usage_collector", None) is not None:
+                    p, m = self._l3_spec
+                    cfg_l3 = self._usage_collector.attach(
+                        stage="MAP", role="escalator", provider=p, model=m,
+                        cascade_level=3, substage="l3", item_id=chunk_id,
+                        was_escalation=True,
+                    )
+                result = self._escalation_chain.invoke(inp, config=cfg_l3) if cfg_l3 else self._escalation_chain.invoke(inp)
                 _producer = self._l3_spec
                 if decision.valid_voter_indices:
                     valid = [voters[i] for i in decision.valid_voter_indices]
@@ -508,7 +549,15 @@ class MapStage:
                     _escalated = True
                     _escalation_level = 3
                     logger.debug("Chunk %s: L2 %s → escalating to L3", chunk_id, l2_bundle.decision)
-                    result = self._escalation_chain.invoke(inp)
+                    cfg_l3 = None
+                    if getattr(self, "_usage_collector", None) is not None:
+                        p, m = self._l3_spec
+                        cfg_l3 = self._usage_collector.attach(
+                            stage="MAP", role="escalator", provider=p, model=m,
+                            cascade_level=3, substage="l3", item_id=chunk_id,
+                            was_escalation=True,
+                        )
+                    result = self._escalation_chain.invoke(inp, config=cfg_l3) if cfg_l3 else self._escalation_chain.invoke(inp)
                     _producer = self._l3_spec
 
         # ── Build chunk trace ───────────────────────────────────────────────
@@ -694,6 +743,16 @@ class MapStage:
         results: list[AuditableSummary | None] = [None] * len(target)
         timings: dict[int, float | None] = {}
 
+        # Match the chain list against our recorded specs so we can attribute
+        # usage to (provider, model) per voter. _l3 only fires from _cascade.
+        if chains is self._level2_voter_chains:
+            specs = self._l2_specs
+            cascade_level = 2
+        else:
+            specs = self._voter_specs
+            cascade_level = 1
+        collector = getattr(self, "_usage_collector", None)
+
         def _timed_invoke(chain, i: int):
             attempt = 0
             t0 = time.monotonic()
@@ -706,7 +765,17 @@ class MapStage:
                         pmcid, chunk_id, level, i, attempt,
                     )
                 try:
-                    out = chain.invoke(inp)
+                    cfg = None
+                    if collector is not None:
+                        provider, model = (
+                            specs[i] if i < len(specs) else ("unknown", "unknown")
+                        )
+                        cfg = collector.attach(
+                            stage="MAP", role="voter", provider=provider, model=model,
+                            cascade_level=cascade_level, substage=level.lower(),
+                            item_id=chunk_id,
+                        )
+                    out = chain.invoke(inp, config=cfg) if cfg else chain.invoke(inp)
                     elapsed_ms = (time.monotonic() - t0) * 1000.0
                     logger.debug(
                         "[%s] MAP chunk %s %s voter %d — OK  [%.0fms]",

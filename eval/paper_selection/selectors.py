@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 
 from .metrics import (
@@ -106,7 +107,10 @@ def select_related_papers(
     with any previously-picked paper.
     """
     cfg = config or SelectionConfig()
+    t0 = time.perf_counter()
     eligible = _eligible_short(fingerprints, cfg, cfg.max_sentences_related)
+    logger.info("[related] greedy: candidates=%d eligible=%d k=%d max_sent=%d",
+                len(fingerprints), len(eligible), k, cfg.max_sentences_related)
     if len(eligible) < k:
         logger.warning("select_related: only %d eligible papers (need %d)",
                        len(eligible), k)
@@ -159,6 +163,9 @@ def select_related_papers(
             "mean_relatedness_to_set": rel_to_set,
         }
 
+    logger.info("[related] greedy: picked %d in %.2fs — %s",
+                len(chosen), time.perf_counter() - t0,
+                [p.pmcid for p in chosen])
     return chosen, rationale
 
 
@@ -178,9 +185,12 @@ def select_diverse_papers(
     diversity.
     """
     cfg = config or SelectionConfig()
+    t0 = time.perf_counter()
     excluded = set(exclude_pmcids or [])
     eligible = [p for p in _eligible_short(fingerprints, cfg, cfg.max_sentences_diverse)
                 if p.pmcid not in excluded]
+    logger.info("[diverse] greedy: candidates=%d eligible=%d excluded=%d k=%d",
+                len(fingerprints), len(eligible), len(excluded), k)
     if len(eligible) < k:
         logger.warning("select_diverse: only %d eligible papers (need %d)",
                        len(eligible), k)
@@ -223,6 +233,9 @@ def select_diverse_papers(
             "diversity_gain": best[0],
         }
 
+    logger.info("[diverse] greedy: picked %d in %.2fs — %s",
+                len(chosen), time.perf_counter() - t0,
+                [p.pmcid for p in chosen])
     return chosen, rationale
 
 
@@ -250,10 +263,13 @@ def select_hard_papers(
 ) -> tuple[list[PaperFingerprint], dict[str, dict]]:
     """Compose the hard bucket: 2 high-normalized + 2 high-absolute + 1 medium control."""
     cfg = config or SelectionConfig()
+    t0 = time.perf_counter()
     excluded = set(exclude_pmcids or [])
 
     candidates = [p for p in fingerprints
                   if p.pmcid not in excluded and not p.is_empty()]
+    logger.info("[hard] greedy: candidates=%d excluded=%d non_empty=%d k=%d",
+                len(fingerprints), len(excluded), len(candidates), k)
     if not candidates:
         return [], {}
 
@@ -322,6 +338,9 @@ def select_hard_papers(
                 continue
             _add(p, b, "padding: next-hardest available candidate")
 
+    logger.info("[hard] greedy: picked %d in %.2fs — %s",
+                len(chosen[:k]), time.perf_counter() - t0,
+                [p.pmcid for p in chosen[:k]])
     return chosen[:k], rationale
 
 

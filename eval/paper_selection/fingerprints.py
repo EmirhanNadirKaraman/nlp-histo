@@ -16,12 +16,18 @@ as the summarisation MAP stage so workload numbers line up.
 """
 from __future__ import annotations
 
+import logging
 import math
 import re
+import time
 from dataclasses import dataclass, field
 
 from .loaders import RawEntity, RawPaper
 from .models import PaperFingerprint
+
+logger = logging.getLogger(__name__)
+
+_PROGRESS_EVERY = 100
 
 # ── UMLS semantic-type buckets ────────────────────────────────────────────────
 # Keys are TUI codes; semantic types not listed here fall through to the
@@ -322,4 +328,30 @@ def build_fingerprint(paper: RawPaper, config: FingerprintConfig | None = None) 
 def build_fingerprints(papers: list[RawPaper],
                        config: FingerprintConfig | None = None) -> list[PaperFingerprint]:
     cfg = config or FingerprintConfig()
-    return [build_fingerprint(p, cfg) for p in papers]
+    logger.info("build_fingerprints: starting on %d papers (chunk_size=%d)",
+                len(papers), cfg.chunk_size)
+    t0 = time.perf_counter()
+    out: list[PaperFingerprint] = []
+    for i, paper in enumerate(papers, start=1):
+        fp = build_fingerprint(paper, cfg)
+        out.append(fp)
+        logger.debug("build_fingerprints[%s]: n_sentences=%d n_chunks=%d "
+                     "n_useful_entities=%d",
+                     fp.pmcid, fp.n_sentences, fp.n_chunks, len(fp.entity_counts))
+        if i % _PROGRESS_EVERY == 0:
+            elapsed = time.perf_counter() - t0
+            rate = i / elapsed if elapsed > 0 else 0.0
+            eta = (len(papers) - i) / rate if rate > 0 else 0.0
+            logger.info("build_fingerprints: %d/%d (%.1f papers/s, ETA %.0fs)",
+                        i, len(papers), rate, eta)
+
+    n_empty = sum(1 for fp in out if fp.is_empty())
+    n_useful = sum(1 for fp in out if fp.has_useful_entities())
+    n_sentences = sum(fp.n_sentences for fp in out)
+    logger.info(
+        "build_fingerprints: done in %.1fs — %d papers, %d empty, %d with useful "
+        "entities, %d sentences total (mean %.0f/paper)",
+        time.perf_counter() - t0, len(out), n_empty, n_useful, n_sentences,
+        n_sentences / max(len(out), 1),
+    )
+    return out

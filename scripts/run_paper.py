@@ -252,6 +252,47 @@ def _sample_pmcids(n: int, seed: int) -> list[str]:
     return sample
 
 
+def _load_selection_yaml(path: Path) -> list[str]:
+    """Read a paper-selection YAML and return a de-duplicated PMCID list.
+
+    Expected shape (produced by ``eval.paper_selection.export.write_calibration_set``)::
+
+        version_name:
+          related: [PMC..., ...]
+          diverse: [PMC..., ...]
+          hard:    [PMC..., ...]
+
+    Buckets concatenate in related → diverse → hard order; duplicates are
+    dropped while preserving first occurrence.
+    """
+    import yaml
+
+    if not path.exists():
+        logger.error("--from-selection path not found: %s", path)
+        sys.exit(1)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not data:
+        logger.error("%s: expected a top-level mapping with a version key", path)
+        sys.exit(1)
+    version_key = next(iter(data))
+    buckets = data[version_key] or {}
+    if not isinstance(buckets, dict):
+        logger.error("%s: version %r is not a mapping", path, version_key)
+        sys.exit(1)
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for bucket in ("related", "diverse", "hard"):
+        for pmcid in buckets.get(bucket) or []:
+            if pmcid not in seen:
+                ordered.append(pmcid)
+                seen.add(pmcid)
+    if not ordered:
+        logger.error("%s: no PMCIDs found under related/diverse/hard", path)
+        sys.exit(1)
+    return ordered
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run summarization pipeline on one or more papers.")
     parser.add_argument("pmcid",          nargs="?", default=None,
@@ -259,6 +300,11 @@ def main():
                              "Omit to auto-sample from eval/data/source_cases.jsonl.")
     parser.add_argument("--all",           action="store_true",
                         help="Run all PMCIDs from eval/data/source_cases.jsonl")
+    parser.add_argument("--from-selection", default=None, metavar="PATH",
+                        help="Path to a paper-selection YAML "
+                             "(e.g. configs/paper_selection/smoke_v2.yaml). "
+                             "Loads all PMCIDs from related/diverse/hard. "
+                             "Takes precedence over --all / --sample / positional pmcid.")
     parser.add_argument("--sample",       type=int, default=2, metavar="N",
                         help="Number of PMCIDs to sample when pmcid is omitted (default: 2)")
     parser.add_argument("--seed",         type=int, default=42,
@@ -279,6 +325,17 @@ def main():
                         help="Reuse a single run_id across multiple papers so they "
                              "land in the same runs/{run_id}/ directory.")
     parser.add_argument(
+        "--skip-umls-enrichment", action="store_true",
+        help="Skip the post-CANONICALIZE UMLS enrichment step. NORMALIZE still "
+             "uses UMLS unless --disable-umls is set."
+    )
+    parser.add_argument(
+        "--disable-umls", action="store_true",
+        help="Disable scispaCy/UMLS entirely. Both NORMALIZE and the enrichment "
+             "step fall back to dict-only behavior. Avoids loading the multi-GB "
+             "UMLS KB — useful on memory-constrained machines."
+    )
+    parser.add_argument(
         "--profile", default=None, metavar="NAME",
         help="Cascade profile: smoke_haiku (default — Haiku-only smoke) | "
              "dev_sonnet (Haiku→Sonnet→Sonnet, dev quality) | "
@@ -294,7 +351,19 @@ def main():
         import os as _os
         _os.environ["NLP_HISTO_PROFILE"] = args.profile
 
-    if args.all:
+    # UMLS kill-switches — read by umls_resources and entity_linker.
+    import os as _os
+    if args.disable_umls:
+        _os.environ["NLP_HISTO_DISABLE_UMLS"] = "1"
+        logger.info("UMLS disabled via --disable-umls")
+    if args.skip_umls_enrichment:
+        _os.environ["NLP_HISTO_SKIP_UMLS_ENRICHMENT"] = "1"
+        logger.info("UMLS enrichment (post-CANONICALIZE) skipped via --skip-umls-enrichment")
+
+    if args.from_selection:
+        pmcids = _load_selection_yaml(Path(args.from_selection))
+        logger.info("Loaded %d PMCIDs from %s", len(pmcids), args.from_selection)
+    elif args.all:
         pmcids = _all_pmcids()
     elif args.pmcid is None:
         pmcids = _sample_pmcids(args.sample, args.seed)
@@ -423,20 +492,29 @@ def _level_cost(usage: dict, level: str) -> float:
     return total
 
 
-def _baseline_cost(usage: dict) -> float:
+def _baseline_cost(usage: dict) -> float | None:
     """Counterfactual cost if all chunks had gone straight to L3 (no cascade).
 
     Estimate per-chunk tokens from L1 totals divided by voter count, then price
-    at the L3 rate.  This is inherently approximate — we never actually sent all
-    chunks to L3 — but it gives a consistent, reproducible savings baseline.
+    at the L3 rate. Returns ``None`` when the baseline cannot be computed
+    (no L1 usage seen, or no price configured for the L3 model). A missing
+    baseline is reported as "unavailable" rather than silently returning 0,
+    which would surface as misleading negative savings for profiles where
+    every cascade level uses the same model (e.g. ``smoke_haiku``).
     """
     from pipeline.stages.summarization.batch.voter_configs import make_l1_voters
     n_l1_voters = len(make_l1_voters())
+    if not usage.get("l1"):
+        return None
     l3_model = next(iter(usage.get("l3", {}).keys()), "claude-sonnet-4-6-20251001")
-    l3_price = _MODEL_PRICE.get(l3_model, (3.00, 15.00))
+    l3_price = _MODEL_PRICE.get(l3_model)
+    if l3_price is None:
+        return None
 
     l1_total_inp = sum(c.get("input", 0) for c in usage.get("l1", {}).values())
     l1_total_out = sum(c.get("output", 0) for c in usage.get("l1", {}).values())
+    if l1_total_inp == 0 and l1_total_out == 0:
+        return None
     baseline_inp = l1_total_inp / n_l1_voters if n_l1_voters else 0
     baseline_out = l1_total_out / n_l1_voters if n_l1_voters else 0
     return (baseline_inp * l3_price[0] + baseline_out * l3_price[1]) / 1_000_000
@@ -454,7 +532,8 @@ def _escalation_stats(pmcid: str, handle) -> dict:
 
     usage = handle.token_usage
     actual_cost = sum(_level_cost(usage, lvl) for lvl in ("l1", "l2", "l3"))
-    saved = _baseline_cost(usage) - actual_cost
+    baseline = _baseline_cost(usage)
+    saved = (baseline - actual_cost) if baseline is not None else None
 
     return {
         "pmcid":            pmcid,
@@ -470,7 +549,7 @@ def _escalation_stats(pmcid: str, handle) -> dict:
         "l1_pct":           round(100 * l1_kept / total, 1) if total else 0.0,
         "token_usage":      usage,
         "est_cost_usd":     round(actual_cost, 6),
-        "est_saved_usd":    round(saved, 6),
+        "est_saved_usd":    (round(saved, 6) if saved is not None else None),
     }
 
 
@@ -491,7 +570,8 @@ def _escalation_stats_sync(pmcid: str, token_usage: dict, runner) -> dict:
     dropped   = ec.get("dropped", 0)
 
     actual_cost = sum(_level_cost(token_usage, lvl) for lvl in ("l1", "l2", "l3"))
-    saved = _baseline_cost(token_usage) - actual_cost
+    baseline = _baseline_cost(token_usage)
+    saved = (baseline - actual_cost) if baseline is not None else None
 
     return {
         "pmcid":            pmcid,
@@ -507,11 +587,19 @@ def _escalation_stats_sync(pmcid: str, token_usage: dict, runner) -> dict:
         "l1_pct":           round(100 * l1_kept / total, 1) if total else 0.0,
         "token_usage":      token_usage,
         "est_cost_usd":     round(actual_cost, 6),
-        "est_saved_usd":    round(saved, 6),
+        "est_saved_usd":    (round(saved, 6) if saved is not None else None),
     }
 
 
 def _save_escalation_report(stats: list[dict], output_dir: Path) -> None:
+    # When any per-paper baseline is unavailable, the aggregate is too —
+    # otherwise we'd be summing apples (real numbers) and oranges (zero
+    # standing in for "unknown") and the user couldn't tell the difference.
+    any_saved_missing = any(s.get("est_saved_usd") is None for s in stats)
+    saved_total = (
+        None if any_saved_missing
+        else round(sum(s["est_saved_usd"] for s in stats), 6)
+    )
     totals = {
         "pmcid":         "TOTAL",
         "mode":          "mixed" if len({s.get("mode") for s in stats}) > 1 else (stats[0].get("mode", "") if stats else ""),
@@ -524,7 +612,7 @@ def _save_escalation_report(stats: list[dict], output_dir: Path) -> None:
         "finalized":     sum(s["finalized"]      for s in stats),
         "dropped":       sum(s["dropped"]        for s in stats),
         "est_cost_usd":  round(sum(s["est_cost_usd"]  for s in stats), 6),
-        "est_saved_usd": round(sum(s["est_saved_usd"] for s in stats), 6),
+        "est_saved_usd": saved_total,
     }
     t = totals["total_chunks"]
     totals["l1_pct"] = round(100 * totals["l1_kept"] / t, 1) if t else 0.0
@@ -563,6 +651,9 @@ def _save_escalation_report(stats: list[dict], output_dir: Path) -> None:
     logger.info("Escalation report (CSV)  → %s", csv_path)
 
     # ── Console ───────────────────────────────────────────────────────────────
+    def _fmt_money(v) -> str:
+        return "    n/a " if v is None else f"{v:>8.5f}"
+
     print(f"\n{'─' * 80}")
     print("Cascade Escalation Report")
     print(f"{'─' * 80}")
@@ -572,17 +663,26 @@ def _save_escalation_report(stats: list[dict], output_dir: Path) -> None:
         print(
             f"{s['pmcid']:<45} {s.get('mode','?')[0]:>2} {s['total_chunks']:>5} {s['l1_pct']:>4.0f}%"
             f" {s['l2_escalated']:>4} {s['l3_escalated']:>4} {s['dropped']:>4}"
-            f" {s['est_cost_usd']:>8.5f} {s['est_saved_usd']:>8.5f}"
+            f" {s['est_cost_usd']:>8.5f} {_fmt_money(s['est_saved_usd'])}"
         )
     print(f"{'─' * 80}")
     print(
         f"{'TOTAL':<45} {'':>2} {totals['total_chunks']:>5} {totals['l1_pct']:>4.0f}%"
         f" {totals['l2_escalated']:>4} {totals['l3_escalated']:>4} {totals['dropped']:>4}"
-        f" {totals['est_cost_usd']:>8.5f} {totals['est_saved_usd']:>8.5f}"
+        f" {totals['est_cost_usd']:>8.5f} {_fmt_money(totals['est_saved_usd'])}"
     )
     print(f"{'─' * 80}")
     print(f"\nActual cost:    ${totals['est_cost_usd']:.5f}")
-    print(f"Saved vs L3-only baseline: ${totals['est_saved_usd']:.5f}")
+    if totals["est_saved_usd"] is None:
+        print("Saved vs L3-only baseline: unavailable (no L1 usage or L3 price missing)")
+    elif totals["est_saved_usd"] < 0:
+        print(
+            f"Saved vs L3-only baseline: ${totals['est_saved_usd']:.5f}  "
+            "(NEGATIVE — cascade was more expensive than L3-only; expected for "
+            "single-model profiles like smoke_haiku)"
+        )
+    else:
+        print(f"Saved vs L3-only baseline: ${totals['est_saved_usd']:.5f}")
 
 
 def _run_all_batch(

@@ -1,55 +1,26 @@
 """
-Lazy-loaded UMLS entity linker singleton for CUI enrichment of CanonicalRules.
+UMLS CUI enrichment for CanonicalRules.
 
-Reuses the same scispacy model and linker config as named_entity_recognition/ner.py
-but is kept separate so the summarization pipeline does not hard-depend on scispacy.
-If scispacy / en_core_sci_lg is unavailable the enrichment silently no-ops.
+Delegates model loading to ``pipeline.stages.summarization.umls_resources`` so
+the scispaCy + UMLS linker is loaded at most once per process.  Loading the
+~5 GB UMLS knowledge base twice was the most reliable way to OOM-kill a run
+mid-pipeline; this module exists to keep that from happening again.
 """
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
+
+_SKIP_ENV = "NLP_HISTO_SKIP_UMLS_ENRICHMENT"
 
 if TYPE_CHECKING:
     from ..models import CanonicalRule
 
-from ..umls_utils import UMLS_THRESHOLD, best_cui as _best_cui
+from ..umls_resources import get_nlp, get_linker, umls_disabled, _log_memory
+from ..umls_utils import best_cui as _best_cui
 
 logger = logging.getLogger(__name__)
-
-# Module-level singletons — loaded at most once per process.
-_nlp = None
-_load_attempted = False
-
-
-def _load() -> bool:
-    """Load the scispacy linker model. Returns True if ready."""
-    global _nlp, _load_attempted
-    if _load_attempted:
-        return _nlp is not None
-    _load_attempted = True
-    try:
-        import spacy
-        import scispacy  # noqa: F401  — registers scispacy components
-        from scispacy.linking import EntityLinker  # noqa: F401  — registers factory
-
-        nlp = spacy.load(
-            "en_core_sci_lg",
-            disable=["parser", "attribute_ruler", "lemmatizer"],
-        )
-        nlp.add_pipe("scispacy_linker", config={
-            "resolve_abbreviations": True,
-            "linker_name": "umls",
-            "threshold": UMLS_THRESHOLD,
-        })
-        _nlp = nlp
-        logger.info("Entity linker loaded for CUI enrichment")
-        return True
-    except Exception as exc:
-        logger.warning(
-            "UMLS linker unavailable — CUI enrichment skipped: %s", exc
-        )
-        return False
 
 
 def _best_cui_from_doc(doc, kb) -> str | None:
@@ -59,19 +30,40 @@ def _best_cui_from_doc(doc, kb) -> str | None:
     return _best_cui(kb_ents_by_span, kb, doc.text)
 
 
-def enrich_rules_with_cuis(rules: list[CanonicalRule]) -> None:
-    """
-    Fill in subject_cui and outcome_cui on CanonicalRule objects **in-place**.
+def enrich_rules_with_cuis(
+    rules: list[CanonicalRule],
+    *,
+    batch_size: int = 32,
+) -> None:
+    """Fill in subject_cui / outcome_cui on rules **in-place**.
 
-    Only processes rules that are missing at least one CUI — rules whose CUIs
-    were already set during NORMALIZE (via NormalFinding propagation) are
-    skipped.  Silently no-ops when the linker is unavailable or enrichment fails.
+    Skips rules that already have both CUIs set (typically propagated from
+    NORMALIZE).  Silently no-ops when the linker is unavailable or has been
+    disabled via the env var / CLI flag.
     """
+    if os.environ.get(_SKIP_ENV, "").lower() in {"1", "true", "yes"}:
+        logger.info(
+            "CUI enrichment skipped via $%s (rules pass through unmodified)",
+            _SKIP_ENV,
+        )
+        return
     rules_to_enrich = [r for r in rules if not (r.subject_cui and r.outcome_cui)]
-    if not rules_to_enrich or not _load():
+    if not rules_to_enrich:
+        logger.info(
+            "CUI enrichment skipped: all %d rules already enriched", len(rules),
+        )
+        return
+    if umls_disabled():
+        logger.info("CUI enrichment skipped: UMLS disabled (env / CLI flag)")
         return
 
-    # Collect unique non-empty entity strings from rules that need enrichment
+    _log_memory("before UMLS enrichment")
+    nlp = get_nlp()
+    if nlp is None:
+        return
+    linker = get_linker()
+    kb = linker.kb
+
     texts: list[str] = list({
         t
         for r in rules_to_enrich
@@ -81,10 +73,14 @@ def enrich_rules_with_cuis(rules: list[CanonicalRule]) -> None:
     if not texts:
         return
 
-    kb = _nlp.get_pipe("scispacy_linker").kb
+    logger.info(
+        "CUI enrichment: %d unique entity strings across %d rules (batch_size=%d)",
+        len(texts), len(rules_to_enrich), batch_size,
+    )
+
     cui_map: dict[str, str | None] = {}
     try:
-        for doc in _nlp.pipe(texts, batch_size=32):
+        for doc in nlp.pipe(texts, batch_size=batch_size):
             cui_map[doc.text] = _best_cui_from_doc(doc, kb)
     except Exception as exc:
         logger.warning("CUI enrichment batch failed: %s", exc)
@@ -98,3 +94,4 @@ def enrich_rules_with_cuis(rules: list[CanonicalRule]) -> None:
 
     enriched = sum(1 for r in rules if r.subject_cui or r.outcome_cui)
     logger.info("CUI enrichment: %d/%d rules enriched", enriched, len(rules))
+    _log_memory("after UMLS enrichment")

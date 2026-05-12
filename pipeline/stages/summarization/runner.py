@@ -86,6 +86,7 @@ from .models import (
     compute_finding_id,
 )
 from .current_stages.normalize_stage import NormalizeStage
+from .costing import PriceBook, UsageCollector, write_cost_reports
 from .observability import TraceCollector, flush_collector
 from .old_stages.reduce_stage import ReduceStage
 from .current_stages.relate_stage import RelateStage
@@ -96,6 +97,7 @@ from pipeline.stages.summarization.interfaces import (
     GroundingChecker,
     MapOutputScorer,
 )
+from pipeline.utils.memory_logging import MemoryLogger
 
 logger = logging.getLogger(__name__)
 
@@ -321,11 +323,20 @@ class SummarizationRunner:
             self._make_collector(pmcid, run_id) if self._trace_enabled else None
         )
 
+        # Cost / usage accounting — opt-in via cfg.cost.enable_cost_report.
+        usage_collector: UsageCollector | None = (
+            UsageCollector(run_id=run_id, paper_id=pmcid)
+            if self._cfg.cost.enable_cost_report else None
+        )
+
         # Filesystem artifacts — opt-in via artifact_root. Returns None when disabled.
         writer = self._make_artifact_writer(run_id, pmcid)
         prev_log_dir = os.environ.get("NLP_HISTO_LOG_DIR")
         if writer is not None:
             os.environ["NLP_HISTO_LOG_DIR"] = str(writer.logs_dir())
+
+        mem = MemoryLogger(pmcid=pmcid)
+        mem.checkpoint("pipeline", "start")
 
         try:
             t_total = time.perf_counter()
@@ -342,10 +353,12 @@ class SummarizationRunner:
             # 1. MAP (ABC cascade per chunk)
             logger.info("[%s] MAP — %d sentences", pmcid, len(sentences))
             t0 = time.perf_counter()
-            chunk_summaries = self._map.process(
-                sentences, pmcid, cache=self._cache, collector=collector,
-                start_chunk=start_chunk, limit_chunks=limit_chunks,
-            )
+            with mem.stage("MAP"):
+                chunk_summaries = self._map.process(
+                    sentences, pmcid, cache=self._cache, collector=collector,
+                    start_chunk=start_chunk, limit_chunks=limit_chunks,
+                    usage_collector=usage_collector,
+                )
             logger.info("[%s] MAP done [%.1fs] — %d chunks, %d raw findings",
                         pmcid, time.perf_counter() - t0,
                         len(chunk_summaries),
@@ -383,12 +396,13 @@ class SummarizationRunner:
                 findings_before = map_findings_total
                 logger.info("[%s] GROUNDING (filter+score) — %d findings", pmcid, findings_before)
                 t0 = time.perf_counter()
-                new_summaries = []
-                for cs in chunk_summaries:
-                    kept_cs, dropped = self._grounding.filter_findings_with_scores(cs)
-                    new_summaries.append(kept_cs)
-                    for f in dropped:
-                        grounding_rejected.append((cs.chunk_id, f))
+                with mem.stage("GROUNDING"):
+                    new_summaries = []
+                    for cs in chunk_summaries:
+                        kept_cs, dropped = self._grounding.filter_findings_with_scores(cs)
+                        new_summaries.append(kept_cs)
+                        for f in dropped:
+                            grounding_rejected.append((cs.chunk_id, f))
                 chunk_summaries = new_summaries
                 findings_after = sum(len(cs.findings) for cs in chunk_summaries)
                 logger.info(
@@ -422,9 +436,10 @@ class SummarizationRunner:
             n_scored = len(self._scored_map_findings.get(pmcid, []))
             logger.info("[%s] NORMALIZE — %d scored findings", pmcid, n_scored)
             t0 = time.perf_counter()
-            self._normal_findings[pmcid] = self._normalize.normalize(
-                self._scored_map_findings.get(pmcid, []), pmcid
-            )
+            with mem.stage("NORMALIZE"):
+                self._normal_findings[pmcid] = self._normalize.normalize(
+                    self._scored_map_findings.get(pmcid, []), pmcid
+                )
             logger.info("[%s] NORMALIZE done [%.1fs] — %d NormalFindings",
                         pmcid, time.perf_counter() - t0, len(self._normal_findings[pmcid]))
             _nf_db_id_map = self._persist_normal_findings(
@@ -441,7 +456,8 @@ class SummarizationRunner:
                 pmcid, len(groupable), len(non_groupable_nfs),
             )
             t0 = time.perf_counter()
-            self._finding_groups[pmcid] = self._group.group(groupable, pmcid)
+            with mem.stage("GROUP"):
+                self._finding_groups[pmcid] = self._group.group(groupable, pmcid)
             logger.info("[%s] GROUP done [%.1fs] — %d groups",
                         pmcid, time.perf_counter() - t0, len(self._finding_groups[pmcid]))
             _fg_db_id_map = self._persist_finding_groups(
@@ -454,19 +470,21 @@ class SummarizationRunner:
             # 1d. CANONICALIZE — FindingGroup[] → CanonicalRule[]
             logger.info("[%s] CANONICALIZE — %d groups", pmcid, len(self._finding_groups[pmcid]))
             t0 = time.perf_counter()
-            nf_by_id: dict[str, NormalFinding] = {
-                nf.normal_id: nf for nf in all_normal
-            }
-            self._canonical_rules[pmcid] = self._canonicalize.canonicalize(
-                self._finding_groups[pmcid], nf_by_id, pmcid
-            )
+            with mem.stage("CANONICALIZE"):
+                nf_by_id: dict[str, NormalFinding] = {
+                    nf.normal_id: nf for nf in all_normal
+                }
+                self._canonical_rules[pmcid] = self._canonicalize.canonicalize(
+                    self._finding_groups[pmcid], nf_by_id, pmcid
+                )
             logger.info("[%s] CANONICALIZE done [%.1fs] — %d CanonicalRules",
                         pmcid, time.perf_counter() - t0, len(self._canonical_rules[pmcid]))
 
             # Enrich canonical rules with UMLS CUIs for cross-paper entity matching.
             # No-ops silently if scispacy is unavailable.
             from .helpers.entity_linker import enrich_rules_with_cuis  # noqa: PLC0415
-            enrich_rules_with_cuis(self._canonical_rules[pmcid])
+            with mem.stage("UMLS_ENRICH"):
+                enrich_rules_with_cuis(self._canonical_rules[pmcid])
             _cr_db_id_map = self._persist_canonical_rules(
                 pipeline_run_db_id, pmcid, self._canonical_rules[pmcid], _fg_db_id_map
             )
@@ -480,11 +498,12 @@ class SummarizationRunner:
                 "[%s] RELATE — %d canonical rules", pmcid, len(self._canonical_rules[pmcid])
             )
             t0 = time.perf_counter()
-            (
-                self._relations[pmcid],
-                self._relate_raw_pairs[pmcid],
-                relate_skipped,
-            ) = self._relate.relate(self._canonical_rules[pmcid], pmcid)
+            with mem.stage("RELATE"):
+                (
+                    self._relations[pmcid],
+                    self._relate_raw_pairs[pmcid],
+                    relate_skipped,
+                ) = self._relate.relate(self._canonical_rules[pmcid], pmcid)
             self._relate_skipped_pairs[pmcid] = relate_skipped
             logger.info(
                 "[%s] RELATE done [%.1fs] — %d relations, %d raw pairs, %d gate-skipped",
@@ -509,9 +528,10 @@ class SummarizationRunner:
                 pmcid, len(self._canonical_rules[pmcid]), len(self._relations[pmcid]),
             )
             t0 = time.perf_counter()
-            self._final_rules[pmcid] = self._resolve.resolve(
-                self._canonical_rules[pmcid], self._relations[pmcid], pmcid
-            )
+            with mem.stage("RESOLVE"):
+                self._final_rules[pmcid] = self._resolve.resolve(
+                    self._canonical_rules[pmcid], self._relations[pmcid], pmcid
+                )
             logger.info("[%s] RESOLVE done [%.1fs] — %d FinalRules",
                         pmcid, time.perf_counter() - t0, len(self._final_rules[pmcid]))
             self._persist_final_rules(
@@ -529,17 +549,19 @@ class SummarizationRunner:
             if self._run_reduce:
                 logger.info("[%s] REDUCE — %d chunks", pmcid, len(chunk_summaries))
                 t0 = time.perf_counter()
-                master = self._reduce.reduce(
-                    chunk_summaries, pmcid, cache=self._cache, collector=collector
-                )
+                with mem.stage("REDUCE"):
+                    master = self._reduce.reduce(
+                        chunk_summaries, pmcid, cache=self._cache, collector=collector
+                    )
                 logger.info("[%s] REDUCE done [%.1fs]", pmcid, time.perf_counter() - t0)
 
                 # 3. RULE EXTRACTION
                 logger.info("[%s] RULES", pmcid)
                 t0 = time.perf_counter()
-                rules = self._rules.extract(
-                    master, pmcid, cache=self._cache, collector=collector
-                )
+                with mem.stage("RULES"):
+                    rules = self._rules.extract(
+                        master, pmcid, cache=self._cache, collector=collector
+                    )
                 logger.info("[%s] RULES done [%.1fs] — %d rules",
                             pmcid, time.perf_counter() - t0, len(rules.rules))
 
@@ -573,13 +595,17 @@ class SummarizationRunner:
             if self._run_ner and self._db is not None:
                 logger.info("[%s] NER — running entity extraction + UMLS linking", pmcid)
                 t0 = time.perf_counter()
+                mem.checkpoint("NER", "before")
                 try:
                     from named_entity_recognition.ner import run_ner_on_db
                     run_ner_on_db(pmcid, save_to_db=True, force=False)
                     logger.info("[%s] NER done [%.1fs]", pmcid, time.perf_counter() - t0)
+                    mem.checkpoint("NER", "after")
                 except Exception as ner_exc:
                     logger.warning("[%s] NER failed (non-fatal): %s", pmcid, ner_exc)
+                    mem.checkpoint("NER", "failed")
 
+            mem.checkpoint("pipeline", "end")
             logger.info("[%s] Pipeline complete [%.1fs total]",
                         pmcid, time.perf_counter() - t_total)
 
@@ -635,6 +661,8 @@ class SummarizationRunner:
                 collector.add_artifact(result_path, "result_json")
                 flush_collector(collector, self.trace_dir, status="success")
 
+            self._write_cost_artifacts(usage_collector, writer, run_id, pmcid)
+
             if writer is not None:
                 writer.finalize("completed")
 
@@ -642,6 +670,7 @@ class SummarizationRunner:
 
         except KeyboardInterrupt:
             logger.warning("[%s] Pipeline interrupted (KeyboardInterrupt)", pmcid)
+            mem.checkpoint(mem.last_stage or "pipeline", "interrupted")
             self._finish_pipeline_run(pipeline_run_db_id, "interrupted", error="KeyboardInterrupt")
             if collector is not None:
                 flush_collector(collector, self.trace_dir, status="interrupted", error="KeyboardInterrupt")
@@ -649,10 +678,12 @@ class SummarizationRunner:
                 writer.finalize("failed", error="KeyboardInterrupt")
             raise
         except Exception as exc:
+            mem.checkpoint(mem.last_stage or "pipeline", "failed")
             logger.exception("[%s] Pipeline failed: %s", pmcid, exc)
             self._finish_pipeline_run(pipeline_run_db_id, "failed", error=str(exc))
             if collector is not None:
                 flush_collector(collector, self.trace_dir, status="error", error=str(exc))
+            self._write_cost_artifacts(usage_collector, writer, run_id, pmcid)
             if writer is not None:
                 writer.write_error(stage="pipeline", error=str(exc), pmcid=pmcid)
                 writer.finalize("failed", error=str(exc))
@@ -1487,6 +1518,41 @@ class SummarizationRunner:
                 )
         except Exception as exc:
             logger.warning("[%s] DB: failed to persist final rules: %s", pmcid, exc)
+
+    def _cost_output_dir(
+        self, writer: RunArtifactWriter | None, run_id: str,
+    ) -> Path:
+        """Where to write cost_report.* and llm_usage_records.jsonl.
+
+        Precedence: explicit cfg override → run-artifact dir → output_dir/cost/{run_id}.
+        """
+        override = self._cfg.cost.cost_report_output_dir
+        if override:
+            return Path(override)
+        if writer is not None:
+            return writer.run_dir / "cost"
+        return self._output_dir / "cost" / run_id
+
+    def _write_cost_artifacts(
+        self,
+        usage_collector: UsageCollector | None,
+        writer: RunArtifactWriter | None,
+        run_id: str,
+        pmcid: str,
+    ) -> None:
+        """Persist usage JSONL and cost report. Never raises."""
+        if usage_collector is None or len(usage_collector) == 0:
+            return
+        try:
+            out_dir = self._cost_output_dir(writer, run_id)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            if self._cfg.cost.write_usage_jsonl:
+                usage_collector.write_jsonl(out_dir / "llm_usage_records.jsonl")
+            book = PriceBook.load(self._cfg.cost.model_prices_path)
+            write_cost_reports(usage_collector.records(), book, out_dir)
+            logger.info("[%s] cost report written to %s", pmcid, out_dir)
+        except Exception as exc:
+            logger.warning("[%s] cost report write failed (non-fatal): %s", pmcid, exc)
 
     def _result_path(self, pmcid: str) -> Path:
         return self._summaries_dir / f"{pmcid}.json"

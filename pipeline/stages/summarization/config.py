@@ -112,6 +112,23 @@ class ResolveConfig:
 
 
 @dataclass
+class CostConfig:
+    """Runtime cost / usage accounting knobs."""
+
+    enable_cost_report: bool = True
+    """Collect LLM usage records during the run and write a cost report at end."""
+
+    write_usage_jsonl: bool = True
+    """Write the canonical llm_usage_records.jsonl. Source of truth for reports."""
+
+    model_prices_path: str | None = None
+    """Override path to model_prices.json. None → configs/model_prices.json at repo root."""
+
+    cost_report_output_dir: str | None = None
+    """Override output directory. None → run artifact dir, or output_dir/cost/{run_id}/."""
+
+
+@dataclass
 class SummarizationConfig:
     """
     All numeric/boolean knobs for SummarizationRunner in one place.
@@ -124,6 +141,7 @@ class SummarizationConfig:
     grounding: GroundingConfig = field(default_factory=GroundingConfig)
     relate: RelateConfig = field(default_factory=RelateConfig)
     resolve: ResolveConfig = field(default_factory=ResolveConfig)
+    cost: CostConfig = field(default_factory=CostConfig)
 
     contradiction_similarity_threshold: float | None = 0.7
     """Cosine similarity threshold for ContradictionDetector candidate pairs.

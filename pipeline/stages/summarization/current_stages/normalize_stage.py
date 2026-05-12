@@ -126,81 +126,33 @@ _SYNONYMS: dict[str, str] = _load_synonyms()
 # Shared across all NormalizeStage instances in the same process.
 _UMLS_CACHE: dict[str, tuple[str | None, str | None]] = {}
 
-# Module-level scispaCy model + linker singleton (None until first use).
-_SPACY_NLP = None
-_SPACY_LINKER = None
-_SPACY_AVAILABLE: bool | None = None   # None = not yet probed
-
-
-def _probe_spacy() -> bool:
-    """
-    Try to load a scispaCy model with UMLS linker.  Attempts en_core_sci_lg
-    first; falls back to en_core_sci_sm if lg is not installed.  Sets
-    module-level _SPACY_NLP, _SPACY_LINKER, _SPACY_AVAILABLE.
-    Returns True on success.
-    """
-    global _SPACY_NLP, _SPACY_LINKER, _SPACY_AVAILABLE
-    try:
-        import spacy                                # type: ignore
-        import scispacy                             # noqa: F401  # type: ignore
-        from scispacy.linking import EntityLinker   # noqa: F401  # type: ignore
-
-        for model_name in ("en_core_sci_lg", "en_core_sci_sm"):
-            try:
-                logger.info("NORMALIZE: loading %s + UMLS linker (one-time)…", model_name)
-                nlp = spacy.load(model_name, disable=["parser", "attribute_ruler", "lemmatizer"])
-                nlp.add_pipe("scispacy_linker", config={
-                    "resolve_abbreviations": True,
-                    "linker_name": "umls",
-                    "threshold": _UMLS_THRESHOLD,
-                })
-                _SPACY_NLP = nlp
-                _SPACY_LINKER = nlp.get_pipe("scispacy_linker")
-                _SPACY_AVAILABLE = True
-                logger.info("NORMALIZE: scispaCy + UMLS linker ready (%s).", model_name)
-                return True
-            except OSError:
-                logger.info("NORMALIZE: %s not found, trying next…", model_name)
-                continue
-
-        raise RuntimeError("No scispaCy model found (tried en_core_sci_lg, en_core_sci_sm)")
-    except Exception as exc:
-        logger.warning("NORMALIZE: scispaCy unavailable (%s) — using dict fallback only.", exc)
-        _SPACY_AVAILABLE = False
-        return False
-
 
 def _umls_canonical_with_cui(text: str) -> tuple[str | None, str | None]:
     """
     Return (canonical_name, cui) for *text*, or (None, None) if no confident link.
 
-    Uses the module-level scispaCy model.  Results are cached in _UMLS_CACHE.
+    Uses the process-wide scispaCy singleton from ``umls_resources``.  Results
+    are cached per-process in ``_UMLS_CACHE``.
     """
-    global _SPACY_AVAILABLE
-
     if text in _UMLS_CACHE:
         return _UMLS_CACHE[text]
 
-    # Probe on first call
-    if _SPACY_AVAILABLE is None:
-        _probe_spacy()
-
-    if not _SPACY_AVAILABLE:
-        result: tuple[str | None, str | None] = (None, None)
-        _UMLS_CACHE[text] = result
-        return result
+    from ..umls_resources import get_nlp, get_linker  # local import: avoid cycles
+    nlp = get_nlp()
+    if nlp is None:
+        _UMLS_CACHE[text] = (None, None)
+        return (None, None)
+    linker = get_linker()
 
     try:
-        doc = _SPACY_NLP(text)  # type: ignore[arg-type]
-
-        # Prefer entity spans; fall back to doc-level kb_ents
+        doc = nlp(text)
         spans = doc.ents if doc.ents else [doc]
         kb_ents_by_span = [getattr(span._, "kb_ents", []) for span in spans]
-        cui = _best_cui(kb_ents_by_span, _SPACY_LINKER.kb, text)  # type: ignore[union-attr]
+        cui = _best_cui(kb_ents_by_span, linker.kb, text)
 
         canonical: str | None = None
         if cui:
-            concept = _SPACY_LINKER.kb.cui_to_entity.get(cui)  # type: ignore[union-attr]
+            concept = linker.kb.cui_to_entity.get(cui)
             if concept:
                 canonical = concept.canonical_name
 

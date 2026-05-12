@@ -63,6 +63,7 @@ from ..persistence import (
     persist_relate_artifacts,
     persist_resolve_artifacts,
 )
+from ..costing import PriceBook, UsageCollector, write_cost_reports
 from .dispatch import OPENAI_MAP_TOOL, build_providers, build_requests, parse_result, submit_level
 from .models import BatchHandle, BatchPhase, BatchResult, ProviderJob, VoterBatchConfig
 
@@ -449,6 +450,8 @@ class BatchSummarizationRunner:
             out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
             logger.info("[%s] Result saved to %s", pmcid, out_path)
 
+            self._write_batch_cost_artifacts(handle, writer, run_id, pmcid)
+
             if writer is not None:
                 writer.finalize("completed")
             return result
@@ -522,6 +525,75 @@ class BatchSummarizationRunner:
         except Exception as exc:
             logger.warning("[%s] artifact writer setup failed: %s", pmcid, exc)
             return None
+
+    def _write_batch_cost_artifacts(
+        self,
+        handle: BatchHandle,
+        writer: RunArtifactWriter | None,
+        run_id: str,
+        pmcid: str,
+    ) -> None:
+        """Emit per-(level, model) usage records from handle.token_usage and write reports.
+
+        Per-chunk granularity is not preserved across batch resumes (only the
+        per-level/per-model totals on the handle survive); we synthesize one
+        ``LLMUsageRecord`` per (level, model) instead.  This loses item_id
+        attribution but keeps the cost report reproducible from durable state.
+        """
+        cost_cfg = self._cfg_full.cost
+        if not cost_cfg.enable_cost_report:
+            return
+        try:
+            collector = UsageCollector(run_id=run_id, paper_id=pmcid)
+            level_to_cascade = {"l1": 1, "l2": 2, "l3": 3}
+            level_to_role = {"l1": "voter", "l2": "voter", "l3": "escalator"}
+
+            def _spec_for_model(level: str, model_id: str) -> tuple[str, str]:
+                voters = (
+                    self._l1 if level == "l1"
+                    else self._l2 if level == "l2"
+                    else [self._l3]
+                )
+                for v in voters:
+                    if v.model == model_id:
+                        return v.provider, v.model
+                return "unknown", model_id
+
+            for level, per_model in handle.token_usage.items():
+                cascade_level = level_to_cascade.get(level)
+                role = level_to_role.get(level, "voter")
+                for model_id, tokens in per_model.items():
+                    in_t = int(tokens.get("input", 0) or 0)
+                    out_t = int(tokens.get("output", 0) or 0)
+                    if in_t == 0 and out_t == 0:
+                        continue
+                    provider, model = _spec_for_model(level, model_id)
+                    collector.record_batch(
+                        stage="MAP", role=role,
+                        provider=provider, model=model,
+                        input_tokens=in_t, output_tokens=out_t,
+                        cascade_level=cascade_level,
+                        substage=level,
+                    )
+
+            if len(collector) == 0:
+                return
+
+            override = cost_cfg.cost_report_output_dir
+            if override:
+                out_dir = Path(override)
+            elif writer is not None:
+                out_dir = writer.run_dir / "cost"
+            else:
+                out_dir = self._output_dir / "cost" / run_id
+            out_dir.mkdir(parents=True, exist_ok=True)
+            if cost_cfg.write_usage_jsonl:
+                collector.write_jsonl(out_dir / "llm_usage_records.jsonl")
+            book = PriceBook.load(cost_cfg.model_prices_path)
+            write_cost_reports(collector.records(), book, out_dir)
+            logger.info("[%s] batch cost report written to %s", pmcid, out_dir)
+        except Exception as exc:
+            logger.warning("[%s] batch cost report write failed (non-fatal): %s", pmcid, exc)
 
     # ── Internal helpers ────────────────────────────────────────────────────────
 

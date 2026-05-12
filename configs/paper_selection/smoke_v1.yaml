@@ -1,0 +1,10 @@
+smoke_v1:
+  related:
+    - PMC7150310_main
+    - PMC7150046_main
+  diverse:
+    - PMC11863821_main
+    - PMC7149975_main
+  hard:
+    - PMC7810815_main
+    - PMC7811793_main

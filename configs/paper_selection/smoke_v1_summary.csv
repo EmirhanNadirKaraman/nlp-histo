@@ -1,0 +1,7 @@
+pmcid,bucket,title,n_sentences,n_chunks,n_text_elements,n_tables,n_figures,n_disease_entities,n_biomarker_entities,n_gene_entities,n_method_entities,n_outcome_entities,normalized_hardness,absolute_hardness,selection_reason
+PMC7150310_main,related,,306,31,61,1,6,222,2,132,125,144,,,"ILP related: quality=1.200, length_penalty=0.874"
+PMC7150046_main,related,,295,30,57,0,6,209,1,120,112,138,,,"ILP related: quality=1.200, length_penalty=0.843"
+PMC11863821_main,diverse,,251,26,32,6,6,133,0,223,69,106,,,ILP diverse: contributes 128 concepts to coverage
+PMC7149975_main,diverse,,331,34,71,8,26,309,4,66,61,126,,,ILP diverse: contributes 150 concepts to coverage
+PMC7810815_main,hard,,10667,1067,1665,138,192,3082,24,1177,288,799,0.7381847977160623,5.147763443228733,"ILP hard: absolute=5.148, normalized=0.738, sub-pools=[top_absolute]"
+PMC7811793_main,hard,,11242,1125,2157,163,210,3189,5,933,295,781,0.6996682155831564,4.9161675071685265,"ILP hard: absolute=4.916, normalized=0.700, sub-pools=[top_absolute]"

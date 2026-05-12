@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
+
+_PROGRESS_EVERY = 50
 
 
 @dataclass
@@ -64,8 +67,12 @@ class DBLoader:
     def list_pmcids(self) -> list[str]:
         from database import Document
         db = self._get_db()
+        t0 = time.perf_counter()
         with db.session_scope() as session:
-            return [row.pmcid for row in session.query(Document.pmcid).all()]
+            pmcids = [row.pmcid for row in session.query(Document.pmcid).all()]
+        logger.info("DBLoader.list_pmcids: %d pmcids in %.2fs",
+                    len(pmcids), time.perf_counter() - t0)
+        return pmcids
 
     def load_paper(self, pmcid: str) -> RawPaper | None:
         from database import Document, Entity, Figure, Table, TextElement
@@ -131,12 +138,26 @@ class DBLoader:
 
     def iter_papers(self, pmcids: Iterable[str] | None = None) -> Iterable[RawPaper]:
         targets = list(pmcids) if pmcids is not None else self.list_pmcids()
-        for pmcid in targets:
+        logger.info("DBLoader.iter_papers: loading %d papers from DB", len(targets))
+        t0 = time.perf_counter()
+        n_yielded = 0
+        n_missing = 0
+        for i, pmcid in enumerate(targets, start=1):
             paper = self.load_paper(pmcid)
             if paper is None:
                 logger.warning("DBLoader: pmcid %s not found", pmcid)
+                n_missing += 1
                 continue
+            n_yielded += 1
             yield paper
+            if i % _PROGRESS_EVERY == 0:
+                elapsed = time.perf_counter() - t0
+                rate = i / elapsed if elapsed > 0 else 0.0
+                eta = (len(targets) - i) / rate if rate > 0 else 0.0
+                logger.info("DBLoader: %d/%d loaded (%.1f papers/s, ETA %.0fs)",
+                            i, len(targets), rate, eta)
+        logger.info("DBLoader: done — %d loaded, %d missing in %.1fs",
+                    n_yielded, n_missing, time.perf_counter() - t0)
 
 
 # ── JSONL loader ─────────────────────────────────────────────────────────────

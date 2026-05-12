@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from pathlib import Path
 
 from .export import write_calibration_set
@@ -87,7 +88,9 @@ def _validate_selection(
 
     rel_mean = _mean_pairwise(result.related)
     div_mean = _mean_pairwise(result.diverse)
-    if result.related and result.diverse and rel_mean <= div_mean:
+    # Pairwise relatedness only makes sense with ≥2 papers per bucket.
+    if (len(result.related) >= 2 and len(result.diverse) >= 2
+            and rel_mean <= div_mean):
         issues.append(
             f"related mean pairwise relatedness ({rel_mean:.3f}) "
             f"is not greater than diverse ({div_mean:.3f})"
@@ -128,15 +131,25 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-sentences-related", type=int, default=350)
     p.add_argument("--max-sentences-diverse", type=int, default=350)
     p.add_argument("--min-sentences",         type=int, default=20)
+    p.add_argument("--max-text-elements", type=int, default=None,
+                   help="Drop any paper with more than N text elements before "
+                        "fingerprinting. Applies to all buckets (including hard). "
+                        "Useful for excluding textbook-chapter / thesis outliers.")
     p.add_argument("--allow-overlap", default="false",
                    help="Allow a paper to appear in more than one bucket (true|false).")
 
     p.add_argument("--strategy", choices=("greedy", "ilp"), default="greedy",
                    help="Selection strategy. 'ilp' requires PuLP (pip install pulp).")
     p.add_argument("--time-limit-seconds", type=float, default=None,
-                   help="Per-bucket ILP solver time budget. Ignored under --strategy greedy.")
-    p.add_argument("--candidate-limit", type=int, default=200,
-                   help="Max candidates kept per bucket before building the ILP.")
+                   help="Per-bucket ILP solver time budget (default: ILPConfig "
+                        "default — 30s). Pass 0 to disable. Ignored under --strategy greedy.")
+    p.add_argument("--candidate-limit", type=int, default=None,
+                   help="Override per-bucket candidate caps with a single value. "
+                        "When omitted, bucket-specific defaults are used "
+                        "(related=80, diverse=100, hard=120). Pass 0 to disable "
+                        "the cap entirely (slower but exhaustive).")
+    p.add_argument("--solver-verbose", action="store_true",
+                   help="Stream CBC progress (LP root, cuts, node count, gap) to stdout.")
     p.add_argument("--ilp-fallback-greedy", action="store_true",
                    help="If PuLP is missing, silently fall back to greedy instead of erroring.")
 
@@ -166,15 +179,30 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Loading from database")
 
     pmcids = args.pmcid
+    t_load = time.perf_counter()
     raw_papers = list(loader.iter_papers(pmcids))
-    logger.info("Loaded %d papers", len(raw_papers))
+    logger.info("Loaded %d papers in %.1fs", len(raw_papers),
+                time.perf_counter() - t_load)
     if not raw_papers:
         logger.error("No papers loaded — aborting")
         return 2
 
+    # ── Outlier filter ──────────────────────────────────────────────────────
+    if args.max_text_elements is not None:
+        kept = [p for p in raw_papers if len(p.text_elements) <= args.max_text_elements]
+        dropped = len(raw_papers) - len(kept)
+        logger.info("--max-text-elements %d: kept %d, dropped %d",
+                    args.max_text_elements, len(kept), dropped)
+        if not kept:
+            logger.error("All papers filtered out by --max-text-elements — aborting")
+            return 2
+        raw_papers = kept
+
     # ── Fingerprint ─────────────────────────────────────────────────────────
     fp_cfg = FingerprintConfig()
+    t_fp = time.perf_counter()
     fingerprints = build_fingerprints(raw_papers, fp_cfg)
+    logger.info("Fingerprints built in %.1fs", time.perf_counter() - t_fp)
 
     # ── Select ──────────────────────────────────────────────────────────────
     sel_cfg = SelectionConfig(
@@ -187,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     allow_overlap = _yes(args.allow_overlap)
 
+    t_sel = time.perf_counter()
     if args.strategy == "ilp":
         if not pulp_available() and not args.ilp_fallback_greedy:
             logger.error(
@@ -194,20 +223,34 @@ def main(argv: list[str] | None = None) -> int:
                 "or rerun with --strategy greedy / --ilp-fallback-greedy."
             )
             return 3
-        ilp_cfg = ILPConfig(
-            candidate_limit=args.candidate_limit,
-            time_limit_seconds=args.time_limit_seconds,
-        )
-        logger.info("Using ILP strategy (candidate_limit=%d, time_limit=%s)",
-                    ilp_cfg.candidate_limit, ilp_cfg.time_limit_seconds)
+        ilp_cfg = ILPConfig(solver_verbose=args.solver_verbose)
+        if args.candidate_limit is not None:
+            ilp_cfg.candidate_limit = args.candidate_limit
+        if args.time_limit_seconds is not None:
+            ilp_cfg.time_limit_seconds = (
+                args.time_limit_seconds if args.time_limit_seconds > 0 else None
+            )
+        if ilp_cfg.candidate_limit is None:
+            limit_repr = (f"per-bucket(related={ilp_cfg.related_candidate_limit}, "
+                          f"diverse={ilp_cfg.diverse_candidate_limit}, "
+                          f"hard={ilp_cfg.hard_candidate_limit})")
+        elif ilp_cfg.candidate_limit <= 0:
+            limit_repr = "disabled"
+        else:
+            limit_repr = f"override={ilp_cfg.candidate_limit}"
+        logger.info("Using ILP strategy (candidate_limit=%s, time_limit=%s, "
+                    "allow_overlap=%s, solver_verbose=%s)",
+                    limit_repr, ilp_cfg.time_limit_seconds, allow_overlap,
+                    ilp_cfg.solver_verbose)
         result = select_calibration_set_ilp(
             fingerprints, config=sel_cfg, ilp_config=ilp_cfg,
             allow_overlap=allow_overlap,
             fallback_to_greedy=args.ilp_fallback_greedy,
         )
     else:
-        logger.info("Using greedy strategy")
+        logger.info("Using greedy strategy (allow_overlap=%s)", allow_overlap)
         result = select_calibration_set(fingerprints, config=sel_cfg, allow_overlap=allow_overlap)
+    logger.info("Selection complete in %.1fs", time.perf_counter() - t_sel)
 
     # ── Print summary ───────────────────────────────────────────────────────
     print(f"\n=== Calibration set: {args.output_version} ===")

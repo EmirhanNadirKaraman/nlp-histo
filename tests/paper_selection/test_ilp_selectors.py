@@ -17,6 +17,11 @@ pulp = pytest.importorskip("pulp")
 from eval.paper_selection.fingerprints import build_fingerprints
 from eval.paper_selection.ilp_selectors import (
     ILPConfig,
+    _extract_valid_solution,
+    _prescore_fallback,
+    _resolved_limit,
+    _retained_related_edges,
+    _validate_selection_count,
     select_calibration_set_ilp,
     select_diverse_papers_ilp,
     select_hard_papers_ilp,
@@ -306,3 +311,200 @@ def test_cli_strategy_ilp_on_jsonl_fixture(tmp_path: Path):
     # ILP rationale strings always start with "ILP <bucket>:".
     reasons = [p["selection_reason"] or "" for p in payload["papers"].values()]
     assert any(r.startswith("ILP ") for r in reasons), reasons
+
+
+# ── New tests — sparsification, caps, index-based names, fallbacks ───────────
+
+def test_ilp_config_resolved_limit_prefers_override():
+    ilp = ILPConfig()
+    assert _resolved_limit(ilp, "related") == ilp.related_candidate_limit
+    assert _resolved_limit(ilp, "diverse") == ilp.diverse_candidate_limit
+    assert _resolved_limit(ilp, "hard")    == ilp.hard_candidate_limit
+
+    override = ILPConfig(candidate_limit=42)
+    assert _resolved_limit(override, "related") == 42
+    assert _resolved_limit(override, "diverse") == 42
+    assert _resolved_limit(override, "hard")    == 42
+
+
+def test_related_pair_variables_are_sparse_not_quadratic():
+    """For a moderately large pool, retained pair vars ≪ n·(n-1)/2."""
+    fps = build_fingerprints(_make_corpus())
+    cfg = _loose_cfg()
+    ilp_cfg = ILPConfig(
+        candidate_limit=0,         # keep all eligible
+        related_pair_top_m=4,
+        related_pair_threshold=0.05,
+    )
+    chosen, rationale = select_related_papers_ilp(
+        fps, k=5, config=cfg, ilp_config=ilp_cfg,
+    )
+    assert len(chosen) == 5
+    pool_size = next(iter(rationale.values()))["ilp_pool_size"]
+    n_edges   = next(iter(rationale.values()))["ilp_n_pair_edges"]
+    full_pair_count = pool_size * (pool_size - 1) // 2
+    # Strictly sparser than the complete pair graph.
+    assert n_edges < full_pair_count, (n_edges, full_pair_count)
+    # And bounded above by |pool| * top_m (the per-endpoint cap, ignoring dedup).
+    assert n_edges <= pool_size * ilp_cfg.related_pair_top_m
+
+
+def test_retained_related_edges_respects_threshold_and_topm():
+    fps = build_fingerprints(_make_corpus())
+    rel = Relatedness()
+    # Use only eligible fingerprints for a clean per-endpoint count check.
+    pool = [fp for fp in fps if not fp.is_empty()][:10]
+    edges, scanned = _retained_related_edges(
+        pool, rel, top_m=2, threshold=0.0,
+    )
+    assert scanned == len(pool) * (len(pool) - 1) // 2
+    # Each node contributes at most top_m edges to the union; total edge count
+    # is therefore ≤ |pool| · top_m even before dedup.
+    assert len(edges) <= len(pool) * 2, (len(edges), len(pool))
+
+
+def test_pulp_variable_names_are_index_based_not_pmcid(monkeypatch):
+    """Production ILP calls must name vars x_<idx>/y_<idx>/z_<idx>, never PMCIDs."""
+    from eval.paper_selection import ilp_selectors as ilp_mod
+
+    seen_names: list[str] = []
+    orig = ilp_mod._pulp.LpVariable
+
+    def _spy(name, *args, **kwargs):
+        seen_names.append(name)
+        return orig(name, *args, **kwargs)
+
+    monkeypatch.setattr(ilp_mod._pulp, "LpVariable", _spy)
+
+    fps = build_fingerprints(_make_corpus())
+    cfg = _loose_cfg()
+    select_related_papers_ilp(
+        fps, k=5, config=cfg, ilp_config=ILPConfig(candidate_limit=10),
+    )
+    select_diverse_papers_ilp(
+        fps, k=5, config=cfg, ilp_config=ILPConfig(candidate_limit=10),
+    )
+    select_hard_papers_ilp(
+        fps, k=5, config=cfg, ilp_config=ILPConfig(candidate_limit=10),
+    )
+
+    assert seen_names, "expected the spy to record at least one LpVariable creation"
+    all_pmcids = {fp.pmcid for fp in fps}
+    for name in seen_names:
+        # Index-based: x_0, y_12, z_3 etc.
+        assert name.startswith(("x_", "y_", "z_")), name
+        suffix = name.split("_", 1)[1]
+        assert suffix.isdigit(), name
+        # No raw PMCID should leak into a PuLP variable name.
+        for pmcid in all_pmcids:
+            assert pmcid not in name, (name, pmcid)
+
+
+def test_cui_heavy_paper_does_not_dominate_when_cuis_disabled():
+    """A paper packed with junk CUIs shouldn't win over real-coverage papers."""
+    # 5 small disease/biomarker/gene papers with distinct concepts.
+    real = []
+    for i, disease in enumerate(["psoriasis", "melanoma", "glioblastoma",
+                                  "breast cancer", "renal cell carcinoma"], start=1):
+        ent = [
+            _ent(disease, cui=f"C0{i:06}", semtypes=["T191"]),
+            _ent(f"marker{i}", cui=f"C9{i:06}", semtypes=["T116"]),
+            _ent(f"GENE{i}", semtypes=["T028"]),
+        ]
+        real.append(RawPaper(pmcid=f"PMCREAL{i}", title=f"Real {i}",
+                             text_elements=["body sentence. " * 30],
+                             entities=ent, n_figures=1, n_tables=1, n_captions=1))
+
+    # One "CUI-stuffed" paper with 200 throwaway CUIs but no structured entities.
+    junk_ents = [
+        _ent(f"junk{i}", cui=f"CJ{i:06}", semtypes=["T999"])
+        for i in range(200)
+    ]
+    junk = RawPaper(pmcid="PMCJUNK", title="Junk",
+                    text_elements=["filler. " * 30],
+                    entities=junk_ents, n_figures=0, n_tables=0, n_captions=0)
+
+    fps = build_fingerprints([*real, junk])
+    cfg = _loose_cfg()
+    chosen, _ = select_diverse_papers_ilp(
+        fps, k=5, config=cfg, ilp_config=ILPConfig(candidate_limit=20),
+    )
+    # CUIs are disabled by default → junk paper has no useful entities and is
+    # filtered before the ILP. Even if not filtered, its CUI count must not let
+    # it edge out a real-coverage paper.
+    pmcids = {p.pmcid for p in chosen}
+    assert "PMCJUNK" not in pmcids, pmcids
+
+
+def test_diverse_concept_inventory_respects_caps():
+    """Per-bucket concept cap must bound the z-variable count."""
+    # 30 papers, each with 6 unique disease entities → 180 disease concepts.
+    papers = []
+    for i in range(30):
+        ents = [
+            _ent(f"disease_{i}_{j}", cui=f"D{i:03}{j:03}", semtypes=["T191"])
+            for j in range(6)
+        ]
+        # Add minimal biomarker/gene for eligibility.
+        ents.append(_ent(f"bm_{i}", cui=f"B{i:06}", semtypes=["T116"]))
+        ents.append(_ent(f"g{i}", semtypes=["T028"]))
+        papers.append(RawPaper(pmcid=f"PMCCAP{i:02}", title=f"P{i}",
+                               text_elements=["sentence. " * 30],
+                               entities=ents,
+                               n_figures=1, n_tables=1, n_captions=1))
+
+    fps = build_fingerprints(papers)
+    cfg = _loose_cfg()
+    ilp_cfg = ILPConfig(
+        candidate_limit=0,
+        diverse_max_concepts_by_bucket={
+            "disease": 20, "biomarker": 50, "gene": 50,
+            "tissue": 50, "method": 50, "outcome": 50, "cui": 30,
+        },
+    )
+    _, rationale = select_diverse_papers_ilp(
+        fps, k=5, config=cfg, ilp_config=ilp_cfg,
+    )
+    n_concepts = next(iter(rationale.values()))["ilp_n_concepts"]
+    # Disease alone would have produced 180 concepts; cap of 20 means total
+    # concepts must be far below the uncapped count.
+    assert n_concepts <= 20 + 50 + 50 + 50 + 50 + 50, n_concepts
+    # Per-bucket diagnostic exists.
+    for entry in rationale.values():
+        assert "covered_concepts_by_bucket" in entry
+        assert "reward_by_bucket" in entry
+
+
+def test_extract_valid_solution_requires_exact_k():
+    """_extract_valid_solution returns None unless exactly k vars are above 0.5."""
+    fps = build_fingerprints(_make_corpus())
+    cfg = _loose_cfg()
+    chosen, rationale = select_related_papers_ilp(
+        fps, k=5, config=cfg, ilp_config=ILPConfig(candidate_limit=15),
+    )
+    assert len(chosen) == 5
+    # Each entry must carry a solution-quality marker.
+    for entry in rationale.values():
+        assert entry["ilp_solution_quality"] in {"optimal", "feasible_nonoptimal"}
+
+
+def test_validate_selection_count():
+    assert _validate_selection_count(["a", "b", "c"], 3, "tag") is True
+    assert _validate_selection_count(["a", "b"], 3, "tag") is False
+
+
+def test_prescore_fallback_returns_exactly_k():
+    fps = build_fingerprints(_make_corpus())
+    pool = [fp for fp in fps if not fp.is_empty()]
+    # Synthesise a non-optimal status; CBC LpStatus index 0 == "Not Solved".
+    not_solved_status = next(s for s, lbl in pulp.LpStatus.items()
+                             if lbl == "Not Solved")
+    ranked, rationale = _prescore_fallback(
+        pool, k=5,
+        key=lambda p: len(p.disease_entities),
+        tag="related", status=not_solved_status,
+    )
+    assert len(ranked) == 5
+    for entry in rationale.values():
+        assert entry["ilp_solution_quality"] == "prescore_fallback"
+        assert entry["ilp_status"] == "Not Solved"

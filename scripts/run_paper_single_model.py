@@ -18,7 +18,13 @@ Random selection (same 5 papers every time):
     PYTHONPATH=. python scripts/run_paper_single_model.py --random 5
     PYTHONPATH=. python scripts/run_paper_single_model.py --random 5 --seed 99
 
+From a paper-selection YAML:
+    PYTHONPATH=. python scripts/run_paper_single_model.py \\
+        --from-selection configs/paper_selection/smoke_v1.yaml \\
+        --model haiku --trace
+
 With options:
+    PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --model haiku
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --trace
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --skip-nli
     PYTHONPATH=. python scripts/run_paper_single_model.py PMC10047158 --skip-ner
@@ -59,18 +65,42 @@ logger = logging.getLogger("run_single_model")
 
 # ── LLM factory ────────────────────────────────────────────────────────────────
 
-def build_llm():
-    """Single Gemini 2.5 Flash Lite via ChatVertexAI (same as inspect_phase123_pipeline.py)."""
-    import os
-    from langchain_google_vertexai import ChatVertexAI
+MODEL_CHOICES = ("gemini", "haiku", "sonnet")
 
-    return ChatVertexAI(
-        model="gemini-2.5-flash-lite",
-        project=os.environ["VERTEX_PROJECT"],
-        location="global",
-        temperature=0.1,
-        timeout=20,   # fail fast: normal responses are 5-10s
-    )
+
+def build_llm(model: str = "gemini"):
+    """Single LLM factory. ``model`` selects the underlying provider.
+
+    - "gemini" — Gemini 2.5 Flash Lite via Vertex AI (cheap default).
+    - "haiku"  — Claude Haiku 4.5 via Anthropic (needs ANTHROPIC_API_KEY).
+    - "sonnet" — Claude Sonnet 4.6 via Anthropic (needs ANTHROPIC_API_KEY).
+    """
+    if model == "gemini":
+        import os
+        from langchain_google_vertexai import ChatVertexAI
+
+        return ChatVertexAI(
+            model="gemini-2.5-flash-lite",
+            project=os.environ["VERTEX_PROJECT"],
+            location="global",
+            temperature=0.1,
+            timeout=20,   # fail fast: normal responses are 5-10s
+        )
+    if model == "haiku":
+        from langchain_anthropic import ChatAnthropic
+        return ChatAnthropic(
+            model="claude-haiku-4-5-20251001",
+            temperature=0.1,
+            timeout=30,
+        )
+    if model == "sonnet":
+        from langchain_anthropic import ChatAnthropic
+        return ChatAnthropic(
+            model="claude-sonnet-4-6-20251001",
+            temperature=0.1,
+            timeout=60,
+        )
+    raise ValueError(f"unknown --model {model!r}; expected one of {MODEL_CHOICES}")
 
 
 # ── Runner factories ───────────────────────────────────────────────────────────
@@ -138,6 +168,7 @@ def build_runner(
     skip_nli: bool,
     force_rerun: bool = False,
     skip_ner: bool = False,
+    model: str = "gemini",
 ) -> "SummarizationRunner":
     from pipeline.stages.summarization import SummarizationRunner
     from pipeline.stages.summarization.config import (
@@ -145,7 +176,7 @@ def build_runner(
     )
     from database import get_db_connection
 
-    llm = build_llm()
+    llm = build_llm(model)
 
     # theta=0.0 → first voter always "agrees" with itself; no cascade fires.
     # reject_theta=-1.0 ensures nothing is hard-rejected.
@@ -180,6 +211,43 @@ def _fetch_all_pmcids() -> list[str]:
             row.pmcid
             for row in session.query(Document.pmcid).order_by(Document.pmcid).all()
         ]
+
+
+def _load_selection_yaml(path: Path) -> list[str]:
+    """Read a paper-selection YAML and return a de-duplicated list of PMCIDs.
+
+    Expected shape (produced by ``eval.paper_selection.export.write_calibration_set``)::
+
+        version_name:
+          related: [PMC..., ...]
+          diverse: [PMC..., ...]
+          hard:    [PMC..., ...]
+
+    Buckets concatenate in related → diverse → hard order; duplicates are
+    dropped while preserving first occurrence.
+    """
+    import yaml
+
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not data:
+        raise ValueError(f"{path}: expected a top-level mapping with a version key")
+
+    # The YAML wraps everything in a single version key; pick the first one.
+    version_key = next(iter(data))
+    buckets = data[version_key] or {}
+    if not isinstance(buckets, dict):
+        raise ValueError(f"{path}: version '{version_key}' is not a mapping")
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for bucket in ("related", "diverse", "hard"):
+        for pmcid in buckets.get(bucket) or []:
+            if pmcid not in seen:
+                ordered.append(pmcid)
+                seen.add(pmcid)
+    if not ordered:
+        raise ValueError(f"{path}: no PMCIDs found under related/diverse/hard")
+    return ordered
 
 
 def run_batch_mode(
@@ -348,6 +416,14 @@ def main() -> None:
         epilog=__doc__,
     )
     parser.add_argument("pmcid", nargs="*", help="PubMed Central ID(s), e.g. PMC10047158 PMC222")
+    parser.add_argument("--model", choices=MODEL_CHOICES, default="gemini",
+                        help="Which single LLM to wire into every voter slot "
+                             "(default: gemini). Use 'haiku' for an Anthropic smoke run.")
+    parser.add_argument("--from-selection", default=None, metavar="PATH",
+                        help="Path to a paper-selection YAML "
+                             "(e.g. configs/paper_selection/smoke_v1.yaml). "
+                             "Loads all PMCIDs from related/diverse/hard. "
+                             "Mutually exclusive with positional PMCIDs and --random.")
     parser.add_argument("--trace",       action="store_true", help="Write JSONL traces")
     parser.add_argument("--skip-nli",    action="store_true", help="Disable NLI (faster)")
     parser.add_argument("--chunks",      type=int, default=None,
@@ -375,9 +451,22 @@ def main() -> None:
         list_pmcids()
         return
 
-    if args.random is not None:
-        if args.pmcid:
-            parser.error("--random cannot be combined with explicit pmcid arguments")
+    sources_set = sum(
+        1 for v in (args.pmcid, args.random, args.from_selection) if v
+    )
+    if sources_set > 1:
+        parser.error(
+            "pass at most one of: positional PMCIDs, --random N, --from-selection PATH"
+        )
+
+    if args.from_selection is not None:
+        sel_path = Path(args.from_selection)
+        try:
+            pmcids = _load_selection_yaml(sel_path)
+        except (FileNotFoundError, ValueError) as exc:
+            parser.error(f"--from-selection: {exc}")
+        logger.info("Loaded %d PMCIDs from %s", len(pmcids), sel_path)
+    elif args.random is not None:
         pmcids = sample_pmcids(args.random, args.seed)
     elif args.pmcid:
         # Normalise explicit PMCIDs
@@ -394,13 +483,14 @@ def main() -> None:
         results = run_batch_mode(pmcids, args)
         n_ok = sum(1 for r in results if r["status"] == "success")
     else:
-        # ── Sync mode (Gemini Flash Lite, one paper at a time) ─────────────────
-        logger.info("Building single-model runner (Gemini 2.5 Flash Lite)…")
+        # ── Sync mode (one paper at a time, single LLM wired into every slot) ──
+        logger.info("Building single-model runner (model=%s)…", args.model)
         runner = build_runner(
             trace=args.trace,
             skip_nli=args.skip_nli,
             force_rerun=args.force_rerun,
             skip_ner=args.skip_ner,
+            model=args.model,
         )
 
         results = []
