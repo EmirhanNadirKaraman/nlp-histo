@@ -72,7 +72,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..models import CanonicalRule, CorpusRelation, Relation
-from ..current_stages.relate_stage import RelateStage, _norm_outcome_expression
+from ..current_stages.relate_stage import (
+    RelateStage,
+    _norm_outcome,
+    _norm_outcome_expression,
+    _norm_subject,
+    _should_compare,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,15 +103,20 @@ def _should_compare_cross_paper(
     Gate for cross-paper comparison.
 
     Entity names for the same concept differ across papers ("MGA" vs
-    "microglandular adenosis"), so we cannot use exact string matching.
+    "microglandular adenosis"), so CUI match is preferred over exact strings.
+    But when either side lacks a CUI we still require the normalized
+    string to match — skipping the gate floods NLI with unrelated pairs
+    (e.g. two rules whose subject was generically normalized to "Body
+    tissue" are not actually about the same thing).
 
     Priority:
       1. category must match exactly.
       2. relation_type must match exactly.
-      3. subject: if BOTH rules have a CUI, they must share it.
-         If either lacks a CUI, skip subject gating and let NLI decide.
-      4. For expression rules: outcome marker must match (CUI if available,
-         else normalized string) — prevents comparing unrelated markers.
+      3. subject: prefer CUI match; otherwise fall back to normalized
+         subject string match. A pair must satisfy one or the other.
+      4. outcome: same fallback rule applied for every relation_type
+         (previously only `expression` rules had an outcome gate, which
+         let unrelated outcomes through for has_feature / causes / etc.).
     """
     from ..models import RelationTypeEnum  # noqa: PLC0415
 
@@ -114,19 +125,27 @@ def _should_compare_cross_paper(
     if a.relation_type != b.relation_type:
         return False, "relation_type_mismatch"
 
-    # Subject CUI gate (only when both rules have been enriched)
+    # Subject gate — CUI when both present, normalized string fallback otherwise
     if a.subject_cui and b.subject_cui:
         if a.subject_cui != b.subject_cui:
             return False, "subject_cui_mismatch"
+    else:
+        if _norm_subject(a.subject_entity) != _norm_subject(b.subject_entity):
+            return False, "subject_mismatch"
 
-    # Outcome gate for expression rules
-    if a.relation_type == RelationTypeEnum.expression:
-        if a.outcome_cui and b.outcome_cui:
-            if a.outcome_cui != b.outcome_cui:
-                return False, "outcome_cui_incompatible"
-        else:
-            if _norm_outcome_expression(a.outcome_entity) != _norm_outcome_expression(b.outcome_entity):
-                return False, "outcome_incompatible"
+    # Outcome gate — applied to all relation types. expression rules use the
+    # stricter expression-specific normalization (strips " expression"/
+    # " positivity" suffixes so CD31 ≠ CD34); others use the general
+    # synonym-aware normalizer.
+    if a.outcome_cui and b.outcome_cui:
+        if a.outcome_cui != b.outcome_cui:
+            return False, "outcome_cui_incompatible"
+    elif a.relation_type == RelationTypeEnum.expression:
+        if _norm_outcome_expression(a.outcome_entity) != _norm_outcome_expression(b.outcome_entity):
+            return False, "outcome_incompatible"
+    else:
+        if _norm_outcome(a.outcome_entity) != _norm_outcome(b.outcome_entity):
+            return False, "outcome_incompatible"
 
     return True, ""
 
@@ -360,7 +379,7 @@ class CorpusRelateStage:
         raw_intra: list[Relation] = []
         if len(new_rules) >= 2:
             raw_intra, _raw_pairs_intra, _ = self._relate.relate(
-                new_rules, pmcid="corpus_intra", gate=_should_compare_cross_paper,
+                new_rules, pmcid="corpus_intra", gate=_should_compare,
             )
 
         logger.info(

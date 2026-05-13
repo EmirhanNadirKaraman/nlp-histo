@@ -149,7 +149,10 @@ def build_runner(
         level2_voter_llms = [                                # Level 2 — mid-tier
             with_cb(gemini_direct_chat(GEMINI_L2,    temperature=0.1), GEMINI_L2, l2_store),
             with_cb(openai_direct_chat(OPENAI_L2,    temperature=0.1), OPENAI_L2, l2_store),
-            with_cb(anthropic_direct_chat(CLAUDE_L2, temperature=0.3), CLAUDE_L2, l2_store),
+            # L2 Haiku temp held at 0.1 to match L1 Haiku so MapStage's in-run
+            # voter cache reuses the L1 result instead of calling Haiku twice
+            # for the same chunk.
+            with_cb(anthropic_direct_chat(CLAUDE_L2, temperature=0.1), CLAUDE_L2, l2_store),
         ]
         escalation_llm = with_cb(                           # Level 3
             anthropic_direct_chat(CLAUDE_L3, temperature=0.0), CLAUDE_L3, l3_store
@@ -449,18 +452,21 @@ def _run_sync(pmcid: str, trace: bool,
         logger.error("Pipeline failed: %s", result["error"])
         sys.exit(1)
 
-    rules = result.get("rules", [])
-    logger.info("Done — %d rules extracted", len(rules))
+    final_rules = result.get("final_rules", [])
+    canonical_rules = result.get("canonical_rules", [])
+    relations = result.get("relations", [])
+    logger.info("Done — %d final rules", len(final_rules))
     logger.info("Result saved to out/summaries/summaries/%s.json", pmcid)
 
     stats = _escalation_stats_sync(pmcid, token_usage, runner)
     _save_escalation_report([stats], Path("out/summaries/reports"))
 
     print(f"\n{'─' * 60}")
-    print(f"Summary for {pmcid}")
+    print(f"Results for {pmcid}")
     print(f"{'─' * 60}")
-    print(result.get("summary", "(no summary)"))
-    print(f"\n{len(rules)} rules extracted.")
+    print(f"  {len(canonical_rules)} canonical rules")
+    print(f"  {len(relations)} relations")
+    print(f"  {len(final_rules)} final rules")
 
 
 # Per-model batch pricing (USD per 1M tokens).
@@ -768,12 +774,15 @@ def _run_all_batch(
 
     for pmcid in handles:
         result = results.get(pmcid, {})
-        rules = result.get("rules", [])
+        final_rules = result.get("final_rules", [])
+        canonical_rules = result.get("canonical_rules", [])
+        relations = result.get("relations", [])
         print(f"\n{'─' * 60}")
-        print(f"Summary for {pmcid}")
+        print(f"Results for {pmcid}")
         print(f"{'─' * 60}")
-        print(result.get("summary", "(no summary)"))
-        print(f"\n{len(rules)} rules extracted.")
+        print(f"  {len(canonical_rules)} canonical rules")
+        print(f"  {len(relations)} relations")
+        print(f"  {len(final_rules)} final rules")
 
     _save_escalation_report(escalation_stats, Path("out/summaries/reports"))
 
@@ -817,12 +826,15 @@ def _run_batch(
     logger.info("[%s] All batches complete — finalising…", pmcid)
     _save_escalation_report([_escalation_stats(pmcid, handle)], Path("out/summaries/reports"))
     result = runner.finalize(handle)
-    rules = result.get("rules", [])
+    final_rules = result.get("final_rules", [])
+    canonical_rules = result.get("canonical_rules", [])
+    relations = result.get("relations", [])
     print(f"\n{'─' * 60}")
-    print(f"Summary for {pmcid}")
+    print(f"Results for {pmcid}")
     print(f"{'─' * 60}")
-    print(result.get("summary", "(no summary)"))
-    print(f"\n{len(rules)} rules extracted.")
+    print(f"  {len(canonical_rules)} canonical rules")
+    print(f"  {len(relations)} relations")
+    print(f"  {len(final_rules)} final rules")
 
 
 if __name__ == "__main__":

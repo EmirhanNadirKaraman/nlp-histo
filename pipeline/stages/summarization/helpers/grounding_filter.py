@@ -18,11 +18,13 @@ import re
 from collections import Counter
 
 from ..models import AuditableSummary, EvidenceChainItem, ExtractedRules, Finding, Rule, RuleAuditSummary, RuleCounts
+from ..nli_config import get_active_spec
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "MoritzLaurer/deberta-v3-large-zeroshot-v2.0"
-_DEFAULT_BATCH_SIZE = 16
+_ACTIVE_SPEC = get_active_spec()
+_DEFAULT_MODEL = _ACTIVE_SPEC.hf_id
+_DEFAULT_BATCH_SIZE = _ACTIVE_SPEC.batch_size
 
 # Module-level NLI pipeline singleton — shared across all GroundingFilter
 # instances and reused by RelateStage via relate_stage._get_nli_pipe().

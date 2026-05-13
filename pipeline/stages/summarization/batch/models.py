@@ -119,6 +119,20 @@ class BatchHandle:
         "l3": {},
     })
 
+    # In-run voter dedup: pre-satisfied next-level results carried over from an
+    # earlier level. Generated when an L2 (or L3) voter has the same
+    # (provider, model, temperature) as a voter that already ran at an earlier
+    # level for the same chunk — instead of re-calling the API, we synthesise
+    # a result here from the prior level's raw content. Merged into
+    # raw_results during advance() so the agreement pass sees them as if they
+    # had been retrieved from the batch provider.
+    # Per entry: {"custom_id", "content", "input_tokens", "output_tokens", "error"}.
+    synthetic_results: dict[str, list[dict]] = field(default_factory=lambda: {
+        "l1": [],
+        "l2": [],
+        "l3": [],
+    })
+
     # Run-artifact provenance — populated on submit() and persisted across resumes.
     schema_version:    str = ""
     prompt_version:    str = ""
@@ -144,6 +158,7 @@ class BatchHandle:
             "l3_chunk_ids": self.l3_chunk_ids,
             "finalized": self.finalized,
             "token_usage": self.token_usage,
+            "synthetic_results": self.synthetic_results,
             "schema_version":    self.schema_version,
             "prompt_version":    self.prompt_version,
             "stage_name":        self.stage_name,
@@ -179,6 +194,9 @@ class BatchHandle:
             l3_chunk_ids=data.get("l3_chunk_ids", []),
             finalized=data.get("finalized", {}),
             token_usage=token_usage,
+            synthetic_results=data.get(
+                "synthetic_results", {"l1": [], "l2": [], "l3": []}
+            ),
             schema_version=data.get("schema_version", ""),
             prompt_version=data.get("prompt_version", ""),
             stage_name=data.get("stage_name", ""),

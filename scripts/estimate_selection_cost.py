@@ -13,7 +13,8 @@ production MapConfig defaults, tokenises every sentence with the
 Usage
 -----
     PYTHONPATH=. python scripts/estimate_selection_cost.py \\
-        --from-selection configs/paper_selection/smoke_v1.yaml
+        --from-selection configs/paper_selection/runA.yaml \\
+        --profile real
 
 Or pass PMCIDs explicitly:
 
@@ -62,15 +63,12 @@ OUTPUT_TOKENS_PER_CHUNK = 800
 
 
 # ── Cost matrix (per million tokens) ────────────────────────────────────────
-# Mirrors the production cascade defined in
-# pipeline/stages/summarization/batch/voter_configs.py:make_l{1,2,3}_voters().
-# Per-voter pricing summed at each tier (not averaged) so the projection
-# matches what ``--profile default`` will actually charge.
-#
-# Verify against the provider price pages before quoting these figures:
-#   Anthropic:  https://www.anthropic.com/pricing
-#   OpenAI:     https://openai.com/api/pricing/
-#   Google:     https://cloud.google.com/vertex-ai/generative-ai/pricing
+# Sourced live from
+#   pipeline/stages/summarization/batch/voter_configs.py  (cascade structure)
+# and
+#   configs/model_prices.json via PriceBook  (per-model prices).
+# Pick the cascade with ``--profile {cheap|real}`` (default mirrors
+# ``voter_configs.DEFAULT_PROFILE_NAME``).
 
 @dataclass
 class VoterPricing:
@@ -89,30 +87,50 @@ class TierPricing:
 
     @property
     def total_input_per_mtok(self) -> float:
-        """Sum of input prices across all voters in this tier."""
         return sum(v.input_per_mtok for v in self.voters)
 
     @property
     def total_output_per_mtok(self) -> float:
-        """Sum of output prices across all voters in this tier."""
         return sum(v.output_per_mtok for v in self.voters)
 
 
-PRICING = {
-    "L1": TierPricing(voters=[
-        VoterPricing("gemini-2.5-flash-lite",       0.10,  0.40),
-        VoterPricing("gpt-4o-mini",                 0.15,  0.60),
-        VoterPricing("claude-haiku-4-5-20251001",   1.00,  5.00),
-    ]),
-    "L2": TierPricing(voters=[
-        VoterPricing("gemini-2.5-flash",            0.30,  2.50),
-        VoterPricing("gpt-4.1-mini",                0.40,  1.60),
-        VoterPricing("claude-haiku-4-5-20251001",   1.00,  5.00),
-    ]),
-    "L3": TierPricing(voters=[
-        VoterPricing("claude-sonnet-4-6-20251001",  3.00, 15.00),
-    ]),
-}
+def build_pricing(profile_name: str | None,
+                  book) -> tuple[dict[str, TierPricing], str]:
+    """Build per-tier pricing tables from the live cascade profile.
+
+    Returns ``(pricing, resolved_profile_name)``. Raises if any voter model
+    is missing from the price book.
+    """
+    # Local imports — keep the module importable even when the optional
+    # voter_configs deps are unavailable in test contexts.
+    _REPO_ROOT = Path(__file__).resolve().parents[1]
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
+    from pipeline.stages.summarization.batch.voter_configs import get_profile
+
+    prof = get_profile(profile_name)
+    tier_to_voters = {
+        "L1": prof.l1_voters,
+        "L2": prof.l2_voters,
+        "L3": [prof.l3_voter],
+    }
+    pricing: dict[str, TierPricing] = {}
+    missing: list[str] = []
+    for tier, voters in tier_to_voters.items():
+        rows: list[VoterPricing] = []
+        for v in voters:
+            p = book.get(v.model)
+            if p is None:
+                missing.append(v.model)
+                continue
+            rows.append(VoterPricing(v.model, p.input_per_1m, p.output_per_1m))
+        pricing[tier] = TierPricing(voters=rows)
+    if missing:
+        raise SystemExit(
+            f"Missing prices in configs/model_prices.json for: "
+            f"{sorted(set(missing))}. Add them and re-run."
+        )
+    return pricing, prof.name
 
 
 # ── YAML loader ─────────────────────────────────────────────────────────────
@@ -253,7 +271,8 @@ class Scenario:
 
 
 def project_map_cost(total_chunks: int, avg_in_tokens: int,
-                     l2_rate: float, l3_rate: float) -> dict[str, float]:
+                     l2_rate: float, l3_rate: float,
+                     pricing: dict[str, TierPricing]) -> dict[str, float]:
     """Return per-tier and total MAP cost in USD.
 
     Each tier sums per-voter costs: one chunk → ``len(tier.voters)`` API
@@ -263,8 +282,7 @@ def project_map_cost(total_chunks: int, avg_in_tokens: int,
     cost = {"L1": 0.0, "L2": 0.0, "L3": 0.0}
 
     def tier_cost(tier: str, n_chunks: float) -> float:
-        p = PRICING[tier]
-        # Per chunk: each voter makes one call with the same input/output sizes.
+        p = pricing[tier]
         in_cost  = n_chunks * avg_in_tokens / 1_000_000 * p.total_input_per_mtok
         out_cost = n_chunks * out_tokens     / 1_000_000 * p.total_output_per_mtok
         return in_cost + out_cost
@@ -297,6 +315,16 @@ def main() -> int:
     parser.add_argument("--l3-rate", type=float, action="append", default=None,
                         metavar="FRAC", help="L3 escalation fraction "
                                               "(repeatable; matched to --l2-rate).")
+    parser.add_argument("--profile", default=None,
+                        help="Cascade profile name (cheap | real). "
+                             "Defaults to voter_configs.DEFAULT_PROFILE_NAME "
+                             "(currently 'cheap') / $NLP_HISTO_PROFILE.")
+    parser.add_argument("--prices", default=None,
+                        help="Path to model_prices.json. "
+                             "Defaults to configs/model_prices.json.")
+    parser.add_argument("--batch", action="store_true",
+                        help="Apply the price-book batch discount to the "
+                             "projected totals.")
     args = parser.parse_args()
 
     if args.from_selection and args.pmcid:
@@ -322,6 +350,12 @@ def main() -> int:
             Scenario("middle",     l2_rate=0.25, l3_rate=0.08),
             Scenario("pessimistic", l2_rate=0.50, l3_rate=0.20),
         ]
+
+    logger.info("Loading price book + cascade profile…")
+    from pipeline.stages.summarization.costing import PriceBook
+    book = PriceBook.load(args.prices)
+    pricing, resolved_profile = build_pricing(args.profile, book)
+    discount = book.batch_discount_multiplier if args.batch else 1.0
 
     logger.info("Loading spaCy en_core_sci_sm (sentencizer only)…")
     import spacy
@@ -379,25 +413,30 @@ def main() -> int:
 
     # ── MAP cost projection ────────────────────────────────────────────────
     print()
-    print(f"MAP cost projection ({total_chunks} chunks, "
+    discount_note = (
+        f"  (batch discount ×{book.batch_discount_multiplier} applied)"
+        if args.batch else ""
+    )
+    print(f"MAP cost projection — profile = {resolved_profile} "
+          f"({total_chunks} chunks, "
           f"avg {int(round(weighted_avg_in))} input tokens, "
-          f"{OUTPUT_TOKENS_PER_CHUNK} output tokens/chunk)")
+          f"{OUTPUT_TOKENS_PER_CHUNK} output tokens/chunk){discount_note}")
     print()
     print(f"{'scenario':<14} {'L2 esc':>7} {'L3 esc':>7} "
           f"{'L1 $':>8} {'L2 $':>8} {'L3 $':>8} {'TOTAL $':>10}")
     print("-" * 70)
     for sc in scenarios:
         c = project_map_cost(total_chunks, int(round(weighted_avg_in)),
-                             sc.l2_rate, sc.l3_rate)
+                             sc.l2_rate, sc.l3_rate, pricing)
         print(f"{sc.label:<14} {sc.l2_rate:>6.0%} {sc.l3_rate:>7.0%} "
-              f"{c['L1']:>8.2f} {c['L2']:>8.2f} {c['L3']:>8.2f} "
-              f"{c['total']:>10.2f}")
+              f"{c['L1'] * discount:>8.2f} {c['L2'] * discount:>8.2f} "
+              f"{c['L3'] * discount:>8.2f} {c['total'] * discount:>10.2f}")
     print()
     print("MAP only. CANONICALIZE + RESOLVE typically add ~10–20 % "
           "(Sonnet calls on dense subsets of findings).")
-    print("Cascade configuration (production profile = "
-          "voter_configs.make_l{1,2,3}_voters):")
-    for tier, p in PRICING.items():
+    print(f"Cascade configuration (profile = {resolved_profile}, "
+          f"loaded from voter_configs.get_profile):")
+    for tier, p in pricing.items():
         print(f"  {tier} ({p.n_voters} voter{'s' if p.n_voters != 1 else ''}):")
         for v in p.voters:
             print(f"    {v.name:<36} ${v.input_per_mtok:>5.2f} in / "

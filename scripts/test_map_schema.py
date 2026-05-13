@@ -248,66 +248,73 @@ def test_bad_finding_logged_when_dropped():
 
 def test_profiles():
     from pipeline.stages.summarization.batch.voter_configs import (
-        get_profile, list_profiles, CLAUDE_HAIKU, CLAUDE_SONNET, CLAUDE_OPUS,
+        get_profile, list_profiles,
+        GEMINI_L1, OPENAI_L1, CLAUDE_L1,
+        GEMINI_L2, OPENAI_L2, CLAUDE_L2, CLAUDE_L3,
         DEFAULT_PROFILE_NAME,
     )
-    for name in ("smoke_haiku", "dev_sonnet", "final_opus", "default"):
+    for name in ("cheap", "real"):
         assert name in list_profiles(), f"profile {name!r} missing"
 
-    smoke = get_profile("smoke_haiku")
-    assert all(v.model == CLAUDE_HAIKU for v in smoke.l1_voters)
-    assert smoke.l2_voters[0].model == CLAUDE_HAIKU
-    assert smoke.l3_voter.model == CLAUDE_HAIKU
+    cheap = get_profile("cheap")
+    # L1: 3 cheapest voters across Gemini/OpenAI/Claude in that order.
+    assert [v.model for v in cheap.l1_voters] == [GEMINI_L1, OPENAI_L1, CLAUDE_L1]
+    assert [v.provider for v in cheap.l1_voters] == ["gemini", "openai", "claude"]
+    # L2 is a single OpenAI voter (gpt-4.1-mini); L3 mirrors L2 for the 2-tier cascade.
+    assert len(cheap.l2_voters) == 1
+    assert cheap.l2_voters[0].model == OPENAI_L2
+    assert cheap.l3_voter.model == OPENAI_L2
 
-    dev = get_profile("dev_sonnet")
-    assert all(v.model == CLAUDE_HAIKU for v in dev.l1_voters)
-    assert dev.l2_voters[0].model == CLAUDE_SONNET
-    assert dev.l3_voter.model == CLAUDE_SONNET
+    real = get_profile("real")
+    # L1 same as cheap.
+    assert [v.model for v in real.l1_voters] == [GEMINI_L1, OPENAI_L1, CLAUDE_L1]
+    # L2: 3 mid-tier voters across the same 3 providers.
+    assert [v.model for v in real.l2_voters] == [GEMINI_L2, OPENAI_L2, CLAUDE_L2]
+    assert [v.provider for v in real.l2_voters] == ["gemini", "openai", "claude"]
+    # L1 and L2 Haiku must share temperature so the in-run voter cache can
+    # reuse the L1 Haiku result at L2. CLAUDE_L1 == CLAUDE_L2 model id, and
+    # both must be invoked at the same temp.
+    l1_haiku = next(v for v in real.l1_voters if v.provider == "claude")
+    l2_haiku = next(v for v in real.l2_voters if v.provider == "claude")
+    assert l1_haiku.model == l2_haiku.model == CLAUDE_L1
+    assert l1_haiku.temperature == l2_haiku.temperature, (
+        f"L1 Haiku temp ({l1_haiku.temperature}) must match L2 Haiku temp "
+        f"({l2_haiku.temperature}) to enable voter-cache reuse"
+    )
+    # L3: Claude Sonnet.
+    assert real.l3_voter.model == CLAUDE_L3
+    assert real.l3_voter.provider == "claude"
 
-    final = get_profile("final_opus")
-    assert all(v.model == CLAUDE_HAIKU for v in final.l1_voters)
-    assert final.l2_voters[0].model == CLAUDE_SONNET
-    assert final.l3_voter.model == CLAUDE_OPUS
-
-    # Default fallback must be smoke_haiku, never anything more expensive.
-    assert DEFAULT_PROFILE_NAME == "smoke_haiku"
+    # Default fallback must be cheap, never anything more expensive.
+    assert DEFAULT_PROFILE_NAME == "cheap"
 
 
-def test_default_profile_is_smoke_haiku_when_unset():
-    """get_profile() with no arg and NLP_HISTO_PROFILE unset → smoke_haiku."""
+def test_default_profile_is_cheap_when_unset():
+    """get_profile() with no arg and NLP_HISTO_PROFILE unset → cheap."""
     import os as _os
     from pipeline.stages.summarization.batch.voter_configs import get_profile
 
     saved = _os.environ.pop("NLP_HISTO_PROFILE", None)
     try:
         prof = get_profile(None)
-        assert prof.name == "smoke_haiku", (
-            f"unconfigured fallback must be smoke_haiku, got {prof.name!r}"
+        assert prof.name == "cheap", (
+            f"unconfigured fallback must be cheap, got {prof.name!r}"
         )
     finally:
         if saved is not None:
             _os.environ["NLP_HISTO_PROFILE"] = saved
 
 
-def test_final_opus_not_auto_selected():
-    """final_opus must require an explicit name — never returned by fallback."""
-    import os as _os
+def test_unknown_profile_raises():
+    """Typos in profile name must raise rather than silently pick default."""
     from pipeline.stages.summarization.batch.voter_configs import get_profile
 
-    saved = _os.environ.pop("NLP_HISTO_PROFILE", None)
     try:
-        # No env, no arg
-        assert get_profile().name != "final_opus"
-        # Empty string env (treated as unset by `or` chain)
-        _os.environ["NLP_HISTO_PROFILE"] = ""
-        assert get_profile().name != "final_opus"
-        # Only an explicit name returns it
-        _os.environ["NLP_HISTO_PROFILE"] = "final_opus"
-        assert get_profile().name == "final_opus"
-    finally:
-        _os.environ.pop("NLP_HISTO_PROFILE", None)
-        if saved is not None:
-            _os.environ["NLP_HISTO_PROFILE"] = saved
+        get_profile("smoke_haiku")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("get_profile('smoke_haiku') should raise after rename")
 
 
 def test_version_constants():
@@ -445,9 +452,9 @@ ALL_TESTS = [
     ("Invalid relation_type → unclear",           test_invalid_relation_type_coerces_to_unclear),
     ("category 'demographic' → 'demographics'",   test_demographic_alias_repair),
     ("Bad finding is logged then dropped",        test_bad_finding_logged_when_dropped),
-    ("Profiles smoke_haiku / dev_sonnet / final_opus", test_profiles),
-    ("Default fallback is smoke_haiku",           test_default_profile_is_smoke_haiku_when_unset),
-    ("final_opus is opt-in only",                 test_final_opus_not_auto_selected),
+    ("Profiles cheap / real",                     test_profiles),
+    ("Default fallback is cheap",                 test_default_profile_is_cheap_when_unset),
+    ("Unknown profile raises",                    test_unknown_profile_raises),
     ("Version constants present",                 test_version_constants),
     ("compute_cascade_signature stable+sensitive", test_cascade_signature_stable_and_sensitive),
     ("MAP cache key includes versions+cascade",   test_map_cache_key_includes_versions_and_cascade),

@@ -114,22 +114,22 @@ def test_schema_validator_accepts_demographics():
 
 def test_two_demographics_findings_same_group_id():
     """Same subject/outcome/relation_type/category='demographics' → same group_id."""
-    id1 = _group_id("patients", "sex", "demographic", "demographics")
-    id2 = _group_id("patients", "sex", "demographic", "demographics")
+    id1 = _group_id("patients", "sex", "demographic", "demographics", pmcid="PMC1")
+    id2 = _group_id("patients", "sex", "demographic", "demographics", pmcid="PMC1")
     assert id1 == id2
 
 
 def test_demographics_vs_morphology_different_group_id():
     """Same subject/outcome/relation_type but different category → different group_id."""
-    id_demo = _group_id("patients", "sex", "demographic", "demographics")
-    id_morph = _group_id("patients", "sex", "demographic", "morphology")
+    id_demo = _group_id("patients", "sex", "demographic", "demographics", pmcid="PMC1")
+    id_morph = _group_id("patients", "sex", "demographic", "morphology", pmcid="PMC1")
     assert id_demo != id_morph
 
 
 def test_demographics_prognosis_different_group_id():
     """demographics and prognosis with the same entities produce distinct buckets."""
-    id_demo = _group_id("patients", "sex distribution", "demographic", "demographics")
-    id_prog = _group_id("patients", "sex distribution", "demographic", "prognosis")
+    id_demo = _group_id("patients", "sex distribution", "demographic", "demographics", pmcid="PMC1")
+    id_prog = _group_id("patients", "sex distribution", "demographic", "prognosis", pmcid="PMC1")
     assert id_demo != id_prog
 
 

@@ -218,13 +218,28 @@ def test_direction_counts_none_direction_stored_as_unclear():
 # ── group_id stability ────────────────────────────────────────────────────────
 
 def test_group_id_stable():
-    assert _group_id("CD30", "OS", "prognostic") == _group_id("CD30", "OS", "prognostic")
+    assert _group_id("CD30", "OS", "prognostic", pmcid=PMCID) == _group_id(
+        "CD30", "OS", "prognostic", pmcid=PMCID
+    )
 
 
 def test_group_id_differs_across_inputs():
-    assert _group_id("CD30", "OS", "prognostic") != _group_id("BCL2", "OS", "prognostic")
-    assert _group_id("CD30", "OS", "prognostic") != _group_id("CD30", "PFS", "prognostic")
-    assert _group_id("CD30", "OS", "prognostic") != _group_id("CD30", "OS", "expression")
+    assert _group_id("CD30", "OS", "prognostic", pmcid=PMCID) != _group_id(
+        "BCL2", "OS", "prognostic", pmcid=PMCID
+    )
+    assert _group_id("CD30", "OS", "prognostic", pmcid=PMCID) != _group_id(
+        "CD30", "PFS", "prognostic", pmcid=PMCID
+    )
+    assert _group_id("CD30", "OS", "prognostic", pmcid=PMCID) != _group_id(
+        "CD30", "OS", "expression", pmcid=PMCID
+    )
+
+
+def test_group_id_differs_across_pmcids():
+    """Same (subject, outcome, relation, category) in two papers must produce distinct group_ids."""
+    assert _group_id("CD30", "OS", "prognostic", pmcid="PMC_A") != _group_id(
+        "CD30", "OS", "prognostic", pmcid="PMC_B"
+    )
 
 
 # ── FindingGroup model ────────────────────────────────────────────────────────

@@ -463,7 +463,7 @@ class FindingGroup(BaseModel):
     are intentional — contradictions surface as relations in Phase 5 RELATE,
     not as separate groups.
     """
-    group_id:             str                    # "GRP_{sha8(subject)}_{sha8(outcome)}_{relation_type}_{sha8(category)}"
+    group_id:             str                    # "GRP_{sha8(pmcid)}_{sha8(subject)}_{sha8(outcome)}_{relation_type}_{sha8(category)}"
     subject_entity:       str                    # always non-None (groupability invariant)
     outcome_entity:       str                    # always non-None (groupability invariant)
     relation_type:        RelationTypeEnum       # grouping key

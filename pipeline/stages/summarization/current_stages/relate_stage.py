@@ -33,6 +33,7 @@ import logging
 
 from ..artifact_models import SkippedPair
 from ..models import CanonicalRule, RawNLIPair, Relation, RelationTypeLabel
+from ..nli_config import get_active_spec
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +41,12 @@ logger = logging.getLogger(__name__)
 # Delegates to the grounding_filter module-level cache so the same model
 # instance is shared with GroundingFilter (loaded once per process).
 
-_NLI_MODEL = "cross-encoder/nli-deberta-v3-large"
+_ACTIVE_SPEC = get_active_spec()
+_NLI_MODEL = _ACTIVE_SPEC.hf_id
+_DEFAULT_BATCH_SIZE = _ACTIVE_SPEC.batch_size
 
 
-def _get_nli_pipe(model_name: str = _NLI_MODEL, batch_size: int = 16, device: int | str | None = None):
+def _get_nli_pipe(model_name: str = _NLI_MODEL, batch_size: int = _DEFAULT_BATCH_SIZE, device: int | str | None = None):
     """Return cached NLI pipeline, sharing the grounding_filter singleton."""
     from ..helpers.grounding_filter import _NLI_PIPE_CACHE, _get_device
     resolved_device = device if device is not None else _get_device()
@@ -128,8 +131,9 @@ def _classify_pair(
                        mutual contradiction score with opposite directions is a
                        genuine conflict.
       - SUPPORT      : both directions score high on 'entailment'
-      - SCOPE_QUALIFY: one direction entails the other but not vice-versa
-      - None         : UNRELATED — caller skips this pair
+      - None         : UNRELATED — caller skips this pair. Asymmetric
+                       entailment (one direction only) collapses here so the
+                       output schema mirrors the 3-class NLI gold.
     """
     from ..models import DirectionEnum
 
@@ -166,10 +170,6 @@ def _classify_pair(
     # Mutual entailment → support
     if ent_ab >= entailment_threshold and ent_ba >= entailment_threshold:
         return RelationTypeLabel.SUPPORT
-
-    # Asymmetric entailment → scope qualification
-    if ent_ab >= entailment_threshold or ent_ba >= entailment_threshold:
-        return RelationTypeLabel.SCOPE_QUALIFY
 
     return None  # UNRELATED
 
@@ -266,7 +266,7 @@ class RelateStage:
         model_name: str = _NLI_MODEL,
         entailment_threshold: float = 0.55,
         contradiction_threshold: float = 0.65,
-        batch_size: int = 16,
+        batch_size: int = _DEFAULT_BATCH_SIZE,
         device: int | str | None = None,
     ) -> None:
         self._model_name = model_name

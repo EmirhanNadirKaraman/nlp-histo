@@ -20,6 +20,7 @@ escalates directly from Level 1 to Level 3.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
@@ -138,6 +139,12 @@ class MapStage:
         self._voter_chains = [build_map_chain(llm) for llm in voter_llms]
         self._level2_voter_chains = [build_map_chain(llm) for llm in level2_voter_llms]
         self._escalation_chain = build_map_chain(escalation_llm)
+        # Per-voter temperatures, captured at construction so the in-run voter
+        # cache (process(): self._voter_cache) can key on (provider, model, temp).
+        # Falls back to 0.0 for LLM types that don't expose .temperature.
+        self._l1_temps = [float(getattr(llm, "temperature", 0.0) or 0.0) for llm in voter_llms]
+        self._l2_temps = [float(getattr(llm, "temperature", 0.0) or 0.0) for llm in level2_voter_llms]
+        self._l3_temp  = float(getattr(escalation_llm, "temperature", 0.0) or 0.0)
         self._agreement = AgreementChecker(scorer=scorer or EmbeddingScorer(), theta=theta, reject_theta=reject_theta)
         self._router = router
         self._escalation_lock = threading.Lock()
@@ -236,6 +243,16 @@ class MapStage:
         self._usage_collector = usage_collector
         self._usage_pmcid = pmcid
 
+        # Per-paper voter cache: dedups identical (provider, model, temp, text)
+        # voter calls *within one paper* so e.g. Haiku at L1 and Haiku at L2 on
+        # the same chunk only hit the API once. Reset per-paper because a stale
+        # entry from a different paper would never key-match anyway (text hash
+        # differs), but freeing the dict keeps memory bounded. The chunk-level
+        # PipelineCache is unaffected; this layer sits underneath it.
+        self._voter_cache: dict[tuple, AuditableSummary] = {}
+        self._voter_cache_lock = threading.Lock()
+        self._voter_cache_hits = 0
+
         try:
             return self._process_inner(
                 sentences, pmcid, cache, collector, start_chunk, limit_chunks,
@@ -244,6 +261,8 @@ class MapStage:
         finally:
             self._usage_collector = None
             self._usage_pmcid = None
+            self._voter_cache = {}
+            self._voter_cache_hits = 0
 
     def _process_inner(
         self,
@@ -455,15 +474,26 @@ class MapStage:
                         "Chunk %s rejected by router — escalating to strong model.",
                         chunk_id,
                     )
-                cfg_l3 = None
-                if getattr(self, "_usage_collector", None) is not None:
-                    p, m = self._l3_spec
-                    cfg_l3 = self._usage_collector.attach(
-                        stage="MAP", role="escalator", provider=p, model=m,
-                        cascade_level=3, substage="l3", item_id=chunk_id,
-                        was_escalation=True,
+                p_l3, m_l3 = self._l3_spec
+                l3_cache_key = self._voter_cache_key(p_l3, m_l3, self._l3_temp, inp)
+                cached_l3 = self._voter_cache_get(l3_cache_key)
+                if cached_l3 is not None:
+                    self._voter_cache_bump_hits()
+                    logger.debug(
+                        "Chunk %s: L3 router path — voter-cache HIT (%s/%s @T=%.2f)",
+                        chunk_id, p_l3, m_l3, self._l3_temp,
                     )
-                result = self._escalation_chain.invoke(inp, config=cfg_l3) if cfg_l3 else self._escalation_chain.invoke(inp)
+                    result = cached_l3
+                else:
+                    cfg_l3 = None
+                    if getattr(self, "_usage_collector", None) is not None:
+                        cfg_l3 = self._usage_collector.attach(
+                            stage="MAP", role="escalator", provider=p_l3, model=m_l3,
+                            cascade_level=3, substage="l3", item_id=chunk_id,
+                            was_escalation=True,
+                        )
+                    result = self._escalation_chain.invoke(inp, config=cfg_l3) if cfg_l3 else self._escalation_chain.invoke(inp)
+                    self._voter_cache_set(l3_cache_key, result)
                 _producer = self._l3_spec
                 if decision.valid_voter_indices:
                     valid = [voters[i] for i in decision.valid_voter_indices]
@@ -549,15 +579,26 @@ class MapStage:
                     _escalated = True
                     _escalation_level = 3
                     logger.debug("Chunk %s: L2 %s → escalating to L3", chunk_id, l2_bundle.decision)
-                    cfg_l3 = None
-                    if getattr(self, "_usage_collector", None) is not None:
-                        p, m = self._l3_spec
-                        cfg_l3 = self._usage_collector.attach(
-                            stage="MAP", role="escalator", provider=p, model=m,
-                            cascade_level=3, substage="l3", item_id=chunk_id,
-                            was_escalation=True,
+                    p_l3, m_l3 = self._l3_spec
+                    l3_cache_key = self._voter_cache_key(p_l3, m_l3, self._l3_temp, inp)
+                    cached_l3 = self._voter_cache_get(l3_cache_key)
+                    if cached_l3 is not None:
+                        self._voter_cache_bump_hits()
+                        logger.debug(
+                            "Chunk %s: L3 — voter-cache HIT (%s/%s @T=%.2f)",
+                            chunk_id, p_l3, m_l3, self._l3_temp,
                         )
-                    result = self._escalation_chain.invoke(inp, config=cfg_l3) if cfg_l3 else self._escalation_chain.invoke(inp)
+                        result = cached_l3
+                    else:
+                        cfg_l3 = None
+                        if getattr(self, "_usage_collector", None) is not None:
+                            cfg_l3 = self._usage_collector.attach(
+                                stage="MAP", role="escalator", provider=p_l3, model=m_l3,
+                                cascade_level=3, substage="l3", item_id=chunk_id,
+                                was_escalation=True,
+                            )
+                        result = self._escalation_chain.invoke(inp, config=cfg_l3) if cfg_l3 else self._escalation_chain.invoke(inp)
+                        self._voter_cache_set(l3_cache_key, result)
                     _producer = self._l3_spec
 
         # ── Build chunk trace ───────────────────────────────────────────────
@@ -720,6 +761,39 @@ class MapStage:
             escalation_level=escalation_level,
         ))
 
+    @staticmethod
+    def _voter_cache_key(provider: str, model: str, temperature: float, inp: dict) -> tuple:
+        """Cache key for one voter call.
+
+        Includes the chunk text hash so different chunks never collide and the
+        cache works correctly even across the parallel chunk pool. Rounded
+        temperature avoids float-identity false-misses.
+        """
+        text = inp.get("text", "") or ""
+        text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+        return (provider, model, round(float(temperature), 3), text_hash)
+
+    def _voter_cache_get(self, key: tuple) -> AuditableSummary | None:
+        lock = getattr(self, "_voter_cache_lock", None)
+        if lock is None:
+            return None  # cache not initialised (called outside process())
+        with lock:
+            return self._voter_cache.get(key)
+
+    def _voter_cache_set(self, key: tuple, value: AuditableSummary) -> None:
+        lock = getattr(self, "_voter_cache_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._voter_cache[key] = value
+
+    def _voter_cache_bump_hits(self) -> None:
+        lock = getattr(self, "_voter_cache_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._voter_cache_hits += 1
+
     def _run_voters(
         self, inp: dict, chains: list | None = None, level: str = "L1"
     ) -> tuple[list[AuditableSummary], dict[int, float | None]]:
@@ -747,13 +821,30 @@ class MapStage:
         # usage to (provider, model) per voter. _l3 only fires from _cascade.
         if chains is self._level2_voter_chains:
             specs = self._l2_specs
+            temps = self._l2_temps
             cascade_level = 2
         else:
             specs = self._voter_specs
+            temps = self._l1_temps
             cascade_level = 1
         collector = getattr(self, "_usage_collector", None)
 
         def _timed_invoke(chain, i: int):
+            provider, model = (
+                specs[i] if i < len(specs) else ("unknown", "unknown")
+            )
+            voter_temp = temps[i] if i < len(temps) else 0.0
+            cache_key = self._voter_cache_key(provider, model, voter_temp, inp)
+            cached = self._voter_cache_get(cache_key)
+            if cached is not None:
+                self._voter_cache_bump_hits()
+                timings[i] = 0.0
+                logger.debug(
+                    "[%s] MAP chunk %s %s voter %d — voter-cache HIT (%s/%s @T=%.2f)",
+                    pmcid, chunk_id, level, i, provider, model, voter_temp,
+                )
+                return cached
+
             attempt = 0
             t0 = time.monotonic()
             last_exc: BaseException | None = None
@@ -767,9 +858,6 @@ class MapStage:
                 try:
                     cfg = None
                     if collector is not None:
-                        provider, model = (
-                            specs[i] if i < len(specs) else ("unknown", "unknown")
-                        )
                         cfg = collector.attach(
                             stage="MAP", role="voter", provider=provider, model=model,
                             cascade_level=cascade_level, substage=level.lower(),
@@ -782,6 +870,7 @@ class MapStage:
                         pmcid, chunk_id, level, i, elapsed_ms,
                     )
                     timings[i] = elapsed_ms
+                    self._voter_cache_set(cache_key, out)
                     return out
                 except Exception as exc:
                     last_exc = exc

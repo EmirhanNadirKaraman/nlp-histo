@@ -625,9 +625,6 @@ class SummarizationRunner:
                 "status": "success",
                 "run_id": run_id,
                 "pmcid": pmcid,
-                "summary": master.narrative_summary if master else None,
-                "rules": [r.model_dump() for r in rules.rules] if rules else [],
-                "contradiction_report": contradiction_report.model_dump() if contradiction_report else None,
                 # Phase 4–6 knowledge base
                 "canonical_rules": [
                     r.model_dump() for r in self._canonical_rules.get(pmcid, [])
@@ -643,12 +640,23 @@ class SummarizationRunner:
                 ],
                 "audit_trail": {
                     "map_chunks": [cs.model_dump() for cs in chunk_summaries],
-                    "master_summary": master.model_dump() if master else None,
-                    "rules_provenance": rules.model_dump() if rules else None,
                 },
                 "map_run_metadata": self._map.run_metadata_summary(),
                 "rejection_summary": rejection_summary.model_dump(),
             }
+            # Legacy REDUCE / RULES output is only included when explicitly run.
+            if self._run_reduce:
+                result["summary"] = master.narrative_summary if master else None
+                result["rules"] = [r.model_dump() for r in rules.rules] if rules else []
+                result["contradiction_report"] = (
+                    contradiction_report.model_dump() if contradiction_report else None
+                )
+                result["audit_trail"]["master_summary"] = (
+                    master.model_dump() if master else None
+                )
+                result["audit_trail"]["rules_provenance"] = (
+                    rules.model_dump() if rules else None
+                )
             self._finish_pipeline_run(
                 pipeline_run_db_id, "success",
                 narrative_summary=master.narrative_summary if master else None,

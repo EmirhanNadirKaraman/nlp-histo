@@ -274,6 +274,32 @@ class BatchSummarizationRunner:
             p = providers[job.provider]
             raw_results.extend(p.retrieve(job))
 
+        # Merge in any synthetic results produced by in-run voter dedup at the
+        # prior phase. These are voters whose (provider, model, temperature)
+        # matched an earlier level's voter for the same chunk — their result
+        # was carried over instead of issuing a duplicate API call. token_usage
+        # is reported as zero so the L1 (or L2) call isn't double-counted.
+        level_being_processed = {
+            BatchPhase.L1_SUBMITTED: "l1",
+            BatchPhase.L2_SUBMITTED: "l2",
+            BatchPhase.L3_SUBMITTED: "l3",
+        }.get(handle.phase)
+        if level_being_processed is not None:
+            synthetic = handle.synthetic_results.get(level_being_processed, [])
+            if synthetic:
+                logger.info(
+                    "[%s] Merging %d dedup-synthesised %s result(s) into raw_results",
+                    handle.pmcid, len(synthetic), level_being_processed.upper(),
+                )
+                for d in synthetic:
+                    raw_results.append(BatchResult(
+                        custom_id=d["custom_id"],
+                        content=d.get("content"),
+                        error=d.get("error"),
+                        input_tokens=d.get("input_tokens", 0),
+                        output_tokens=d.get("output_tokens", 0),
+                    ))
+
         if handle.phase == BatchPhase.L1_SUBMITTED:
             self._process_level(handle, raw_results, level="l1", strip_flags=handle.l1_strip,
                                 next_voters=self._l2, next_level="l2",
@@ -422,18 +448,12 @@ class BatchSummarizationRunner:
                 "status": "success",
                 "run_id": run_id,
                 "pmcid":  pmcid,
-                "summary": master.narrative_summary if master else None,
-                "rules":   [r.model_dump() for r in rules.rules] if rules else [],
-                "contradiction_report":
-                    contradiction_report.model_dump() if contradiction_report else None,
                 "canonical_rules":  [cr.model_dump() for cr in canonical_rules],
                 "relations":        [r.model_dump()  for r in relations],
                 "relate_raw_pairs": [p.model_dump()  for p in relate_raw_pairs],
                 "final_rules":      [fr.model_dump() for fr in final_rules],
                 "audit_trail": {
                     "map_chunks": [cs.model_dump() for cs in chunk_summaries],
-                    "master_summary":   master.model_dump() if master else None,
-                    "rules_provenance": rules.model_dump()  if rules else None,
                 },
                 "map_run_metadata": {
                     "schema_version":    handle.schema_version or MAP_SCHEMA_VERSION,
@@ -446,6 +466,19 @@ class BatchSummarizationRunner:
                     "l3_voter":  {"provider": self._l3.provider, "model": self._l3.model},
                 },
             }
+            # Legacy REDUCE / RULES output is only included when explicitly run.
+            if self._run_reduce:
+                result["summary"] = master.narrative_summary if master else None
+                result["rules"] = [r.model_dump() for r in rules.rules] if rules else []
+                result["contradiction_report"] = (
+                    contradiction_report.model_dump() if contradiction_report else None
+                )
+                result["audit_trail"]["master_summary"] = (
+                    master.model_dump() if master else None
+                )
+                result["audit_trail"]["rules_provenance"] = (
+                    rules.model_dump() if rules else None
+                )
             out_path = self._summaries_dir / f"{pmcid}.json"
             out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
             logger.info("[%s] Result saved to %s", pmcid, out_path)
@@ -731,13 +764,94 @@ class BatchSummarizationRunner:
         if escalated:
             setattr(handle, escalated_attr, escalated)
             handle.phase = next_phase
+            # In-run dedup: for each escalated chunk × next-level voter, if any
+            # already-run voter at L1 (or L1+L2 when promoting to L3) has the
+            # same (provider, model, temperature), reuse that voter's raw
+            # content instead of issuing a duplicate API call.
+            skip_voters, synthetic = self._compute_voter_dedup(
+                handle, escalated, next_voters, next_level,
+            )
+            if synthetic:
+                handle.synthetic_results.setdefault(next_level, []).extend(synthetic)
+                logger.info(
+                    "[%s] Voter dedup: reusing %d %s result(s) from earlier level(s); "
+                    "saved equal number of API calls",
+                    pmcid, len(synthetic), next_level.upper(),
+                )
             handle.jobs = submit_level(
                 handle.chunk_map, pmcid, next_voters,
                 level=next_level, chunk_ids=escalated,
+                skip_voters=skip_voters,
             )
         else:
             handle.phase = BatchPhase.COMPLETE
             logger.info("[%s] No escalations — batch MAP complete.", pmcid)
+
+    @staticmethod
+    def _voter_sig(cfg: VoterBatchConfig) -> tuple[str, str, float]:
+        """Identity tuple used to decide whether two voter slots are duplicates."""
+        return (cfg.provider, cfg.model, round(float(cfg.temperature), 3))
+
+    def _compute_voter_dedup(
+        self,
+        handle: BatchHandle,
+        escalated: list[str],
+        next_voters: list[VoterBatchConfig],
+        next_level: str,
+    ) -> tuple[dict[str, set[int]], list[dict]]:
+        """Decide which next-level voter slots are duplicates of earlier-level voters.
+
+        Returns
+        -------
+        skip_voters:
+            chunk_id → set of next-level voter indices to skip submitting.
+        synthetic:
+            BatchResult-equivalent dicts (custom_id, content, tokens=0) that
+            will be merged into raw_results when the next level is processed.
+            Token counts are zero so the duplicate call isn't double-counted —
+            the original call was already charged at its own level.
+        """
+        pmcid = handle.pmcid
+
+        # Build earlier-level signature → (level, voter_idx) map. L2 sees L1
+        # only; L3 sees both L1 and L2. First match wins.
+        earlier: list[tuple[str, list[VoterBatchConfig]]] = []
+        if next_level in ("l2", "l3"):
+            earlier.append(("l1", self._l1))
+        if next_level == "l3":
+            earlier.append(("l2", self._l2))
+
+        sig_to_source: dict[tuple, tuple[str, int]] = {}
+        for prior_level, voters in earlier:
+            for vi, cfg in enumerate(voters):
+                sig_to_source.setdefault(self._voter_sig(cfg), (prior_level, vi))
+
+        skip_voters: dict[str, set[int]] = {}
+        synthetic: list[dict] = []
+
+        for chunk_id in escalated:
+            for vi, cfg in enumerate(next_voters):
+                src = sig_to_source.get(self._voter_sig(cfg))
+                if src is None:
+                    continue
+                prior_level, prior_vi = src
+                prior_custom_id = f"{pmcid}__{chunk_id}__{prior_level}__{prior_vi}"
+                raw_store = getattr(handle, f"{prior_level}_raw", {})
+                content = raw_store.get(prior_custom_id)
+                if not content:
+                    # Prior voter failed / produced no content — no point reusing.
+                    continue
+                next_custom_id = f"{pmcid}__{chunk_id}__{next_level}__{vi}"
+                synthetic.append({
+                    "custom_id": next_custom_id,
+                    "content": content,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "error": None,
+                })
+                skip_voters.setdefault(chunk_id, set()).add(vi)
+
+        return skip_voters, synthetic
 
     def _collect_l3(self, handle: BatchHandle, raw_results: list[BatchResult]) -> None:
         """Parse L3 (escalation model) results and finalise remaining chunks."""

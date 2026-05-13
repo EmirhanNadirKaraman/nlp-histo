@@ -179,6 +179,7 @@ def build_requests(
     voter_configs: list[VoterBatchConfig],
     level: str,
     chunk_ids: list[str] | None = None,
+    skip_voters: dict[str, set[int]] | None = None,
 ) -> list[BatchRequest]:
     """
     Create a BatchRequest for every (chunk, voter) combination.
@@ -190,16 +191,23 @@ def build_requests(
     voter_configs: ordered list of voter configs for this level
     level:       "l1" | "l2" | "l3"
     chunk_ids:   subset of chunks to process; None = all chunks
+    skip_voters: chunk_id → set of voter indices to SKIP submitting. Used by the
+                 in-run voter dedup path when a voter slot has already been
+                 satisfied from an earlier level's result (BatchHandle.synthetic_results).
     """
     from ..current_stages.map_stage import _format_sentences  # module-private helper
 
     targets = chunk_ids if chunk_ids is not None else list(chunk_map.keys())
+    skip_voters = skip_voters or {}
     requests: list[BatchRequest] = []
     for chunk_id in targets:
         sentences = chunk_map[chunk_id]
         text = _format_sentences(sentences)
         messages = format_messages(pmcid, chunk_id, text)
+        skip = skip_voters.get(chunk_id, set())
         for vi, cfg in enumerate(voter_configs):
+            if vi in skip:
+                continue
             requests.append(BatchRequest(
                 custom_id=f"{pmcid}__{chunk_id}__{level}__{vi}",
                 messages=messages,
@@ -261,9 +269,20 @@ def submit_level(
     voter_configs: list[VoterBatchConfig],
     level: str,
     chunk_ids: list[str] | None = None,
+    skip_voters: dict[str, set[int]] | None = None,
 ) -> list[ProviderJob]:
-    """Build requests, group by provider, submit, return list of ProviderJob."""
-    all_requests = build_requests(chunk_map, pmcid, voter_configs, level, chunk_ids)
+    """Build requests, group by provider, submit, return list of ProviderJob.
+
+    If ``skip_voters`` removes every voter for every chunk, no jobs are
+    submitted and an empty list is returned. Callers must still advance the
+    handle to the next phase so the synthetic results (BatchHandle.synthetic_results)
+    are picked up by the next ``advance()`` call.
+    """
+    all_requests = build_requests(
+        chunk_map, pmcid, voter_configs, level, chunk_ids, skip_voters
+    )
+    if not all_requests:
+        return []
     by_provider: dict[str, list[BatchRequest]] = {}
     for req in all_requests:
         by_provider.setdefault(req.provider, []).append(req)

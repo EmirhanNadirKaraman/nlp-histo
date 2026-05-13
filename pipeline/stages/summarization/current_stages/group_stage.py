@@ -61,10 +61,14 @@ def _group_id(
     category: str = "",
     subject_cui: str | None = None,
     outcome_cui: str | None = None,
+    pmcid: str = "",
 ) -> str:
     subj_key = subject_cui if subject_cui else subject
     out_key = outcome_cui if outcome_cui else outcome
-    return f"GRP_{_sha8(subj_key)}_{_sha8(out_key)}_{relation_type}_{_sha8(category)}"
+    return (
+        f"GRP_{_sha8(pmcid)}_{_sha8(subj_key)}_{_sha8(out_key)}"
+        f"_{relation_type}_{_sha8(category)}"
+    )
 
 
 def _scope_heterogeneity(members: list[NormalFinding]) -> float:
@@ -134,6 +138,7 @@ class GroupStage:
             key = _group_id(  # type: ignore[arg-type]
                 nf.subject_entity, nf.outcome_entity, nf.relation_type.value, nf.category,
                 subject_cui=nf.subject_cui, outcome_cui=nf.outcome_cui,
+                pmcid=pmcid,
             )
             buckets[key].append(nf)
 

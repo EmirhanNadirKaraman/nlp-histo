@@ -64,7 +64,7 @@ Single source of truth for all data shapes. Every stage reads from and writes to
 
 ### Design decisions
 - `Finding.assertion_status` defaults to `uncertain`. NORMALIZE applies a keyword heuristic as a **recovery fallback** only when it is still `uncertain` after MAP — not as an overwrite.
-- `FindingGroup.group_id` is a hash of `(subject, outcome, relation_type, category)` — deterministic, no sequential IDs.
+- `FindingGroup.group_id` is a hash of `(pmcid, subject, outcome, relation_type, category)` — deterministic, per-paper namespaced so the same (subject, outcome, relation, category) tuple in two papers produces distinct group_ids (and therefore distinct `canonical_id`s downstream).
 - `Relation.nli_score_a_to_b` stores the **entailment** score for SUPPORT/SCOPE_QUALIFY and the **contradiction** score for CONTRADICT. Do not conflate these.
 - `AtomicFinding` is defined but unused — reserved schema for a planned refactor.
 
