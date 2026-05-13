@@ -211,11 +211,17 @@ class TwoPassConfig:
     TwoPassTextExtractor call.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     """
     When True, PipelineRunner uses TwoPassTextExtractor instead of the standard
     layout-extract → mask → re-extract sequence (Steps 1, 3, 4).
     Steps 2, 5–8 are unaffected.
+
+    Default flipped to True after empirical verification (May 2026): the
+    pixel-render path in PyMuPDFEvidenceGatherer catches Docling phantom
+    elements (text content at bboxes that do not render), PDF render-mode-3
+    invisible text, and ExtGState fill_opacity=0 ghost layers.  See
+    scripts/verify_ghost_text_detection.py and scripts/thesis_demo_ghost_text.py.
     """
 
     # ── Rendering ─────────────────────────────────────────────────────────────
@@ -275,12 +281,20 @@ class TwoPassConfig:
     """
 
     # ── White-text ghost layer (Rule R-color) ────────────────────────────────
-    max_white_char_fraction: float = 0.5
+    max_white_char_fraction: float = 1.0
     """
     Fraction of near-white-colored characters in an element's bbox above which
     the element is classified as a white-text ghost layer and rejected (Rule
-    R-color).  0.5 = more than half the chars must be near-white to trigger.
-    Set to 1.0 to disable.  Near-white means all RGB channels >= 240.
+    R-color).  Near-white means all RGB channels >= 240.
+
+    Default disabled (1.0) after empirical observation (May 2026): the
+    color signal alone produces false positives on legitimate inverted
+    headers — e.g. white "Key Points" SECTION_HEADERs printed on a coloured
+    banner.  Spans report color=0xffffff (R-color trips) but the rendered
+    bbox is full of dark pixels (dark_pixel_fraction ≈ 0.73), so Rule R1
+    (visually_blank) correctly keeps them.  R1 is the trustworthy signal;
+    leave R-color off unless you have a corpus where R1 is unavailable.
+    Set to a value < 1.0 to re-enable.
     """
 
     # ── Dense-text heuristic (Rule R3) ───────────────────────────────────────

@@ -149,6 +149,8 @@ def build_batch_runners(
         escalation_llm=sync_llm,
         config=cfg,
         output_dir=Path("out/summaries"),
+        db=get_db_connection(),
+        run_ner=not skip_ner,
     )
     sync_runner = SummarizationRunner(
         voter_llms=[sync_llm],

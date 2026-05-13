@@ -45,17 +45,23 @@ from ..interfaces.scoring import ChunkDecision
 from ..current_stages.map_stage import _format_sentences
 from ..models import (
     AuditableSummary,
+    Finding,
     MAP_PROMPT_VERSION,
     MAP_SCHEMA_VERSION,
     MAP_STAGE_NAME,
     NormalFinding,
+    RejectedFinding,
+    RejectionSummary,
+    RelationTypeEnum,
     compute_cascade_signature,
+    compute_finding_id,
 )
 from ..old_stages.reduce_stage import ReduceStage
 from ..old_stages.rule_stage import RuleStage
 from ..persistence import (
     RunArtifactWriter,
     RunManifest,
+    compute_pipeline_config_hash,
     persist_canonicalize_artifacts,
     persist_group_artifacts,
     persist_map_artifacts,
@@ -109,6 +115,9 @@ class BatchSummarizationRunner:
         artifact_run_id: str | None = None,
         run_modern_pipeline: bool = True,
         run_reduce: bool = False,
+        db=None,
+        force_rerun: bool = False,
+        run_ner: bool = False,
     ) -> None:
         from ..agreement.providers import OpenAIEmbedder
         cfg = config or SummarizationConfig()
@@ -183,6 +192,12 @@ class BatchSummarizationRunner:
         )
         self._artifact_run_id_override: str | None = artifact_run_id
 
+        # DB persistence + caching + NER (parity with sync runner). Persistence
+        # is fully optional and degrades to no-ops when ``db`` is None.
+        self._db = db
+        self._force_rerun = force_rerun
+        self._run_ner = run_ner
+
         # Snapshot of config + cascade for the manifest, mirrors sync runner shape.
         import dataclasses
         self._config_snapshot = {
@@ -200,19 +215,59 @@ class BatchSummarizationRunner:
         return self._handle_dir / f"{pmcid}.batch.json"
 
     def load_or_submit(self, file_data: dict) -> BatchHandle:
-        """Load existing handle from disk, or submit a new L1 batch."""
+        """Load existing handle from disk, or submit a new L1 batch.
+
+        Stale-cache trap: a handle from a previous run may have been written
+        with ``cached_result_only=True`` pointing at a result JSON that has
+        since been invalidated (config hash mismatch) or deleted. Returning
+        such a handle would let ``finalize()`` fall through to an empty-data
+        re-run with no MAP findings. Detect that case and re-submit instead.
+        """
         path = self.handle_path(file_data["pmcid"])
         if path.exists():
             handle = BatchHandle.load(path)
-            logger.info("[%s] Loaded existing handle (phase=%s)", handle.pmcid, handle.phase.value)
-            return handle
+            if handle.cached_result_only and self._load_result(handle.pmcid) is None:
+                logger.info(
+                    "[%s] handle pointed at stale/missing cache — re-submitting",
+                    handle.pmcid,
+                )
+                path.unlink()
+            else:
+                logger.info("[%s] Loaded existing handle (phase=%s)", handle.pmcid, handle.phase.value)
+                return handle
         return self.submit(file_data)
 
     def submit(self, file_data: dict) -> BatchHandle:
-        """Chunk the paper, submit L1 batch jobs, and persist the handle."""
+        """Chunk the paper, submit L1 batch jobs, and persist the handle.
+
+        Short-circuits when a valid cached result JSON exists for the same
+        pipeline_config_hash and ``force_rerun`` is False — returns a COMPLETE
+        handle marked ``cached_result_only`` so ``finalize()`` returns the
+        cached dict without re-spending L1/L2/L3 batch dollars.
+        """
         pmcid = file_data["pmcid"]
+
+        # Cache short-circuit (parity with sync ``process()`` skip-on-cached).
+        if not self._force_rerun and self._load_result(pmcid) is not None:
+            logger.info("[%s] cached result on disk — skipping batch submit", pmcid)
+            handle = BatchHandle(
+                pmcid=pmcid,
+                phase=BatchPhase.COMPLETE,
+                cached_result_only=True,
+                schema_version=MAP_SCHEMA_VERSION,
+                prompt_version=MAP_PROMPT_VERSION,
+                stage_name=MAP_STAGE_NAME,
+                cascade_profile=self._cascade_profile,
+                cascade_signature=self._cascade_signature,
+            )
+            handle.save(self.handle_path(pmcid))
+            return handle
+
         sentences = file_data["sentences_with_provenance"]
         chunk_map = self._make_chunk_map(sentences)
+
+        run_id = self._artifact_run_id_override or self._make_run_id(pmcid)
+        pipeline_run_db_id = self._create_pipeline_run(pmcid, run_id)
 
         handle = BatchHandle(
             pmcid=pmcid,
@@ -227,6 +282,7 @@ class BatchSummarizationRunner:
             stage_name=MAP_STAGE_NAME,
             cascade_profile=self._cascade_profile,
             cascade_signature=self._cascade_signature,
+            pipeline_run_db_id=pipeline_run_db_id,
         )
         handle.jobs = submit_level(chunk_map, pmcid, self._l1, level="l1")
         handle.save(self.handle_path(pmcid))
@@ -331,6 +387,19 @@ class BatchSummarizationRunner:
             )
 
         pmcid = handle.pmcid
+
+        # ── Cache short-circuit (set by submit() when valid result on disk) ───
+        if handle.cached_result_only:
+            cached = self._load_result(pmcid)
+            if cached is not None:
+                logger.info("[%s] returning cached result (no work performed)", pmcid)
+                return cached
+            logger.warning(
+                "[%s] cached_result_only set but cache miss — falling through "
+                "to re-run, though no MAP chunks were collected. Result will be empty.",
+                pmcid,
+            )
+
         chunk_summaries = [
             AuditableSummary.model_validate(v) for v in handle.finalized.values()
         ]
@@ -338,8 +407,25 @@ class BatchSummarizationRunner:
         # ── Filesystem persistence setup (opt-in) ─────────────────────────────
         run_id = self._artifact_run_id_override or self._make_run_id(pmcid)
         writer = self._make_artifact_writer(run_id, pmcid, handle.cascade_signature)
+        pipeline_run_db_id = handle.pipeline_run_db_id
 
         try:
+            # Track total MAP findings before any filtering — used by
+            # rejection_summary later.
+            map_findings_total = sum(len(cs.findings) for cs in chunk_summaries)
+
+            # Assign stable finding_id BEFORE grounding so downstream stages
+            # (and rejected-finding artifacts) share the same lineage key. The
+            # id is deterministic over (pmcid, chunk_id, position, claim).
+            for cs in chunk_summaries:
+                for pos, f in enumerate(cs.findings):
+                    f.set_finding_id(
+                        compute_finding_id(pmcid, cs.chunk_id, pos, f.claim)
+                    )
+
+            # ── Verbatim-from-DB (replace LLM paraphrases before grounding) ──
+            self._replace_verbatim_from_db(chunk_summaries)
+
             # ── Grounding (matches sync ordering) ─────────────────────────────
             grounding_rejected: list = []
             if self._grounding is not None:
@@ -351,8 +437,9 @@ class BatchSummarizationRunner:
                         grounding_rejected.append((cs.chunk_id, f))
                 chunk_summaries = new_summaries
 
-            # ── MAP artifact persistence ──────────────────────────────────────
+            # ── MAP artifact persistence (filesystem + DB) ────────────────────
             persist_map_artifacts(writer, pmcid, chunk_summaries, grounding_rejected)
+            self._persist_map_findings(pipeline_run_db_id, pmcid, chunk_summaries)
 
             # ── Optional modern chain — produces canonical/relate/final ──────
             normal_findings: list = []
@@ -360,7 +447,9 @@ class BatchSummarizationRunner:
             canonical_rules: list = []
             relations:       list = []
             relate_raw_pairs: list = []
+            relate_skipped: list = []
             final_rules:     list = []
+            non_groupable: list = []
 
             if self._run_modern_pipeline:
                 import time as _time  # noqa: PLC0415
@@ -371,6 +460,9 @@ class BatchSummarizationRunner:
                 logger.info("[%s] NORMALIZE — done [%.1fs] → %d normal findings",
                             pmcid, _time.perf_counter() - t0, len(normal_findings))
                 persist_normalize_artifacts(writer, pmcid, normal_findings)
+                nf_db_id_map = self._persist_normal_findings(
+                    pipeline_run_db_id, pmcid, normal_findings,
+                )
 
                 groupable     = [nf for nf in normal_findings if is_groupable(nf)]
                 non_groupable = [nf for nf in normal_findings if not is_groupable(nf)]
@@ -381,6 +473,9 @@ class BatchSummarizationRunner:
                 logger.info("[%s] GROUP — done [%.1fs] → %d groups",
                             pmcid, _time.perf_counter() - t0, len(finding_groups))
                 persist_group_artifacts(writer, pmcid, finding_groups, non_groupable)
+                fg_db_id_map = self._persist_finding_groups(
+                    pipeline_run_db_id, pmcid, finding_groups, nf_db_id_map,
+                )
 
                 logger.info("[%s] CANONICALIZE — start (%d groups)", pmcid, len(finding_groups))
                 t0 = _time.perf_counter()
@@ -399,6 +494,11 @@ class BatchSummarizationRunner:
                 logger.info("[%s] UMLS enrichment — done [%.1fs]",
                             pmcid, _time.perf_counter() - t0)
                 persist_canonicalize_artifacts(writer, pmcid, canonical_rules)
+                cr_db_id_map = self._persist_canonical_rules(
+                    pipeline_run_db_id, pmcid, canonical_rules, fg_db_id_map,
+                )
+                # Cross-paper relate must run after canonical_rules are in DB.
+                self._corpus_relate_incremental(pmcid, canonical_rules)
 
                 logger.info("[%s] RELATE — start (%d canonical rules)",
                             pmcid, len(canonical_rules))
@@ -416,6 +516,7 @@ class BatchSummarizationRunner:
                 persist_relate_artifacts(
                     writer, pmcid, relations, relate_raw_pairs, relate_skipped,
                 )
+                self._persist_relations(pipeline_run_db_id, pmcid, relations, cr_db_id_map)
 
                 logger.info("[%s] RESOLVE — start (%d canonical rules, %d relations)",
                             pmcid, len(canonical_rules), len(relations))
@@ -424,6 +525,7 @@ class BatchSummarizationRunner:
                 logger.info("[%s] RESOLVE — done [%.1fs] → %d final rules",
                             pmcid, _time.perf_counter() - t0, len(final_rules))
                 persist_resolve_artifacts(writer, pmcid, final_rules, relations)
+                self._persist_final_rules(pipeline_run_db_id, pmcid, final_rules, cr_db_id_map)
 
             # ── Optional REDUCE → RULES (legacy) ─────────────────────────────
             master = None
@@ -443,6 +545,28 @@ class BatchSummarizationRunner:
                     rules = self._grounding.filter_rules(rules)
                 if self._contradiction is not None:
                     contradiction_report = self._contradiction.detect(rules)
+
+            # ── Rejection summary (sync parity) ───────────────────────────────
+            rejection_summary = _build_rejection_summary(
+                pmcid=pmcid,
+                grounding_threshold=(
+                    self._grounding.threshold if self._grounding is not None else None
+                ),
+                map_findings_total=map_findings_total,
+                grounding_rejected=grounding_rejected,
+                normal_findings=normal_findings,
+                non_groupable_nfs=non_groupable,
+            )
+            self._persist_rejection_summary(pipeline_run_db_id, rejection_summary)
+
+            # ── NER + UMLS linking (optional) ─────────────────────────────────
+            if self._run_ner and self._db is not None:
+                logger.info("[%s] NER — running entity extraction + UMLS linking", pmcid)
+                try:
+                    from named_entity_recognition.ner import run_ner_on_db  # noqa: PLC0415
+                    run_ner_on_db(pmcid, save_to_db=True, force=False)
+                except Exception as ner_exc:
+                    logger.warning("[%s] NER failed (non-fatal): %s", pmcid, ner_exc)
 
             result = {
                 "status": "success",
@@ -465,6 +589,8 @@ class BatchSummarizationRunner:
                     "l2_voters": [{"provider": v.provider, "model": v.model} for v in self._l2],
                     "l3_voter":  {"provider": self._l3.provider, "model": self._l3.model},
                 },
+                "rejection_summary": rejection_summary.model_dump(),
+                "pipeline_config_hash": self._pipeline_config_hash(),
             }
             # Legacy REDUCE / RULES output is only included when explicitly run.
             if self._run_reduce:
@@ -479,17 +605,22 @@ class BatchSummarizationRunner:
                 result["audit_trail"]["rules_provenance"] = (
                     rules.model_dump() if rules else None
                 )
-            out_path = self._summaries_dir / f"{pmcid}.json"
-            out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-            logger.info("[%s] Result saved to %s", pmcid, out_path)
+            self._save_result(result)
+            logger.info("[%s] Result saved to %s", pmcid, self._result_path(pmcid))
 
             self._write_batch_cost_artifacts(handle, writer, run_id, pmcid)
+
+            self._finish_pipeline_run(
+                pipeline_run_db_id, "success",
+                narrative_summary=master.narrative_summary if master else None,
+            )
 
             if writer is not None:
                 writer.finalize("completed")
             return result
 
         except Exception as exc:
+            self._finish_pipeline_run(pipeline_run_db_id, "failed", error=str(exc))
             if writer is not None:
                 writer.write_error(stage="batch_finalize", error=str(exc), pmcid=pmcid)
                 writer.finalize("failed", error=str(exc))
@@ -627,6 +758,517 @@ class BatchSummarizationRunner:
             logger.info("[%s] batch cost report written to %s", pmcid, out_dir)
         except Exception as exc:
             logger.warning("[%s] batch cost report write failed (non-fatal): %s", pmcid, exc)
+
+    # ── DB / cache / verbatim helpers (parity with sync runner) ────────────────
+    # TODO: deduplicate with SummarizationRunner — these are line-for-line copies.
+    # Lift into pipeline/stages/summarization/persistence.py as module-level fns
+    # taking ``db`` as a parameter so both runners share one implementation.
+
+    def _pipeline_config_hash(self) -> str:
+        cfg = self._cfg_full
+        thresholds = {
+            "grounding_threshold": (
+                self._grounding.threshold if self._grounding is not None else None
+            ),
+            "entailment_threshold":   cfg.relate.entailment_threshold,
+            "contradiction_threshold": cfg.relate.contradiction_threshold,
+            "map_theta":              cfg.map.theta,
+            "map_reject_theta":       cfg.map.reject_theta,
+            "contradiction_similarity_threshold": cfg.contradiction_similarity_threshold,
+        }
+        models = {
+            "voter_models":        [v.model for v in self._l1],
+            "level2_voter_models": [v.model for v in self._l2],
+            "escalation_model":    self._l3.model,
+        }
+        return compute_pipeline_config_hash(
+            config=self._config_snapshot,
+            thresholds=thresholds,
+            models=models,
+            schema_version=MAP_SCHEMA_VERSION,
+            prompt_version=MAP_PROMPT_VERSION,
+            cascade_signature=self._cascade_signature,
+        )
+
+    def _result_path(self, pmcid: str) -> Path:
+        return self._summaries_dir / f"{pmcid}.json"
+
+    def _load_result(self, pmcid: str) -> dict | None:
+        p = self._result_path(pmcid)
+        if not p.exists():
+            return None
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("[%s] cached result unreadable, ignoring: %s", pmcid, exc)
+            return None
+        stored_hash = data.get("pipeline_config_hash")
+        current_hash = self._pipeline_config_hash()
+        if stored_hash != current_hash:
+            logger.info(
+                "[%s] cached result stale (config hash %s != %s) — re-running",
+                pmcid, stored_hash, current_hash,
+            )
+            return None
+        return data
+
+    def _save_result(self, result: dict) -> None:
+        # Stamp the hash so future runs can decide whether the cache is valid.
+        result.setdefault("pipeline_config_hash", self._pipeline_config_hash())
+        p = self._result_path(result["pmcid"])
+        p.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _create_pipeline_run(self, pmcid: str, run_id: str) -> int | None:
+        if self._db is None:
+            return None
+        try:
+            from database import Document, PipelineRun  # noqa: PLC0415
+            with self._db.session_scope() as session:
+                doc = session.query(Document).filter_by(pmcid=pmcid).first()
+                run = PipelineRun(
+                    run_id=run_id,
+                    pmcid=pmcid,
+                    document_id=doc.id if doc else None,
+                    status="running",
+                    config_snapshot=self._config_snapshot,
+                    started_at=datetime.now(tz=timezone.utc),
+                )
+                session.add(run)
+                session.flush()
+                return run.id
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to create pipeline_run: %s", pmcid, exc)
+            return None
+
+    def _finish_pipeline_run(
+        self,
+        db_id: int | None,
+        status: str,
+        error: str | None = None,
+        narrative_summary: str | None = None,
+    ) -> None:
+        if db_id is None:
+            return
+        try:
+            from database import PipelineRun  # noqa: PLC0415
+            with self._db.session_scope() as session:
+                run = session.query(PipelineRun).filter_by(id=db_id).first()
+                if run is not None:
+                    run.status = status
+                    run.finished_at = datetime.now(tz=timezone.utc)
+                    run.error = error
+                    if narrative_summary is not None:
+                        run.narrative_summary = narrative_summary
+        except Exception as exc:
+            logger.warning("DB: failed to update pipeline_run id=%s: %s", db_id, exc)
+
+    def _clear_normalized_run_data(self, db_id: int, pmcid: str) -> None:
+        try:
+            from database.models import (
+                SumFinalRule, SumRelation, SumCanonicalRule,
+                SumGroupMember, SumFindingGroup,
+                SumNormalFindingSpan, SumNormalFinding,
+            )
+            with self._db.engine.begin() as conn:
+                t = SumFinalRule.__table__
+                conn.execute(t.delete().where(
+                    (t.c.pipeline_run_id == db_id) & (t.c.pmcid == pmcid)))
+                t = SumRelation.__table__
+                conn.execute(t.delete().where(
+                    (t.c.pipeline_run_id == db_id) & (t.c.pmcid == pmcid)))
+                t = SumCanonicalRule.__table__
+                conn.execute(t.delete().where(
+                    (t.c.pipeline_run_id == db_id) & (t.c.pmcid == pmcid)))
+                fg_table = SumFindingGroup.__table__
+                subq = fg_table.select().where(
+                    (fg_table.c.pipeline_run_id == db_id) & (fg_table.c.pmcid == pmcid)
+                ).with_only_columns(fg_table.c.id)
+                t = SumGroupMember.__table__
+                conn.execute(t.delete().where(t.c.finding_group_id.in_(subq)))
+                t = SumFindingGroup.__table__
+                conn.execute(t.delete().where(
+                    (t.c.pipeline_run_id == db_id) & (t.c.pmcid == pmcid)))
+                nf_table = SumNormalFinding.__table__
+                subq2 = nf_table.select().where(
+                    (nf_table.c.pipeline_run_id == db_id) & (nf_table.c.pmcid == pmcid)
+                ).with_only_columns(nf_table.c.id)
+                t = SumNormalFindingSpan.__table__
+                conn.execute(t.delete().where(t.c.normal_finding_id.in_(subq2)))
+                t = SumNormalFinding.__table__
+                conn.execute(t.delete().where(
+                    (t.c.pipeline_run_id == db_id) & (t.c.pmcid == pmcid)))
+        except Exception as exc:
+            logger.warning(
+                "[%s] DB: failed to clear normalized run data (run_id=%d): %s",
+                pmcid, db_id, exc, exc_info=True,
+            )
+
+    def _replace_verbatim_from_db(self, chunk_summaries: list) -> None:
+        if self._db is None:
+            return
+        te_ids: set[int] = set()
+        for cs in chunk_summaries:
+            for f in cs.findings:
+                for ev in f.evidence:
+                    parts = ev.split("|")
+                    if len(parts) == 3:
+                        try:
+                            te_ids.add(int(parts[2]))
+                        except ValueError:
+                            pass
+        if not te_ids:
+            return
+        from database import TextElement  # type: ignore
+        te_map: dict[int, str] = {}
+        try:
+            with self._db.session_scope() as session:
+                rows = (
+                    session.query(TextElement.id, TextElement.text_content)
+                    .filter(TextElement.id.in_(te_ids))
+                    .all()
+                )
+                te_map = {row.id: row.text_content for row in rows}
+        except Exception as exc:
+            logger.warning("[verbatim] DB lookup failed — keeping LLM verbatim: %s", exc)
+            return
+        replaced = 0
+        for cs in chunk_summaries:
+            for f in cs.findings:
+                if not f.evidence:
+                    continue
+                parts = f.evidence[0].split("|")
+                if len(parts) == 3:
+                    try:
+                        te_id = int(parts[2])
+                        text = te_map.get(te_id)
+                        if text:
+                            f.verbatim_support = text
+                            replaced += 1
+                    except ValueError:
+                        pass
+        logger.info("[verbatim] replaced %d/%d finding verbatims from DB",
+                    replaced, sum(len(cs.findings) for cs in chunk_summaries))
+
+    def _persist_map_findings(self, db_id, pmcid, chunk_summaries) -> None:
+        if db_id is None:
+            return
+        try:
+            from database.models import SumMapFinding
+            from ..models import FindingScope
+            rows = []
+            for cs in chunk_summaries:
+                for pos, f in enumerate(cs.findings):
+                    scope = f.scope or FindingScope()
+                    rows.append({
+                        "pipeline_run_id":       db_id,
+                        "pmcid":                 pmcid,
+                        "chunk_id":              cs.chunk_id,
+                        "position_in_chunk":     pos,
+                        "category":              f.category,
+                        "claim":                 f.claim,
+                        "confidence":            f.confidence,
+                        "verbatim_support":      f.verbatim_support,
+                        "subject_entity":        f.subject_entity,
+                        "outcome_entity":        f.outcome_entity,
+                        "relation_type":         f.relation_type.value,
+                        "direction":             f.direction.value if f.direction else None,
+                        "grounding_score":       f.grounding_score,
+                        "evidence_refs":         list(f.evidence) if f.evidence else [],
+                        "scope_disease_subtype":   scope.disease_subtype,
+                        "scope_cohort_n":          scope.cohort_n,
+                        "scope_assay_method":      scope.assay_method,
+                        "scope_biomarker_cutoff":  scope.biomarker_cutoff,
+                        "scope_tissue_site":       scope.tissue_site,
+                        "scope_treatment_context": scope.treatment_context,
+                        "scope_endpoint":          scope.endpoint,
+                        "scope_study_design":      scope.study_design,
+                    })
+            if not rows:
+                return
+            with self._db.engine.begin() as conn:
+                conn.execute(
+                    SumMapFinding.__table__.delete().where(
+                        SumMapFinding.__table__.c.pipeline_run_id == db_id
+                    )
+                )
+                conn.execute(SumMapFinding.__table__.insert(), rows)
+            logger.info(
+                "[%s] DB: persisted %d map findings (run_id=%d)",
+                pmcid, len(rows), db_id,
+            )
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to persist map findings: %s", pmcid, exc, exc_info=True)
+
+    def _persist_normal_findings(self, db_id, pmcid, normal_findings) -> dict[str, int]:
+        if db_id is None:
+            return {}
+        self._clear_normalized_run_data(db_id, pmcid)
+        nf_id_map: dict[str, int] = {}
+        try:
+            from database.models import SumNormalFinding, SumNormalFindingSpan
+            from ..models import FindingScope
+            with self._db.session_scope() as session:
+                for nf in normal_findings:
+                    scope = nf.scope or FindingScope()
+                    row = SumNormalFinding(
+                        pipeline_run_id     = db_id,
+                        pmcid               = pmcid,
+                        normal_id           = nf.normal_id,
+                        subject_entity      = nf.subject_entity,
+                        outcome_entity      = nf.outcome_entity,
+                        relation_type       = nf.relation_type.value,
+                        direction           = nf.direction.value if nf.direction else None,
+                        category            = nf.category,
+                        predicate_text      = nf.predicate_text,
+                        mean_grounding_score= nf.mean_grounding_score,
+                        pmcids              = list(nf.pmcids) if nf.pmcids else [],
+                        scope_disease_subtype   = scope.disease_subtype,
+                        scope_cohort_n          = scope.cohort_n,
+                        scope_assay_method      = scope.assay_method,
+                        scope_biomarker_cutoff  = scope.biomarker_cutoff,
+                        scope_tissue_site       = scope.tissue_site,
+                        scope_treatment_context = scope.treatment_context,
+                        scope_endpoint          = scope.endpoint,
+                        scope_study_design      = scope.study_design,
+                    )
+                    session.add(row)
+                    session.flush()
+                    nf_id_map[nf.normal_id] = row.id
+                    for span in (nf.evidence or []):
+                        session.add(SumNormalFindingSpan(
+                            normal_finding_id = row.id,
+                            sentence_id       = span.sentence_id,
+                            pmcid             = span.pmcid,
+                            text_element_id   = span.text_element_id or None,
+                            verbatim          = span.verbatim,
+                        ))
+            logger.info(
+                "[%s] DB: persisted %d normal findings + spans (run_id=%d)",
+                pmcid, len(nf_id_map), db_id,
+            )
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to persist normal findings: %s", pmcid, exc)
+            return {}
+        return nf_id_map
+
+    def _persist_finding_groups(self, db_id, pmcid, finding_groups, nf_db_id_map) -> dict[str, int]:
+        if db_id is None:
+            return {}
+        group_id_map: dict[str, int] = {}
+        try:
+            from database.models import SumFindingGroup, SumGroupMember
+            with self._db.session_scope() as session:
+                for fg in finding_groups:
+                    row = SumFindingGroup(
+                        pipeline_run_id     = db_id,
+                        pmcid               = pmcid,
+                        group_id            = fg.group_id,
+                        subject_entity      = fg.subject_entity,
+                        outcome_entity      = fg.outcome_entity,
+                        relation_type       = fg.relation_type.value,
+                        category            = fg.category,
+                        scope_heterogeneity = fg.scope_heterogeneity,
+                        direction_counts    = dict(fg.direction_counts),
+                    )
+                    session.add(row)
+                    session.flush()
+                    group_id_map[fg.group_id] = row.id
+                    for normal_id in fg.member_ids:
+                        nf_db_id = nf_db_id_map.get(normal_id)
+                        session.add(SumGroupMember(
+                            finding_group_id  = row.id,
+                            normal_finding_id = nf_db_id,
+                            normal_id         = normal_id,
+                        ))
+            logger.info(
+                "[%s] DB: persisted %d finding groups (run_id=%d)",
+                pmcid, len(group_id_map), db_id,
+            )
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to persist finding groups: %s", pmcid, exc)
+            return {}
+        return group_id_map
+
+    def _persist_canonical_rules(self, db_id, pmcid, canonical_rules, fg_db_id_map) -> dict[str, int]:
+        if db_id is None:
+            return {}
+        cr_id_map: dict[str, int] = {}
+        try:
+            from database.models import SumCanonicalRule
+            rows = []
+            for cr in canonical_rules:
+                fg_db_id = fg_db_id_map.get(cr.group_id)
+                row = SumCanonicalRule(
+                    pipeline_run_id      = db_id,
+                    pmcid                = pmcid,
+                    canonical_id         = cr.canonical_id,
+                    finding_group_id     = fg_db_id,
+                    group_id             = cr.group_id,
+                    subject_entity       = cr.subject_entity,
+                    outcome_entity       = cr.outcome_entity,
+                    relation_type        = cr.relation_type.value,
+                    direction            = cr.direction.value if cr.direction else None,
+                    predicate_text       = cr.predicate_text,
+                    is_conflicted        = cr.is_conflicted,
+                    study_coverage       = cr.study_coverage,
+                    category             = cr.category,
+                    pmcids               = list(cr.supporting_pmcids) if cr.supporting_pmcids else [],
+                    member_normal_ids    = list(cr.member_normal_ids) if cr.member_normal_ids else [],
+                    mean_grounding_score = cr.mean_grounding_score,
+                    finding_count        = cr.finding_count,
+                    subject_cui          = cr.subject_cui,
+                    outcome_cui          = cr.outcome_cui,
+                )
+                rows.append(row)
+            with self._db.session_scope() as session:
+                for row in rows:
+                    session.add(row)
+                session.flush()
+                for row in rows:
+                    cr_id_map[row.canonical_id] = row.id
+            logger.info(
+                "[%s] DB: persisted %d canonical rules (run_id=%d)",
+                pmcid, len(cr_id_map), db_id,
+            )
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to persist canonical rules: %s", pmcid, exc)
+            return {}
+        return cr_id_map
+
+    def _persist_relations(self, db_id, pmcid, relations, cr_db_id_map) -> None:
+        if db_id is None:
+            return
+        try:
+            from database.models import SumRelation
+            rows = []
+            for rel in relations:
+                rows.append(SumRelation(
+                    pipeline_run_id     = db_id,
+                    pmcid               = pmcid,
+                    rule_id_a           = rel.rule_id_a,
+                    rule_id_b           = rel.rule_id_b,
+                    canonical_rule_a_id = cr_db_id_map.get(rel.rule_id_a),
+                    canonical_rule_b_id = cr_db_id_map.get(rel.rule_id_b),
+                    relation_type       = rel.relation_type.value,
+                    nli_score_a_to_b    = rel.nli_score_a_to_b,
+                    nli_score_b_to_a    = rel.nli_score_b_to_a,
+                ))
+            if rows:
+                with self._db.session_scope() as session:
+                    session.bulk_save_objects(rows)
+                logger.info(
+                    "[%s] DB: persisted %d relations (run_id=%d)",
+                    pmcid, len(rows), db_id,
+                )
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to persist relations: %s", pmcid, exc)
+
+    def _persist_final_rules(self, db_id, pmcid, final_rules, cr_db_id_map) -> None:
+        if db_id is None:
+            return
+        try:
+            from database.models import SumFinalRule
+            rows = []
+            for fr in final_rules:
+                rows.append(SumFinalRule(
+                    pipeline_run_id      = db_id,
+                    pmcid                = pmcid,
+                    final_id             = fr.final_id,
+                    canonical_rule_id    = cr_db_id_map.get(fr.canonical_id),
+                    canonical_id         = fr.canonical_id,
+                    subject_entity       = fr.subject_entity,
+                    outcome_entity       = fr.outcome_entity,
+                    relation_type        = fr.relation_type.value,
+                    direction            = fr.direction.value if fr.direction else None,
+                    predicate_text       = fr.predicate_text,
+                    category             = fr.category,
+                    final_score          = fr.final_score,
+                    support_count        = fr.support_count,
+                    contradict_count     = fr.contradict_count,
+                    scope_qualify_count  = fr.scope_qualify_count,
+                    is_contradicted      = fr.is_contradicted,
+                    contradicted_by      = list(fr.contradicted_by) if fr.contradicted_by else [],
+                ))
+            if rows:
+                with self._db.session_scope() as session:
+                    session.bulk_save_objects(rows)
+                logger.info(
+                    "[%s] DB: persisted %d final rules (run_id=%d)",
+                    pmcid, len(rows), db_id,
+                )
+        except Exception as exc:
+            logger.warning("[%s] DB: failed to persist final rules: %s", pmcid, exc)
+
+    def _persist_rejection_summary(self, db_id, rejection_summary) -> None:
+        if db_id is None:
+            return
+        try:
+            from database.models import SumRejectionSummary, SumRejectedFinding
+            with self._db.session_scope() as session:
+                summary_row = SumRejectionSummary(
+                    pipeline_run_id                = db_id,
+                    pmcid                          = rejection_summary.pmcid,
+                    grounding_threshold            = rejection_summary.grounding_threshold,
+                    map_findings_total             = rejection_summary.map_findings_total,
+                    map_grounding_rejected         = rejection_summary.map_grounding_rejected,
+                    normal_findings_total          = rejection_summary.normal_findings_total,
+                    non_groupable_total            = rejection_summary.non_groupable_total,
+                    non_groupable_no_subject       = rejection_summary.non_groupable_no_subject,
+                    non_groupable_no_outcome       = rejection_summary.non_groupable_no_outcome,
+                    non_groupable_unclear_relation = rejection_summary.non_groupable_unclear_relation,
+                    grounding_rejection_rate       = rejection_summary.grounding_rejection_rate,
+                    non_groupable_rate             = rejection_summary.non_groupable_rate,
+                    grounding_rejected_by_category = rejection_summary.grounding_rejected_by_category,
+                )
+                session.add(summary_row)
+                session.flush()
+                for item in rejection_summary.rejected:
+                    session.add(SumRejectedFinding(
+                        pipeline_run_id      = db_id,
+                        rejection_summary_id = summary_row.id,
+                        pmcid                = rejection_summary.pmcid,
+                        stage                = item.stage,
+                        reason               = item.reason,
+                        claim                = item.claim,
+                        category             = item.category,
+                        chunk_id             = item.chunk_id,
+                        grounding_score      = item.grounding_score,
+                        subject_entity       = item.subject_entity,
+                        outcome_entity       = item.outcome_entity,
+                        relation_type        = item.relation_type,
+                    ))
+            logger.info(
+                "[%s] DB: persisted rejection summary (%d grounding, %d non-groupable, run_id=%d)",
+                rejection_summary.pmcid,
+                rejection_summary.map_grounding_rejected,
+                rejection_summary.non_groupable_total,
+                db_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] DB: failed to persist rejection summary: %s",
+                rejection_summary.pmcid, exc, exc_info=True,
+            )
+
+    def _corpus_relate_incremental(self, pmcid: str, canonical_rules: list) -> None:
+        if self._db is None:
+            return
+        try:
+            from ..helpers.corpus_relate import CorpusRelateStage  # noqa: PLC0415
+            stage = CorpusRelateStage(
+                entailment_threshold=self._relate._entailment_threshold,
+                contradiction_threshold=self._relate._contradiction_threshold,
+            )
+            relations = stage.relate_incremental(pmcid, canonical_rules, self._db)
+            logger.info(
+                "[%s] CORPUS RELATE incremental: %d cross-paper relations",
+                pmcid, len(relations),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] CORPUS RELATE incremental failed (non-fatal): %s", pmcid, exc,
+                exc_info=True,
+            )
 
     # ── Internal helpers ────────────────────────────────────────────────────────
 
@@ -889,3 +1531,91 @@ class BatchSummarizationRunner:
             pmcid, len(handle.finalized), len(handle.chunk_map),
         )
         handle.phase = BatchPhase.COMPLETE
+
+
+# ── Rejection-summary helpers (sync parity) ─────────────────────────────────────
+# TODO: deduplicate with SummarizationRunner — these are line-for-line copies of
+# the module-level helpers at the bottom of ``pipeline/stages/summarization/runner.py``.
+# Lift to a shared helper module when consolidating sync/batch persistence.
+
+def _non_groupable_reason(nf: NormalFinding) -> str:
+    parts = []
+    if nf.subject_entity is None:
+        parts.append("subject_entity=None")
+    if nf.outcome_entity is None:
+        parts.append("outcome_entity=None")
+    if nf.relation_type is RelationTypeEnum.unclear:
+        parts.append("relation_type=unclear")
+    return ", ".join(parts) if parts else "unknown"
+
+
+def _build_rejection_summary(
+    pmcid: str,
+    grounding_threshold: float | None,
+    map_findings_total: int,
+    grounding_rejected: list[tuple[str, Finding]],
+    normal_findings: list[NormalFinding],
+    non_groupable_nfs: list[NormalFinding],
+) -> RejectionSummary:
+    from collections import Counter  # noqa: PLC0415
+
+    rejected_items: list[RejectedFinding] = []
+    for chunk_id, f in grounding_rejected:
+        score = f.grounding_score
+        reason = (
+            f"grounding_score={score:.3f} < threshold={grounding_threshold}"
+            if score is not None and grounding_threshold is not None
+            else "grounding_score below threshold"
+        )
+        rejected_items.append(RejectedFinding(
+            stage="grounding_map",
+            reason=reason,
+            claim=f.claim,
+            category=f.category,
+            chunk_id=chunk_id,
+            grounding_score=score,
+            subject_entity=f.subject_entity,
+            outcome_entity=f.outcome_entity,
+            relation_type=f.relation_type.value if f.relation_type else None,
+        ))
+    for nf in non_groupable_nfs:
+        rejected_items.append(RejectedFinding(
+            stage="group_non_groupable",
+            reason=_non_groupable_reason(nf),
+            claim=nf.predicate_text,
+            category=nf.category,
+            grounding_score=nf.mean_grounding_score,
+            subject_entity=nf.subject_entity,
+            outcome_entity=nf.outcome_entity,
+            relation_type=nf.relation_type.value if nf.relation_type else None,
+        ))
+
+    n_total = map_findings_total
+    n_grounding = len(grounding_rejected)
+    n_normal = len(normal_findings)
+    n_non_groupable = len(non_groupable_nfs)
+
+    cat_counts: Counter[str] = Counter(f.category for _, f in grounding_rejected)
+
+    return RejectionSummary(
+        pmcid=pmcid,
+        grounding_threshold=grounding_threshold,
+        map_findings_total=n_total,
+        map_grounding_rejected=n_grounding,
+        normal_findings_total=n_normal,
+        non_groupable_total=n_non_groupable,
+        non_groupable_no_subject=sum(
+            1 for nf in non_groupable_nfs if nf.subject_entity is None
+        ),
+        non_groupable_no_outcome=sum(
+            1 for nf in non_groupable_nfs if nf.outcome_entity is None
+        ),
+        non_groupable_unclear_relation=sum(
+            1 for nf in non_groupable_nfs
+            if nf.relation_type is RelationTypeEnum.unclear
+        ),
+        grounding_rejection_rate=round(n_grounding / n_total, 4) if n_total else 0.0,
+        non_groupable_rate=round(n_non_groupable / n_normal, 4) if n_normal else 0.0,
+        grounding_rejected_by_category=dict(cat_counts),
+        rejected=rejected_items,
+    )

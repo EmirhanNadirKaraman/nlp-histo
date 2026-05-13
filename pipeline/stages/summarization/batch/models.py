@@ -140,6 +140,16 @@ class BatchHandle:
     cascade_profile:   str = ""
     cascade_signature: str = ""
 
+    # DB row id created at submit() so finalize() (possibly in a later process)
+    # can FK persist + update status. None when db is unavailable or insert failed.
+    pipeline_run_db_id: int | None = None
+
+    # When True, submit() detected a valid on-disk result and short-circuited:
+    # phase is COMPLETE but no batch jobs ran. finalize() returns the cached
+    # JSON instead of re-running NORMALIZE/GROUP/... — protects against
+    # re-spending L1/L2/L3 batch dollars on stale-cache invalidation flips.
+    cached_result_only: bool = False
+
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {
@@ -164,6 +174,8 @@ class BatchHandle:
             "stage_name":        self.stage_name,
             "cascade_profile":   self.cascade_profile,
             "cascade_signature": self.cascade_signature,
+            "pipeline_run_db_id": self.pipeline_run_db_id,
+            "cached_result_only": self.cached_result_only,
         }
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -202,4 +214,6 @@ class BatchHandle:
             stage_name=data.get("stage_name", ""),
             cascade_profile=data.get("cascade_profile", ""),
             cascade_signature=data.get("cascade_signature", ""),
+            pipeline_run_db_id=data.get("pipeline_run_db_id"),
+            cached_result_only=data.get("cached_result_only", False),
         )

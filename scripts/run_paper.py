@@ -190,6 +190,9 @@ def build_batch_runner(
     artifact_root: Path | None = None,
     artifact_run_id: str | None = None,
     run_reduce: bool = False,
+    db=None,
+    force_rerun: bool = False,
+    run_ner: bool = False,
 ):
     from pipeline.stages.summarization.agreement.providers import GeminiEmbedder
     from pipeline.stages.summarization.batch import BatchSummarizationRunner
@@ -218,6 +221,9 @@ def build_batch_runner(
         artifact_root=artifact_root,
         artifact_run_id=artifact_run_id,
         run_reduce=run_reduce,
+        db=db,
+        force_rerun=force_rerun,
+        run_ner=run_ner,
     )
 
 
