@@ -63,7 +63,7 @@ def test_category_literal_values():
     cat_values = set(getattr(cat_field.annotation, "__args__", ()))
     expected = {
         "morphology", "IHC", "molecular_genetics", "staging",
-        "treatment", "prognosis", "demographics",
+        "treatment", "prognosis", "demographic",
     }
     assert cat_values == expected, f"category Literal mismatch: {cat_values} vs {expected}"
 
@@ -80,7 +80,7 @@ def test_prompt_lists_match_enums():
         assert v in src, f"relation_type value {v!r} missing from MAP prompt"
     # Category values must each appear
     for v in ("morphology", "IHC", "molecular_genetics", "staging",
-              "treatment", "prognosis", "demographics"):
+              "treatment", "prognosis", "demographic"):
         assert v in src, f"category value {v!r} missing from MAP prompt"
     # Prompt must NOT instruct null direction
     assert "direction: null" not in src, "MAP prompt still uses 'direction: null'"
@@ -159,7 +159,7 @@ def test_minimal_auditable_summary():
 def test_legacy_null_direction_coerces_to_no_direction():
     from pipeline.stages.summarization.models import Finding, DirectionEnum
     f = Finding.model_validate({
-        "category": "demographics",
+        "category": "demographic",
         "claim": "MGA presents in seventh decade",
         "evidence": ["S1|PMC1|1"],
         "confidence": "low",
@@ -192,10 +192,10 @@ def test_invalid_relation_type_coerces_to_unclear():
     assert f.relation_type == RelationTypeEnum.unclear
 
 
-def test_demographic_alias_repair():
+def test_demographics_alias_repair():
     from pipeline.stages.summarization.models import Finding
     f = Finding.model_validate({
-        "category": "demographic",  # alias → demographics
+        "category": "demographics",  # legacy alias → demographic
         "claim": "GA more common in women",
         "evidence": ["S1|PMC1|1"],
         "confidence": "low",
@@ -207,7 +207,7 @@ def test_demographic_alias_repair():
         "scope": None,
         "grounding_score": None,
     })
-    assert f.category == "demographics"
+    assert f.category == "demographic"
 
 
 def test_bad_finding_logged_when_dropped():
@@ -320,7 +320,7 @@ def test_unknown_profile_raises():
 def test_version_constants():
     from pipeline.stages.summarization import models
     assert models.MAP_SCHEMA_VERSION == "map_v1_explicit_direction"
-    assert models.MAP_PROMPT_VERSION == "map_prompt_v1_explicit_enums"
+    assert models.MAP_PROMPT_VERSION == "map_prompt_v2_singular_demographic"
     assert models.MAP_STAGE_NAME == "map"
 
 
@@ -450,7 +450,7 @@ ALL_TESTS = [
     ("Minimal AuditableSummary validates",        test_minimal_auditable_summary),
     ("Legacy null direction → no_direction",      test_legacy_null_direction_coerces_to_no_direction),
     ("Invalid relation_type → unclear",           test_invalid_relation_type_coerces_to_unclear),
-    ("category 'demographic' → 'demographics'",   test_demographic_alias_repair),
+    ("category 'demographics' → 'demographic'",   test_demographics_alias_repair),
     ("Bad finding is logged then dropped",        test_bad_finding_logged_when_dropped),
     ("Profiles cheap / real",                     test_profiles),
     ("Default fallback is cheap",                 test_default_profile_is_cheap_when_unset),

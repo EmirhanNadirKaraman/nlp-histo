@@ -108,7 +108,8 @@ class ResolveStage:
         for rule in rules:
             touching_rels = adj.get(rule.canonical_id, [])
 
-            # Separate by type
+            # Separate by type. SCOPE_QUALIFY was removed (B-006); the
+            # FinalRule.scope_qualify_count field is now hard-zero.
             supports = [
                 r for r in touching_rels
                 if r.relation_type == RelationTypeLabel.SUPPORT
@@ -116,10 +117,6 @@ class ResolveStage:
             contradicts = [
                 r for r in touching_rels
                 if r.relation_type == RelationTypeLabel.CONTRADICT
-            ]
-            scope_qualifies = [
-                r for r in touching_rels
-                if r.relation_type == RelationTypeLabel.SCOPE_QUALIFY
             ]
 
             cfg = self._cfg
@@ -180,7 +177,7 @@ class ResolveStage:
                 final_score=round(final_score, 4),
                 support_count=len(supports),
                 contradict_count=len(contradicts),
-                scope_qualify_count=len(scope_qualifies),
+                scope_qualify_count=0,
                 is_contradicted=len(contradicts) > 0,
                 contradicted_by=contradicted_by,
             )

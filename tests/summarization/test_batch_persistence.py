@@ -183,7 +183,7 @@ def test_batch_finalize_writes_full_artifact_layout(tmp_path: Path):
         "map", "normalize", "group", "canonicalize", "relate", "resolve",
     }
     assert payload["schema_version"] == "map_v1_explicit_direction"
-    assert payload["prompt_version"] == "map_prompt_v1_explicit_enums"
+    assert payload["prompt_version"] == "map_prompt_v2_singular_demographic"
     assert payload["cascade_signature"] == "testsig"
     # Cascade profile name set on the runner ends up in config snapshot
     assert payload["config"]["cascade_profile"] == "smoke_haiku"

@@ -26,13 +26,6 @@ Layout::
         resolve/{pmcid}/score_trace.jsonl
         logs/
 
-Lineage caveats (TODO):
-- MAP ``Finding`` has no stable ``finding_id``. v1 stores
-  ``(pmcid, chunk_id, position_in_chunk, evidence_refs)`` as the MAP coordinate.
-- NORMALIZE ``source_finding_ids`` field is reserved but currently unpopulated;
-  ``dedup_trace.jsonl`` records evidence-span coordinates instead.
-- Relate skipped/blocking trace is currently not exposed by RelateStage. v1
-  only records counts in the manifest summary block (TODO: full per-pair trace).
 """
 from __future__ import annotations
 
@@ -620,7 +613,6 @@ def persist_normalize_artifacts(
         writer.write_stage_jsonl(
             "normalize", "entity_links.jsonl", entity_links, pmcid=pmcid,
         )
-        # TODO: NormalFinding.source_finding_ids is reserved but unpopulated.
         dedup_rows = [
             {
                 "normal_id": nf.normal_id,

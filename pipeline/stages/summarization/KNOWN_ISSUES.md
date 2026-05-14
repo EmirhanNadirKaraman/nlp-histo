@@ -57,14 +57,9 @@ Requires resolving DES-7 first (score scale mismatch between single-paper and mu
 ## Medium-Impact Accuracy Risks
 
 ### ACC-10 — Cross-paper gate does not check outcome for non-expression rules
-**Severity:** Medium  
-**File:** `corpus_relate.py:93–131` (`_should_compare_cross_paper`)  
-**Symptom:** For non-expression rules: if either rule lacks a CUI, subject gating is skipped
-entirely. For outcome: no gating at all (only done for expression rules). As a result,
-"MGA has feature X" and "DLBCL has feature Y" with no CUIs and the same category + relation_type
-pass the gate. NLI then runs on unrelated predicate texts and may fire spurious SUPPORT or CONTRADICT.  
-**Fix:** For non-expression rules, also gate on outcome_entity when both rules have a CUI; and
-add a fallback `_norm_outcome()` string comparison for outcome when CUIs are absent.
+**Status:** FIXED — `_should_compare_cross_paper` in `helpers/corpus_relate.py` now gates on
+outcome for every relation type (CUI match preferred; `_norm_outcome` /
+`_norm_outcome_expression` fallback when CUIs are absent).
 
 ### ACC-11 — `infer_direction()` keyword heuristic incorrect for complex clinical negation
 **Severity:** Medium  
@@ -129,7 +124,7 @@ take the first non-None value across the cluster (or the majority value).
 | ACC-2 | High | MAP/GROUP | `relation_type` variance splits same fact into different groups |
 | ACC-6 | High | CANONICALIZE | `unclear` direction findings inflated into largest bin |
 | DES-1 | High | RESOLVE | Cross-paper relations ignored in FinalRule scoring |
-| ACC-10 | Medium | CORPUS RELATE | Cross-paper gate skips outcome gating for non-expression rules |
+| ACC-10 | FIXED | CORPUS RELATE | Cross-paper gate skips outcome gating for non-expression rules — outcome gate now applied for all relation types |
 | ACC-11 | Medium | NORMALIZE | `infer_direction()` wrong on complex clinical negation |
 | DES-7 | Low | RESOLVE | Two scoring modes produce non-comparable final score scales |
 | DES-8 | Low | RESOLVE | Scoring weights hand-tuned, not empirically validated |

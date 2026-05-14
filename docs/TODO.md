@@ -2,6 +2,36 @@
 
 Captured 2026-05-13 during Run A smoke session.
 
+## Cascade option — router-on L1→L3 skip (default since 2026-05-14)
+
+Both `SummarizationRunner` and `BatchSummarizationRunner` now default to
+`enable_router=True`. `MapOutputRouter` runs `SchemaValidator` +
+`ProvenanceValidator` before the agreement gate; voters that fail either are
+dropped before scoring. On L1 rejection the cascade jumps **L1 → L3
+directly**, skipping L2 (mid-tier voters are same risk class as L1, so a
+grounding/schema failure they couldn't fix at L1 isn't worth paying L2 for).
+
+Trade-off the new default accepts:
+
+- Pros: filters fabricated-citation / schema-broken voters out of the
+  agreement matrix; cheaper escalation on hard-failure chunks; per-voter
+  grounding pass fraction flows into `AgreementContext` so
+  `SemanticAgreementScorer` tie-breaks with real validator output instead
+  of the structural proxy.
+- Cons: skips the L2 consensus-resolution opportunity on chunks where L1
+  voters merely *disagree* (soft failure), so L3 cost goes up there.
+
+Open work — track in `docs/THESIS.md ## TODOs`:
+
+- [ ] **Cascade A/B:** rerun Run A with `enable_router=False` (legacy
+  L1→L2→L3) and compare escalation rate, per-paper cost, and final-rule
+  precision vs. the new default. Cascade decision JSONL at
+  `out/summaries/cascade_decisions/{pmcid}.jsonl` is the bucketing source.
+- [ ] **Legacy-path retirement:** if the A/B run shows the staircase doesn't
+  beat the router default on a precision-per-dollar basis, delete the
+  `enable_router=False` code paths in both runners to stop maintaining
+  two cascade shapes.
+
 ## Evaluation harness — NLI model comparison
 
 Goal: run the full pipeline across the candidates in `configs/nli_models.yaml`

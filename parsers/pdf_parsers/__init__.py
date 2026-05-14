@@ -1,19 +1,23 @@
 """
-PDF Parsers Package
+PDF Parsers Package (legacy / comparison parsers)
 
-This package contains specialized PDF parsers for extracting hierarchical text structure:
-- MarkerParser: Primary parser using Marker for PDF→Markdown conversion
-- NougatParser: Fallback parser using neural OCR for complex layouts
-- PDFFiguresParser: Specialized parser for figure/table extraction
-- EnsemblePDFParser: Orchestrator that coordinates all parsers
+Historical PDF parsers retained for research comparisons only. The
+production PDF pipeline lives in ``pipeline/stages/pdf_text_extraction/``
+and uses Docling directly via ``PipelineRunner`` — these parsers are not
+the database ingestion path.
 
-All parsers return standardized format matching the XML parser output:
-{
-    'path_list': [...],      # List of section hierarchy
-    'path_string': str,      # "Section > Subsection" format
-    'depth': int,            # Hierarchical depth
-    'text': str              # Paragraph text content
-}
+Parsers in this package:
+- MarkerParser, NougatParser, PDFFiguresParser, DoclingParser,
+  PyMuPDF4LLMParser, EnsemblePDFParser
+
+All parsers return the same hierarchical row format as the XML parser::
+
+    {
+        'path_list':   [...],   # section hierarchy as list
+        'path_string': str,     # "Section > Subsection"
+        'depth':       int,
+        'text':        str,
+    }
 """
 
 from .base_parser import BasePDFParser

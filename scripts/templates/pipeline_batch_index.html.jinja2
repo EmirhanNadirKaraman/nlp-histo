@@ -46,6 +46,7 @@
   .badge-orange { background: #7c2d12; color: #fdba74; }
   .badge-gray   { background: #1f2937; color: #9ca3af; }
   .badge-cyan   { background: #0c4a6e; color: #67e8f9; }
+  .badge-blue   { background: #1e3a8a; color: #93c5fd; }
 
   .warn-badges { display: flex; gap: 4px; flex-wrap: wrap; }
   .empty-row td { color: var(--text-dim); font-style: italic; text-align: center; padding: 24px; }
@@ -273,7 +274,7 @@ function sortCorpus(col) {
     else if (col === 'pmcid_a') { va = a.dataset.pmcidA || ''; vb = b.dataset.pmcidA || ''; }
     else if (col === 'pmcid_b') { va = a.dataset.pmcidB || ''; vb = b.dataset.pmcidB || ''; }
     else if (col === 'nli_ab')  { va = parseFloat(a.dataset.nliAb) || 0; vb = parseFloat(b.dataset.nliAb) || 0; return _corpusSortDir * (va - vb); }
-    else if (col === 'nli_ba')  { va = parseFloat(a.dataset.nilBa) || 0; vb = parseFloat(b.dataset.nilBa) || 0; return _corpusSortDir * (va - vb); }
+    else if (col === 'nli_ba')  { va = parseFloat(a.dataset.nliBa) || 0; vb = parseFloat(b.dataset.nliBa) || 0; return _corpusSortDir * (va - vb); }
     else { va = ''; vb = ''; }
     return _corpusSortDir * va.localeCompare(vb);
   });

@@ -30,7 +30,7 @@ result = stitcher.reconstruct_paragraphs(paragraphs)
 ```
 
 **Features:**
-- ✅ Detects cut-off sentences (ends with comma, connector words, lowercase, hyphen)
+- ✅ Detects cut-off sentences (ends with comma, hyphen, connector words like "and"/"the"/"of", or mid-sentence abbreviations like "Fig."/"et al.")
 - ✅ Preserves tables and figures
 - ✅ Handles hyphenated word breaks
 - ✅ Skips over interrupting content to find continuations
@@ -179,8 +179,8 @@ def process_extracted_text(text_elements):
 
 ## Files Using This Module
 
-- ✅ `scripts/parse_single_pdf.py` - Imports ContextAwareStitcher, is_reference_entry, remove_citations
-- ✅ (Add your script here when you use it!)
+- `parsers/layout_utils.py` — `extract_text` calls `ContextAwareStitcher`, `remove_citations`, and `is_reference_entry`.
+- `pipeline/stages/pdf_text_extraction/components/text_assembler.py` — delegates to `extract_text` and re-applies `is_reference_entry`.
 
 ---
 

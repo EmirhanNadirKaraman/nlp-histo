@@ -1,4 +1,4 @@
-"""Tests for 'demographics' category addition to main pipeline models and validator.
+"""Tests for 'demographic' category in main pipeline models and validator.
 
 No LLM or database required.
 """
@@ -30,17 +30,17 @@ PMCID = "PMC99999"
 
 # ── Schema acceptance ─────────────────────────────────────────────────────────
 
-def test_finding_demographics_valid():
-    """category='demographics' passes Pydantic validation on Finding."""
+def test_finding_demographic_valid():
+    """category='demographic' passes Pydantic validation on Finding."""
     f = Finding(
-        category="demographics",
+        category="demographic",
         claim="Slight male predominance (37 men/29 women)",
         evidence=["S1|PMC123|456"],
         confidence="high",
         verbatim_support="slight male predominance (37 men/29 women)",
         relation_type=RelationTypeEnum.demographic,
     )
-    assert f.category == "demographics"
+    assert f.category == "demographic"
 
 
 def test_finding_unknown_category_rejected():
@@ -55,15 +55,15 @@ def test_finding_unknown_category_rejected():
         )
 
 
-def test_normal_finding_demographics_valid():
-    """category='demographics' passes Pydantic validation on NormalFinding."""
+def test_normal_finding_demographic_valid():
+    """category='demographic' passes Pydantic validation on NormalFinding."""
     nf = NormalFinding(
         normal_id="NF_demo",
         subject_entity="CEAN patients",
         outcome_entity="sex distribution",
         relation_type=RelationTypeEnum.demographic,
         direction=None,
-        category="demographics",
+        category="demographic",
         predicate_text="Slight male predominance",
         scope=FindingScope(),
         source_finding_ids=[],
@@ -71,25 +71,25 @@ def test_normal_finding_demographics_valid():
         pmcids=[PMCID],
         mean_grounding_score=None,
     )
-    assert nf.category == "demographics"
+    assert nf.category == "demographic"
 
 
 # ── SchemaValidator ───────────────────────────────────────────────────────────
 
-def test_valid_categories_includes_demographics():
-    """Regression guard: _VALID_CATEGORIES must contain 'demographics'."""
-    assert "demographics" in _VALID_CATEGORIES
+def test_valid_categories_includes_demographic():
+    """Regression guard: _VALID_CATEGORIES must contain 'demographic'."""
+    assert "demographic" in _VALID_CATEGORIES
 
 
-def test_schema_validator_accepts_demographics():
-    """SchemaValidator passes a demographics finding without INVALID_CATEGORY."""
+def test_schema_validator_accepts_demographic():
+    """SchemaValidator passes a demographic finding without INVALID_CATEGORY."""
     from pipeline.stages.summarization.routing.models import ReasonCode
 
     summary = AuditableSummary(
         chunk_id="PMC123|0",
         findings=[
             Finding(
-                category="demographics",
+                category="demographic",
                 claim="Male predominance in CEAN cohort",
                 evidence=["S1|PMC123|0"],
                 confidence="high",
@@ -112,23 +112,23 @@ def test_schema_validator_accepts_demographics():
 
 # ── Grouping ──────────────────────────────────────────────────────────────────
 
-def test_two_demographics_findings_same_group_id():
-    """Same subject/outcome/relation_type/category='demographics' → same group_id."""
-    id1 = _group_id("patients", "sex", "demographic", "demographics", pmcid="PMC1")
-    id2 = _group_id("patients", "sex", "demographic", "demographics", pmcid="PMC1")
+def test_two_demographic_findings_same_group_id():
+    """Same subject/outcome/relation_type/category='demographic' → same group_id."""
+    id1 = _group_id("patients", "sex", "demographic", "demographic", pmcid="PMC1")
+    id2 = _group_id("patients", "sex", "demographic", "demographic", pmcid="PMC1")
     assert id1 == id2
 
 
-def test_demographics_vs_morphology_different_group_id():
+def test_demographic_vs_morphology_different_group_id():
     """Same subject/outcome/relation_type but different category → different group_id."""
-    id_demo = _group_id("patients", "sex", "demographic", "demographics", pmcid="PMC1")
+    id_demo = _group_id("patients", "sex", "demographic", "demographic", pmcid="PMC1")
     id_morph = _group_id("patients", "sex", "demographic", "morphology", pmcid="PMC1")
     assert id_demo != id_morph
 
 
-def test_demographics_prognosis_different_group_id():
-    """demographics and prognosis with the same entities produce distinct buckets."""
-    id_demo = _group_id("patients", "sex distribution", "demographic", "demographics", pmcid="PMC1")
+def test_demographic_prognosis_different_group_id():
+    """demographic and prognosis with the same entities produce distinct buckets."""
+    id_demo = _group_id("patients", "sex distribution", "demographic", "demographic", pmcid="PMC1")
     id_prog = _group_id("patients", "sex distribution", "demographic", "prognosis", pmcid="PMC1")
     assert id_demo != id_prog
 
@@ -136,17 +136,17 @@ def test_demographics_prognosis_different_group_id():
 # ── Alias repair (field_validator) ────────────────────────────────────────────
 
 def test_finding_alias_repaired_via_constructor(caplog):
-    """'demographic' alias is repaired to 'demographics' when constructing Finding directly."""
+    """Legacy 'demographics' alias is repaired to 'demographic' when constructing Finding directly."""
     with caplog.at_level(logging.WARNING, logger="pipeline.stages.summarization.models"):
         f = Finding(
-            category="demographic",
+            category="demographics",
             claim="Male predominance",
             evidence=["S1|PMC123|0"],
             confidence="high",
             verbatim_support="male predominance",
         )
-    assert f.category == "demographics"
-    assert "demographic" in caplog.text
+    assert f.category == "demographic"
+    assert "demographics" in caplog.text
 
 
 def test_finding_alias_repaired_via_model_validate(caplog):
@@ -155,7 +155,7 @@ def test_finding_alias_repaired_via_model_validate(caplog):
         "chunk_id": "PMC123|0",
         "findings": [
             {
-                "category": "demographic",
+                "category": "demographics",
                 "claim": "Male predominance",
                 "evidence": ["S1|PMC123|0"],
                 "confidence": "high",
@@ -172,25 +172,21 @@ def test_finding_alias_repaired_via_model_validate(caplog):
     })
     with caplog.at_level(logging.WARNING, logger="pipeline.stages.summarization.models"):
         summary = AuditableSummary.model_validate(json.loads(raw_json))
-    assert summary.findings[0].category == "demographics"
-    assert "demographic" in caplog.text
+    assert summary.findings[0].category == "demographic"
+    assert "demographics" in caplog.text
 
 
-def test_finding_category_demographics_with_relation_type_demographic():
-    """category='demographics' and relation_type=RelationTypeEnum.demographic can co-exist.
-
-    The trailing-s asymmetry is intentional: category uses the plural form, while
-    RelationTypeEnum.demographic uses the singular (and is not repaired).
-    """
+def test_finding_category_demographic_with_relation_type_demographic():
+    """category='demographic' and relation_type=RelationTypeEnum.demographic agree on spelling."""
     f = Finding(
-        category="demographics",
+        category="demographic",
         claim="Slight male predominance",
         evidence=["S1|PMC123|0"],
         confidence="high",
         verbatim_support="slight male predominance",
         relation_type=RelationTypeEnum.demographic,
     )
-    assert f.category == "demographics"
+    assert f.category == "demographic"
     assert f.relation_type == RelationTypeEnum.demographic
 
 

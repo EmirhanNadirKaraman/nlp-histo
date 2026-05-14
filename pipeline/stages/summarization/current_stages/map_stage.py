@@ -25,7 +25,15 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from ..agreement import AgreementChecker, EmbeddingScorer, MapOutputScorer
+from ..agreement import (
+    AgreementChecker,
+    CascadeDecisionLog,
+    EmbeddingScorer,
+    MapOutputScorer,
+    evaluate_chunk,
+    make_decision_record,
+    producer_from_outcome,
+)
 from ..cache import PipelineCache
 from ..llm_errors import is_non_retryable_llm_error
 from ..models import (
@@ -213,6 +221,8 @@ class MapStage:
         start_chunk: int = 0,
         limit_chunks: int | None = None,
         usage_collector=None,  # costing.UsageCollector | None
+        cascade_decision_log: CascadeDecisionLog | None = None,
+        run_id: str | None = None,
     ) -> list[AuditableSummary]:
         """
         Map all sentences for one paper, returning one AuditableSummary per chunk.
@@ -243,6 +253,12 @@ class MapStage:
         self._usage_collector = usage_collector
         self._usage_pmcid = pmcid
 
+        # Per-paper cascade decision log (one JSONL row per L1/L2/L3 decision).
+        # Lifetime matches usage_collector — reset in finally so a later caller
+        # does not accidentally write into the previous paper's file.
+        self._cascade_decision_log = cascade_decision_log
+        self._cascade_run_id = run_id or "unknown"
+
         # Per-paper voter cache: dedups identical (provider, model, temp, text)
         # voter calls *within one paper* so e.g. Haiku at L1 and Haiku at L2 on
         # the same chunk only hit the API once. Reset per-paper because a stale
@@ -263,6 +279,8 @@ class MapStage:
             self._usage_pmcid = None
             self._voter_cache = {}
             self._voter_cache_hits = 0
+            self._cascade_decision_log = None
+            self._cascade_run_id = "unknown"
 
     def _process_inner(
         self,
@@ -411,6 +429,11 @@ class MapStage:
         ``producer_spec`` is a ``(provider, model)`` tuple identifying which
         voter / model produced the kept result, so MAP cache entries and run
         artifacts can carry accurate provenance. ``None`` when no result.
+
+        The per-level KEEP/escalate decision is delegated to
+        ``agreement.decision.evaluate_chunk`` — the same function the batch
+        runner uses — so the sync and batch decision surfaces are identical
+        by construction.
         """
         inp = {
             "pmcid": pmcid,
@@ -427,179 +450,139 @@ class MapStage:
         _escalation_level = 1  # 1=L1 kept, 2=L2 kept, 3=L3 used
         _voter_contexts = None  # list[VoterContext] | None — from router
         _producer: tuple[str, str] | None = None
+        result: AuditableSummary | None = None
 
-        # ── Grounding-first router path ─────────────────────────────────────
-        if self._router is not None:
-            decision = self._router.route(
-                voters,
-                chunk=chunk,
-                pmcid=pmcid,
-                source_text=inp["text"],
-            )
+        # ── Level 1 decision (shared evaluate_chunk path) ───────────────────
+        l1_outcome = evaluate_chunk(
+            voters,
+            chunk=chunk,
+            pmcid=pmcid,
+            source_text=inp["text"],
+            agreement=self._agreement,
+            router=self._router,
+        )
+        _trace_bundle = l1_outcome.agreement_bundle
+        if l1_outcome.routing_decision is not None:
+            _voter_contexts = l1_outcome.routing_decision.voter_grounding_contexts
             logger.debug(
                 "Chunk %s: router → %s (gate=%s reasons=%s)",
                 chunk_id,
-                decision.decision.value,
-                decision.gate_origin.value,
-                [r.value for r in decision.reason_codes],
+                l1_outcome.routing_decision.decision.value,
+                l1_outcome.routing_decision.gate_origin.value,
+                [r.value for r in l1_outcome.routing_decision.reason_codes],
             )
-            _trace_bundle = decision.agreement_details
-            _voter_contexts = decision.voter_grounding_contexts
+        self._record_cascade_decision(
+            l1_outcome, pmcid=pmcid, chunk_id=chunk_id, level="l1",
+            voter_count=len(voters), voter_specs=self._voter_specs,
+        )
 
-            if decision.decision == ChunkDecision.KEEP:
-                valid = (
-                    [voters[i] for i in decision.valid_voter_indices]
-                    if decision.valid_voter_indices
-                    else voters
+        if l1_outcome.keep:
+            result = l1_outcome.best
+            _producer = producer_from_outcome(l1_outcome, self._voter_specs)
+        elif self._router is not None:
+            # Router path: L1 → L3 directly (no L2 step)
+            _escalated = True
+            _escalation_level = 3
+            decision = l1_outcome.routing_decision
+            if decision is not None and decision.decision == ChunkDecision.REJECT:
+                logger.info(
+                    "Chunk %s rejected by router — escalating to strong model.",
+                    chunk_id,
                 )
-                result = self._agreement.best(valid, bundle=decision.agreement_details)
-                best_eligible: AuditableSummary | None = result
-                best_eligible_idx: int | None = (
-                    decision.valid_voter_indices[decision.agreement_details.best_index]
-                    if decision.valid_voter_indices
-                    and decision.agreement_details
-                    and decision.agreement_details.best_index is not None
-                    and decision.agreement_details.best_index
-                    < len(decision.valid_voter_indices)
-                    else None
-                )
-                if best_eligible_idx is not None and best_eligible_idx < len(self._voter_specs):
-                    _producer = self._voter_specs[best_eligible_idx]
+            result = self._invoke_l3(inp, chunk_id)
+            _producer = self._l3_spec
+        else:
+            # Legacy path: L1 → L2 → L3 staircase (no router). Reuses
+            # evaluate_chunk for the L2 decision so the sync/batch surface
+            # stays identical at each level.
+            logger.debug("Chunk %s: L1 escalating to L2 (no router)", chunk_id)
+            l2_voters, l2_timings = self._run_voters(
+                inp, self._level2_voter_chains, level="L2",
+            )
+            l2_outcome = evaluate_chunk(
+                l2_voters,
+                chunk=chunk,
+                pmcid=pmcid,
+                source_text=inp["text"],
+                agreement=self._agreement,
+                router=None,
+            )
+            _trace_bundle = l2_outcome.agreement_bundle
+            voters = l2_voters
+            voter_timings = l2_timings
+            _escalation_level = 2
+            self._record_cascade_decision(
+                l2_outcome, pmcid=pmcid, chunk_id=chunk_id, level="l2",
+                voter_count=len(l2_voters), voter_specs=self._l2_specs,
+            )
+
+            if l2_outcome.keep:
+                result = l2_outcome.best
+                _producer = producer_from_outcome(l2_outcome, self._l2_specs)
             else:
-                # Router path escalates L1→L3 directly (no L2 step)
                 _escalated = True
                 _escalation_level = 3
-                if decision.decision == ChunkDecision.REJECT:
-                    logger.info(
-                        "Chunk %s rejected by router — escalating to strong model.",
-                        chunk_id,
-                    )
-                p_l3, m_l3 = self._l3_spec
-                l3_cache_key = self._voter_cache_key(p_l3, m_l3, self._l3_temp, inp)
-                cached_l3 = self._voter_cache_get(l3_cache_key)
-                if cached_l3 is not None:
-                    self._voter_cache_bump_hits()
-                    logger.debug(
-                        "Chunk %s: L3 router path — voter-cache HIT (%s/%s @T=%.2f)",
-                        chunk_id, p_l3, m_l3, self._l3_temp,
-                    )
-                    result = cached_l3
-                else:
-                    cfg_l3 = None
-                    if getattr(self, "_usage_collector", None) is not None:
-                        cfg_l3 = self._usage_collector.attach(
-                            stage="MAP", role="escalator", provider=p_l3, model=m_l3,
-                            cascade_level=3, substage="l3", item_id=chunk_id,
-                            was_escalation=True,
-                        )
-                    result = self._escalation_chain.invoke(inp, config=cfg_l3) if cfg_l3 else self._escalation_chain.invoke(inp)
-                    self._voter_cache_set(l3_cache_key, result)
+                logger.debug("Chunk %s: L2 escalating to L3", chunk_id)
+                result = self._invoke_l3(inp, chunk_id)
                 _producer = self._l3_spec
-                if decision.valid_voter_indices:
-                    valid = [voters[i] for i in decision.valid_voter_indices]
-                    best_eligible = self._agreement.best(
-                        valid, bundle=decision.agreement_details
-                    )
-                    best_eligible_idx = (
-                        decision.valid_voter_indices[
-                            decision.agreement_details.best_index
-                        ]
-                        if decision.agreement_details
-                        and decision.agreement_details.best_index is not None
-                        and decision.agreement_details.best_index
-                        < len(decision.valid_voter_indices)
-                        else decision.valid_voter_indices[0]
-                    )
-                else:
-                    best_eligible = None
-                    best_eligible_idx = None
 
-            if self._routing_collector is not None and result is not None:
-                self._routing_collector.append(
-                    RoutingRecord(
-                        pmcid=pmcid,
-                        chunk_id=chunk_id,
-                        chunk_text=inp["text"],
-                        n_voters=len(voters),
-                        n_eligible=len(decision.valid_voter_indices or []),
-                        gate_origin=decision.gate_origin.value,
-                        decision=decision.decision.value,
-                        reason_codes=[r.value for r in decision.reason_codes],
-                        escalated=(decision.decision != ChunkDecision.KEEP),
-                        used_agreement_gate=(
-                            decision.gate_origin.value == "agreement_gate"
-                        ),
-                        deferral_score=(
-                            decision.agreement_details.confidence
-                            if decision.agreement_details
-                            else None
-                        ),
-                        agreement_scorer=type(self._agreement._scorer).__name__,
-                        output=result.model_dump(),
-                        best_eligible_output=(
-                            best_eligible.model_dump()
-                            if best_eligible is not None
-                            else None
-                        ),
-                        best_eligible_exists=(best_eligible is not None),
-                        best_eligible_voter_index=best_eligible_idx,
-                    )
+        # RoutingDataset audit row — emit on every router-path chunk (both
+        # KEEP and escalate). Mirrors the original _cascade behaviour so
+        # downstream calibration tools see a complete record set.
+        if (self._router is not None
+                and self._routing_collector is not None
+                and result is not None
+                and l1_outcome.routing_decision is not None):
+            decision = l1_outcome.routing_decision
+            best_eligible: AuditableSummary | None = None
+            best_eligible_idx: int | None = None
+            if decision.valid_voter_indices:
+                valid = [voters[i] for i in decision.valid_voter_indices]
+                best_eligible = self._agreement.best(
+                    valid, bundle=decision.agreement_details
                 )
-
-        # ── Legacy path (no router): 3-level cascade ───────────────────────
-        else:
-            # Level 1: cheapest voters
-            bundle = self._agreement.compute(voters, source_text=inp["text"])
-            _trace_bundle = bundle
-
-            if bundle.decision == ChunkDecision.KEEP:
-                logger.debug("Chunk %s: L1 %s → voters accepted", chunk_id, bundle.decision)
-                result = self._agreement.best(voters, bundle=bundle)
-                if (bundle.best_index is not None
-                        and bundle.best_index < len(self._voter_specs)):
-                    _producer = self._voter_specs[bundle.best_index]
-            else:
-                # Level 2: mid-tier voters
-                logger.debug("Chunk %s: L1 %s → escalating to L2", chunk_id, bundle.decision)
-                l2_voters, l2_timings = self._run_voters(inp, self._level2_voter_chains, level="L2")
-                l2_bundle = self._agreement.compute(l2_voters, source_text=inp["text"])
-                _trace_bundle = l2_bundle
-                voters = l2_voters
-                voter_timings = l2_timings
-                _escalation_level = 2
-
-                if l2_bundle.decision == ChunkDecision.KEEP:
-                    logger.debug("Chunk %s: L2 %s → voters accepted", chunk_id, l2_bundle.decision)
-                    result = self._agreement.best(l2_voters, bundle=l2_bundle)
-                    if (l2_bundle.best_index is not None
-                            and l2_bundle.best_index < len(self._l2_specs)):
-                        _producer = self._l2_specs[l2_bundle.best_index]
+                bundle = decision.agreement_details
+                if (bundle is not None
+                        and bundle.best_index is not None
+                        and bundle.best_index < len(decision.valid_voter_indices)):
+                    best_eligible_idx = decision.valid_voter_indices[bundle.best_index]
                 else:
-                    # Level 3: final escalation model
-                    _escalated = True
-                    _escalation_level = 3
-                    logger.debug("Chunk %s: L2 %s → escalating to L3", chunk_id, l2_bundle.decision)
-                    p_l3, m_l3 = self._l3_spec
-                    l3_cache_key = self._voter_cache_key(p_l3, m_l3, self._l3_temp, inp)
-                    cached_l3 = self._voter_cache_get(l3_cache_key)
-                    if cached_l3 is not None:
-                        self._voter_cache_bump_hits()
-                        logger.debug(
-                            "Chunk %s: L3 — voter-cache HIT (%s/%s @T=%.2f)",
-                            chunk_id, p_l3, m_l3, self._l3_temp,
-                        )
-                        result = cached_l3
-                    else:
-                        cfg_l3 = None
-                        if getattr(self, "_usage_collector", None) is not None:
-                            cfg_l3 = self._usage_collector.attach(
-                                stage="MAP", role="escalator", provider=p_l3, model=m_l3,
-                                cascade_level=3, substage="l3", item_id=chunk_id,
-                                was_escalation=True,
-                            )
-                        result = self._escalation_chain.invoke(inp, config=cfg_l3) if cfg_l3 else self._escalation_chain.invoke(inp)
-                        self._voter_cache_set(l3_cache_key, result)
-                    _producer = self._l3_spec
+                    best_eligible_idx = decision.valid_voter_indices[0]
+            self._routing_collector.append(
+                RoutingRecord(
+                    pmcid=pmcid,
+                    chunk_id=chunk_id,
+                    chunk_text=inp["text"],
+                    n_voters=len(voters),
+                    n_eligible=len(decision.valid_voter_indices or []),
+                    gate_origin=decision.gate_origin.value,
+                    decision=decision.decision.value,
+                    reason_codes=[r.value for r in decision.reason_codes],
+                    escalated=(decision.decision != ChunkDecision.KEEP),
+                    used_agreement_gate=(
+                        decision.gate_origin.value == "agreement_gate"
+                    ),
+                    deferral_score=(
+                        decision.agreement_details.confidence
+                        if decision.agreement_details
+                        else None
+                    ),
+                    agreement_scorer=type(self._agreement._scorer).__name__,
+                    output=result.model_dump(),
+                    best_eligible_output=(
+                        best_eligible.model_dump()
+                        if best_eligible is not None
+                        else None
+                    ),
+                    best_eligible_exists=(best_eligible is not None),
+                    best_eligible_voter_index=best_eligible_idx,
+                )
+            )
+
+        # Always record a synthetic L3 "decision" row when L3 ran, so
+        # downstream aggregation can count per-level finalisations.
+        if _escalation_level == 3 and result is not None:
+            self._record_l3_decision(pmcid=pmcid, chunk_id=chunk_id)
 
         # ── Build chunk trace ───────────────────────────────────────────────
         if collector is not None:
@@ -638,6 +621,109 @@ class MapStage:
                 ec["dropped"] += 1
 
         return result, _producer
+
+    def _invoke_l3(self, inp: dict, chunk_id: str) -> AuditableSummary:
+        """Invoke the L3 escalation chain, honouring the in-run voter cache.
+
+        Used by both the router-escalation path and the legacy L2→L3 path so
+        the L3 invocation surface stays identical across both branches.
+        """
+        p_l3, m_l3 = self._l3_spec
+        l3_cache_key = self._voter_cache_key(p_l3, m_l3, self._l3_temp, inp)
+        cached_l3 = self._voter_cache_get(l3_cache_key)
+        if cached_l3 is not None:
+            self._voter_cache_bump_hits()
+            logger.debug(
+                "Chunk %s: L3 — voter-cache HIT (%s/%s @T=%.2f)",
+                chunk_id, p_l3, m_l3, self._l3_temp,
+            )
+            return cached_l3
+
+        cfg_l3 = None
+        if getattr(self, "_usage_collector", None) is not None:
+            cfg_l3 = self._usage_collector.attach(
+                stage="MAP", role="escalator", provider=p_l3, model=m_l3,
+                cascade_level=3, substage="l3", item_id=chunk_id,
+                was_escalation=True,
+            )
+        result = (
+            self._escalation_chain.invoke(inp, config=cfg_l3)
+            if cfg_l3 else self._escalation_chain.invoke(inp)
+        )
+        self._voter_cache_set(l3_cache_key, result)
+        return result
+
+    def _record_cascade_decision(
+        self,
+        outcome,                                 # ChunkOutcome
+        *,
+        pmcid: str,
+        chunk_id: str,
+        level: str,
+        voter_count: int,
+        voter_specs: list[tuple[str, str]] | None,
+    ) -> None:
+        """Append one cascade-decision row to the per-paper JSONL log.
+
+        No-op when no log is configured (the runner did not pass one in via
+        ``process()``).  Failures during logging are swallowed so a flaky
+        filesystem cannot kill an otherwise-successful MAP run.
+        """
+        log = getattr(self, "_cascade_decision_log", None)
+        if log is None:
+            return
+        try:
+            record = make_decision_record(
+                outcome,
+                run_id=getattr(self, "_cascade_run_id", "unknown"),
+                pmcid=pmcid,
+                chunk_id=chunk_id,
+                level=level,
+                voter_count=voter_count,
+                cascade_signature=self._cascade_signature,
+                cascade_profile=self._cascade_profile,
+                voter_specs=voter_specs,
+            )
+            log.record(record)
+        except Exception as exc:  # noqa: BLE001 — log-and-continue is intentional
+            logger.warning(
+                "Failed to record cascade decision for chunk %s level %s: %s",
+                chunk_id, level, exc,
+            )
+
+    def _record_l3_decision(self, *, pmcid: str, chunk_id: str) -> None:
+        """Append a synthetic L3 row so aggregation can count L3 finalisations.
+
+        L3 is not a decision — it's the terminal escalation — but recording
+        a row keeps per-level counts (l1 / l2 / l3) consistent.
+        """
+        log = getattr(self, "_cascade_decision_log", None)
+        if log is None:
+            return
+        try:
+            from ..agreement import CascadeDecisionRecord
+            log.record(CascadeDecisionRecord(
+                run_id=getattr(self, "_cascade_run_id", "unknown"),
+                pmcid=pmcid,
+                chunk_id=chunk_id,
+                level="l3",
+                voter_count=1,
+                eligible_voter_count=None,
+                decision="keep",
+                gate_origin=None,
+                reason_codes=[],
+                deferral_score=None,
+                best_voter_index=None,
+                selected_provider=self._l3_spec[0],
+                selected_model=self._l3_spec[1],
+                cascade_signature=self._cascade_signature,
+                cascade_profile=self._cascade_profile,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to record L3 cascade decision for chunk %s: %s",
+                chunk_id, exc,
+            )
 
     def _record_chunk_trace(
         self,

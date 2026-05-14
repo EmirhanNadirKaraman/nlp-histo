@@ -9,8 +9,8 @@ ungroupable findings.
 Groups by (subject_entity, outcome_entity, relation_type, category).
 Direction is NOT part of the grouping key — a group may contain findings
 with different directions.
-Opposing directions on the same entity pair surface as CONTRADICT/SCOPE_QUALIFY
-relations in Phase 5 RELATE, not as separate groups.
+Opposing directions on the same entity pair surface as CONTRADICT relations
+in Phase 5 RELATE, not as separate groups.
 
 All logic is deterministic.  No LLM, no embeddings.
 """

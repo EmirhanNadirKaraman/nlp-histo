@@ -186,7 +186,6 @@ class CanonicalizeStage:
                     reverse=True,
                 )
 
-                # LLM selection
                 predicate_text = self._select_predicate(
                     candidates, group, direction, pmcid
                 )

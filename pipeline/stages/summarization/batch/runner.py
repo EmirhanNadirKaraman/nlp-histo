@@ -32,7 +32,16 @@ from pathlib import Path
 
 from datetime import datetime, timezone
 
-from ..agreement import AgreementChecker, EmbeddingScorer
+from ..agreement import (
+    AgreementChecker,
+    CascadeDecisionLog,
+    EmbeddingSimilarityStrategy,
+    SemanticAgreementScorer,
+    evaluate_chunk,
+    make_decision_record,
+    producer_from_outcome,
+)
+from ..routing import MapOutputRouter
 from ..config import SummarizationConfig
 from ..current_stages.canonicalize_stage import CanonicalizeStage
 from ..current_stages.group_stage import GroupStage, is_groupable
@@ -118,6 +127,8 @@ class BatchSummarizationRunner:
         db=None,
         force_rerun: bool = False,
         run_ner: bool = False,
+        enable_router: bool = False,
+        router_single_voter_policy: str = "escalate",
     ) -> None:
         from ..agreement.providers import OpenAIEmbedder
         cfg = config or SummarizationConfig()
@@ -126,11 +137,24 @@ class BatchSummarizationRunner:
         self._l3 = l3_model
         self._chunk_size = cfg.map.chunk_size
         self._embed_fn = embed_fn or OpenAIEmbedder()
+        # Default scorer mirrors SummarizationRunner: SemanticAgreementScorer
+        # (max-consensus + centrality-based best-output selection) over the
+        # batched EmbeddingSimilarityStrategy. theta / reject_theta stay on
+        # AgreementChecker so the scorer keeps theta=None and defers the
+        # decision boundary to the checker.
         self._agreement = AgreementChecker(
-            scorer=EmbeddingScorer(self._embed_fn),
+            scorer=SemanticAgreementScorer(
+                strategy=EmbeddingSimilarityStrategy(embed_fn=self._embed_fn),
+            ),
             theta=cfg.map.theta,
             reject_theta=cfg.map.reject_theta,
         )
+        # Grounding-first router config. When enabled, _process_level runs
+        # schema + provenance validation before the agreement gate, drops
+        # unusable voters, and (at L1) escalates straight to L3 — mirroring
+        # the sync MapStage router path.
+        self._enable_router = enable_router
+        self._router_single_voter_policy = router_single_voter_policy
         # ReduceStage/RuleStage call `llm.with_structured_output(...)` in their
         # ctors, so we only construct them when the legacy REDUCE/RULES block
         # is enabled. Otherwise the runner can be built with any (or no) LLM —
@@ -161,6 +185,8 @@ class BatchSummarizationRunner:
         self._summaries_dir.mkdir(parents=True, exist_ok=True)
         self._handle_dir = handle_dir or (output_dir / "batch_handles")
         self._handle_dir.mkdir(parents=True, exist_ok=True)
+        # Per-paper cascade decision log directory — mirrors SummarizationRunner.
+        self._cascade_log_dir: Path = output_dir / "cascade_decisions"
 
         # Run-artifact provenance — kept on the runner so submit() and
         # finalize() emit consistent metadata regardless of who calls them.
@@ -357,10 +383,19 @@ class BatchSummarizationRunner:
                     ))
 
         if handle.phase == BatchPhase.L1_SUBMITTED:
-            self._process_level(handle, raw_results, level="l1", strip_flags=handle.l1_strip,
-                                next_voters=self._l2, next_level="l2",
-                                next_strip=handle.l2_strip, next_phase=BatchPhase.L2_SUBMITTED,
-                                escalated_attr="l2_chunk_ids")
+            # Router path mirrors sync MapStage: L1 escalates straight to L3
+            # (schema/grounding failures aren't fixed by a similar-tier voter
+            # set). Legacy path keeps the L1 → L2 → L3 staircase.
+            if self._enable_router:
+                self._process_level(handle, raw_results, level="l1", strip_flags=handle.l1_strip,
+                                    next_voters=[self._l3], next_level="l3",
+                                    next_strip=[handle.l3_strip], next_phase=BatchPhase.L3_SUBMITTED,
+                                    escalated_attr="l3_chunk_ids")
+            else:
+                self._process_level(handle, raw_results, level="l1", strip_flags=handle.l1_strip,
+                                    next_voters=self._l2, next_level="l2",
+                                    next_strip=handle.l2_strip, next_phase=BatchPhase.L2_SUBMITTED,
+                                    escalated_attr="l2_chunk_ids")
         elif handle.phase == BatchPhase.L2_SUBMITTED:
             self._process_level(handle, raw_results, level="l2", strip_flags=handle.l2_strip,
                                 next_voters=[self._l3], next_level="l3",
@@ -775,6 +810,10 @@ class BatchSummarizationRunner:
             "map_theta":              cfg.map.theta,
             "map_reject_theta":       cfg.map.reject_theta,
             "contradiction_similarity_threshold": cfg.contradiction_similarity_threshold,
+            "enable_router":          self._enable_router,
+            "router_single_voter_policy": (
+                self._router_single_voter_policy if self._enable_router else None
+            ),
         }
         models = {
             "voter_models":        [v.model for v in self._l1],
@@ -972,6 +1011,9 @@ class BatchSummarizationRunner:
                         "outcome_entity":        f.outcome_entity,
                         "relation_type":         f.relation_type.value,
                         "direction":             f.direction.value if f.direction else None,
+                        "raw_relation_type":     f.raw_relation_type,
+                        "raw_direction":         f.raw_direction,
+                        "raw_category":          f.raw_category,
                         "grounding_score":       f.grounding_score,
                         "evidence_refs":         list(f.evidence) if f.evidence else [],
                         "scope_disease_subtype":   scope.disease_subtype,
@@ -1371,11 +1413,39 @@ class BatchSummarizationRunner:
                     result[idx] = e
             return result  # type: ignore[return-value]
 
+        # Mirror the runner-level scorer so the per-level decision uses the
+        # same Soiffer-style max-consensus + centrality path. The cached embed
+        # function is plugged into EmbeddingSimilarityStrategy so the
+        # pre-embedded claim cache is reused for every pair.
         agreement = AgreementChecker(
-            scorer=EmbeddingScorer(_cached_embed),
+            scorer=SemanticAgreementScorer(
+                strategy=EmbeddingSimilarityStrategy(embed_fn=_cached_embed),
+            ),
             theta=self._agreement.theta,
             reject_theta=self._agreement.reject_theta,
         )
+        # Grounding-first router: built fresh per call so it shares the same
+        # cached AgreementChecker as the agreement gate. Disabled when
+        # self._enable_router is False to keep parity with sync's legacy path.
+        router: MapOutputRouter | None = (
+            MapOutputRouter(
+                agreement_checker=agreement,
+                single_voter_policy=self._router_single_voter_policy,  # type: ignore[arg-type]
+            )
+            if self._enable_router else None
+        )
+
+        # Per-paper cascade decision log: one JSONL row per chunk decision at
+        # this level. Surfaces cascade behaviour for offline analysis.
+        cascade_log = CascadeDecisionLog(
+            self._cascade_log_dir / f"{pmcid}.jsonl"
+        )
+        run_id = handle.cascade_signature or "unknown"
+        # Voter specs for the current level — used by the decision log to map
+        # best_index → (provider, model) of the selected voter.
+        level_voter_specs: list[tuple[str, str]] = [
+            (cfg.provider, cfg.model) for cfg in current_voters
+        ]
 
         # ── Pass 3: agreement scoring from cache — no API calls ───────────────
         escalated: list[str] = []
@@ -1389,12 +1459,48 @@ class BatchSummarizationRunner:
                 continue
 
             source_text = _format_sentences(handle.chunk_map[chunk_id])
-            bundle = agreement.compute(voters, source_text=source_text)
 
-            if bundle.decision == ChunkDecision.KEEP:
-                best = agreement.best(voters, bundle=bundle)
-                handle.finalized[chunk_id] = best.model_dump()
+            # Shared evaluate_chunk path — same function the sync runner uses,
+            # so KEEP/escalate semantics are identical across sync and batch.
+            outcome = evaluate_chunk(
+                voters,
+                chunk=handle.chunk_map[chunk_id],
+                pmcid=pmcid,
+                source_text=source_text,
+                agreement=agreement,
+                router=router,
+            )
+
+            try:
+                cascade_log.record(make_decision_record(
+                    outcome,
+                    run_id=run_id,
+                    pmcid=pmcid,
+                    chunk_id=chunk_id,
+                    level=level,
+                    voter_count=len(voters),
+                    cascade_signature=handle.cascade_signature,
+                    cascade_profile=handle.cascade_profile,
+                    voter_specs=level_voter_specs,
+                ))
+            except Exception as exc:  # noqa: BLE001 — log-and-continue
+                logger.warning(
+                    "Failed to record cascade decision for chunk %s level %s: %s",
+                    chunk_id, level, exc,
+                )
+
+            if outcome.keep:
+                assert outcome.best is not None  # invariant of ChunkOutcome
+                handle.finalized[chunk_id] = outcome.best.model_dump()
             else:
+                if outcome.routing_decision is not None:
+                    logger.debug(
+                        "[%s] Chunk %s router → %s (gate=%s reasons=%s)",
+                        pmcid, chunk_id,
+                        outcome.routing_decision.decision.value,
+                        outcome.routing_decision.gate_origin.value,
+                        [r.value for r in outcome.routing_decision.reason_codes],
+                    )
                 escalated.append(chunk_id)
 
         kept = len(targets) - len(escalated)

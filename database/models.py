@@ -375,6 +375,9 @@ class SumMapFinding(Base):
     outcome_entity          = Column(Text,        nullable=True)    # pre-normalization
     relation_type           = Column(String(50),  nullable=False)
     direction               = Column(String(20),  nullable=True)
+    raw_relation_type       = Column(Text,        nullable=True)   # pre-coercion LLM string
+    raw_direction           = Column(Text,        nullable=True)   # pre-coercion LLM string
+    raw_category            = Column(Text,        nullable=True)   # pre-alias-repair LLM string
     grounding_score         = Column(Float,       nullable=True)
     evidence_refs           = Column(ARRAY(Text), nullable=True)
     scope_disease_subtype   = Column(Text,    nullable=True)
@@ -614,6 +617,9 @@ class SumFinalRule(Base):
     final_score          = Column(Float,       nullable=False)
     support_count        = Column(Integer,     nullable=False)
     contradict_count     = Column(Integer,     nullable=False)
+    # Always 0 — SCOPE_QUALIFY classifier branch was never implemented (B-006);
+    # column retained so existing reads (HTML inspector, downstream consumers)
+    # don't break. Drop via Alembic if the branch is not reinstated.
     scope_qualify_count  = Column(Integer,     nullable=False)
     is_contradicted      = Column(Boolean,     nullable=False)
     contradicted_by      = Column(ARRAY(Text), nullable=True)
@@ -719,7 +725,7 @@ class SumCorpusRelation(Base):
     a YYYYMMDDTHHmmss timestamp string that identifies which run wrote the row.
 
     comparison_scope: "cross_paper" | "intra_paper"
-    relation_type:    "SUPPORT" | "CONTRADICT" | "SCOPE_QUALIFY"
+    relation_type:    "SUPPORT" | "CONTRADICT"  (SCOPE_QUALIFY removed — B-006)
     """
     __tablename__ = "sum_corpus_relations"
 

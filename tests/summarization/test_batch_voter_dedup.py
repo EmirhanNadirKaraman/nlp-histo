@@ -256,6 +256,13 @@ def test_advance_merges_synthetic_l2_into_finalized(tmp_path):
         artifact_root=None,
         run_modern_pipeline=False,
         run_reduce=False,
+        # This test exercises the synthetic-results merge path. The router's
+        # ProvenanceValidator would reject the test's synthetic verbatim
+        # ("CD30 was associated with OS.") because it isn't a substring of
+        # the chunk's lone sentence ("CD30 OS."), forcing escalation to L3
+        # and an API call. Disable the router here — router behaviour is
+        # covered by tests/summarization/routing/.
+        enable_router=False,
     )
 
     # Build a valid AuditableSummary JSON for the synthetic L2 content.

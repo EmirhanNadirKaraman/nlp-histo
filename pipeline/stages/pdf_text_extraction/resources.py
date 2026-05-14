@@ -1,8 +1,17 @@
 """
 ModelRegistry
 
-Centralises lazy loading of heavyweight ML models (Docling converter, TATR,
-scispaCy) so they are instantiated at most once per process.
+Optional thread-safe registry for the heavyweight ML models used by the
+extraction pipeline.  PipelineRunner does NOT route through this class —
+each component (DoclingLayoutExtractor, TATRTableDetector, ArtifactFilter)
+loads its own model lazily and the TATR detector keeps its own
+process-wide singleton.  The registry is kept for external callers that
+want a single shared instance from notebooks or one-off scripts.
+
+Note: ``docling_converter`` here hard-codes ``images_scale=2.0`` and
+ignores ``DoclingConfig.images_scale`` / ``accelerator_device`` /
+``ocr_engine`` — prefer ``DoclingLayoutExtractor`` for full config
+fidelity.
 
 Usage::
 

@@ -23,11 +23,10 @@ CRITICAL EXTRACTION RULES:
 </Task>
 
 <Categories>
-Assign each finding to exactly one: morphology | IHC | molecular_genetics | staging | treatment | prognosis | demographics
+Assign each finding to exactly one: morphology | IHC | molecular_genetics | staging | treatment | prognosis | demographic
 
-  Use demographics for: sex distribution, age distribution, sex predominance, cohort composition,
+  Use demographic for: sex distribution, age distribution, sex predominance, cohort composition,
   epidemiology, and any population-level clinical demographic observation.
-  IMPORTANT: use category="demographics" (with the trailing 's'). Do NOT write category="demographic".
 </Categories>
 
 <FilterRules>
@@ -69,10 +68,6 @@ relation_type
   The type of relation. Must be EXACTLY one of:
     has_feature | expression | prognostic | comparative | demographic | treatment_response | unclear
   NEVER output null. Use "unclear" only when the relation genuinely does not fit any category.
-
-  IMPORTANT: relation_type uses "demographic" (NO trailing 's').
-             category    uses "demographics" (WITH trailing 's').
-             These are different fields and the spelling differs — do not confuse them.
 
   has_feature        : Entity exhibits, shows, or has a histological or morphological feature.
                        e.g. "idiopathic GA exhibits mucin", "MGA shows no particular pattern",
@@ -172,7 +167,7 @@ Return your analysis in this EXACT structure:
   "chunk_id": "{chunk_id}",
   "findings": [
     {{
-      "category": "morphology|IHC|molecular_genetics|staging|treatment|prognosis|demographics",
+      "category": "morphology|IHC|molecular_genetics|staging|treatment|prognosis|demographic",
       "claim": "<telegraphic_atomic_fact>",
       "evidence": ["S1|PMC123456|789"],
       "confidence": "high|medium|low",
@@ -295,7 +290,7 @@ AUDIT REQUIREMENTS:
       "type": "Diagnostic|Prognostic|Management",
       "condition": "IF <observation>",
       "action": "THEN <conclusion>",
-      "confidence": "High|Medium|Low",
+      "confidence": "high|medium|low",
       "evidence_chain": [
         {{
           "sentence_id": "S1",

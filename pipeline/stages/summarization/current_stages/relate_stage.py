@@ -2,9 +2,12 @@
 RELATE stage: CanonicalRule[] → Relation[]
 
 NLI-based pairwise comparison between canonical rules.  Each pair is classified
-as one of: SUPPORT, CONTRADICT, SCOPE_QUALIFY, UNRELATED.
+as one of: SUPPORT, CONTRADICT, UNRELATED.
 
-Only non-UNRELATED pairs are returned.
+Only non-UNRELATED pairs are returned.  (Note: ``RelationTypeLabel.SCOPE_QUALIFY``
+existed as a placeholder for an asymmetric-entailment branch that was never
+implemented; the plumbing was removed in B-006.  Reinstate the branch + log
+columns + RESOLVE filter if the signal is wanted in the future.)
 
 Comparability gate (ALL four must hold for NLI to run):
   1. exact category match
@@ -16,7 +19,7 @@ Comparability gate (ALL four must hold for NLI to run):
   describing different histological features (e.g. "giant cells" vs "open vascular
   channels") are coexisting attributes — not contradiction candidates.  Comparing
   them produces spurious CONTRADICT labels from NLI.  Only rules about the SAME
-  outcome can meaningfully SUPPORT, CONTRADICT, or SCOPE_QUALIFY each other.
+  outcome can meaningfully SUPPORT or CONTRADICT each other.
 
   Special rule: for has_feature relation_type, CONTRADICT is only emitted when
   outcome_entity also matches.  Since condition 4 already enforces outcome match
@@ -255,7 +258,7 @@ class RelateStage:
         HuggingFace NLI model name.  Defaults to the same model used by
         GroundingFilter.  The pipeline is cached at module level.
     entailment_threshold:
-        Minimum entailment score to classify as SUPPORT or SCOPE_QUALIFY.
+        Minimum entailment score to classify as SUPPORT.
     contradiction_threshold:
         Minimum contradiction score (both directions required) to classify
         as CONTRADICT.
@@ -299,7 +302,7 @@ class RelateStage:
         Returns
         -------
         (relations, raw_pairs, skipped_pairs)
-            relations     — non-UNRELATED Relation objects (SUPPORT | CONTRADICT | SCOPE_QUALIFY).
+            relations     — non-UNRELATED Relation objects (SUPPORT | CONTRADICT).
             raw_pairs     — RawNLIPair for every eligible pair including UNRELATED, with all
                             four NLI scores, so thresholds can be swept offline.
             skipped_pairs — one SkippedPair per pre-NLI gate rejection, for offline debug
@@ -392,8 +395,8 @@ class RelateStage:
                 continue  # UNRELATED — not added to relations
 
             # Store the score that is semantically meaningful for this label:
-            #   SUPPORT / SCOPE_QUALIFY → entailment score (the signal that fired)
-            #   CONTRADICT             → contradiction score
+            #   SUPPORT     → entailment score (the signal that fired)
+            #   CONTRADICT  → contradiction score
             if label == RelationTypeLabel.CONTRADICT:
                 score_ab = s_ab.get("contradiction", 0.0)
                 score_ba = s_ba.get("contradiction", 0.0)
@@ -411,12 +414,11 @@ class RelateStage:
 
         logger.info(
             "[%s] RELATE: %d pairs checked → %d non-UNRELATED relations "
-            "(SUPPORT=%d, CONTRADICT=%d, SCOPE_QUALIFY=%d)",
+            "(SUPPORT=%d, CONTRADICT=%d)",
             pmcid,
             len(eligible),
             len(relations),
             sum(1 for r in relations if r.relation_type == RelationTypeLabel.SUPPORT),
             sum(1 for r in relations if r.relation_type == RelationTypeLabel.CONTRADICT),
-            sum(1 for r in relations if r.relation_type == RelationTypeLabel.SCOPE_QUALIFY),
         )
         return relations, raw_pairs, skipped_pairs

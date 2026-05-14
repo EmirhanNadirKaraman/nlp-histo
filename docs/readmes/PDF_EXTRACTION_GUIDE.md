@@ -1,8 +1,21 @@
 # PDF Extraction Integration Guide
 
+> **Status: legacy — superseded.** The production PDF pipeline is now
+> `pipeline/stages/pdf_text_extraction/` (Docling + `PipelineRunner` +
+> two-pass ghost-text scoring). The Marker / Nougat / PDFFigures / Ensemble
+> parsers described below survive under `parsers/pdf_parsers/` as
+> *comparison* parsers only; they are no longer the database ingestion path.
+> The scripts referenced in this document (`database/pdf_to_db.py`,
+> `tests/compare_xml_vs_pdf.py`, `parsers/pdf_parser.py`) **no longer
+> exist** — do not follow their commands. See `docs/HOW_TO_RUN.md` for the
+> current entry points and `docs/STRUCTURE.md` for the current layout.
+
 ## Overview
 
-This system integrates **Marker**, **Nougat**, and **PDFFigures 2.0** as PRIMARY text extraction methods for all PDFs in the histopathology corpus. The implementation maintains full compatibility with the existing database schema while extracting hierarchical structure from PDFs.
+This document originally described an integration of **Marker**, **Nougat**,
+and **PDFFigures 2.0** as primary text extraction methods. That design has
+been superseded by the Docling-based `pipeline/stages/pdf_text_extraction/`
+package. The text below is preserved for historical reference only.
 
 ## What's Been Implemented
 

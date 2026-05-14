@@ -1,5 +1,13 @@
 # Medical-Grade PDF Parsing Architecture
 
+> **Status: legacy — superseded.** The production PDF pipeline is
+> `pipeline/stages/pdf_text_extraction/` (Docling-only, with the
+> `TwoPassConfig` ghost-text path enabled by default). The
+> `EnsemblePDFParser` described below lives under
+> `parsers/pdf_parsers/ensemble_parser.py` as a research / comparison parser
+> and is not used for database ingestion. Keep this file for reference but
+> do not treat it as the current architecture.
+
 ## Overview
 
 The ensemble parser has been refactored with **intelligent page-level routing** optimized for histopathology papers on M1 hardware.

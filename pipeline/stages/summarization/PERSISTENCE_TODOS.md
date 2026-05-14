@@ -18,54 +18,32 @@ Status legend: **DECIDE** = needs a yes/no, **DO** = decision is to implement,
 
 ---
 
-## 1. MAP `Finding.finding_id` — DECIDE
+## 1. MAP `Finding.finding_id` — CLOSED (shipped)
 
-**Where**: `pipeline/stages/summarization/models.py` (`Finding`),
-`runner.py::_persist_map_artifacts`, `runner.py::_persist_normal_findings`.
-
-**Today**: `Finding` has no stable id. We persist
-`(pmcid, chunk_id, position_in_chunk, evidence_refs)` as the MAP coordinate.
-`NormalFinding.source_finding_ids` is declared but unpopulated.
-
-**Risk**: lineage chain `FinalRule → CanonicalRule → FindingGroup → NormalFinding → MAP Finding → sentence` has a soft link at the last hop — we can find which sentences were cited but not which **specific MAP finding** generated which NormalFinding when multiple share the same coord.
-
-**Options**:
-- (a) Add `finding_id: str` to `Finding` (sha8 of `pmcid|chunk_id|position|claim`) and propagate into `NormalFinding.source_finding_ids` during NORMALIZE. Stable, deterministic, cheap. Touches one model + one merge call site.
-- (b) Continue using the coord; document the soft-link risk and accept it.
-
-**Decision needed by**: before any threshold-calibration / evaluation work that depends on per-finding lineage (i.e. before the eval pipeline is wired up).
+`Finding._finding_id` is now a `PrivateAttr` populated by
+`Finding.set_finding_id` after MAP completes; `compute_finding_id` in
+`models.py` hashes `(pmcid, chunk_id, position_in_chunk, normalized_claim)`
+into a stable 12-char id. Both `SummarizationRunner.process` and
+`BatchSummarizationRunner.finalize` assign ids before grounding. Persistence
+writes the id explicitly in `persist_map_artifacts` and to the
+`rejected_findings.jsonl` rows.
 
 ---
 
-## 2. NORMALIZE `source_finding_ids` population — DEPENDENT on #1
+## 2. NORMALIZE `source_finding_ids` population — CLOSED (shipped)
 
-**Where**: `current_stages/normalize_stage.py::_merge`.
-
-**Today**: `runner._persist_normalize_artifacts` writes
-`dedup_trace.jsonl` listing evidence-span coordinates and an empty
-`source_finding_ids` list per row.
-
-**Action**: when #1 lands, fill `NormalFinding.source_finding_ids` in
-`NormalizeStage._merge` and `_wrap_single`. No persistence change required;
-the writer already serialises the field.
+`NormalizeStage._merge` and `_wrap_single` now call `_collect_source_ids` to
+populate `NormalFinding.source_finding_ids` from the underlying MAP
+`finding_id`s; `dedup_trace.jsonl` already serialises the field.
 
 ---
 
-## 3. RELATE skipped/blocking pair trace — DECIDE
+## 3. RELATE skipped/blocking pair trace — CLOSED (shipped)
 
-**Where**: `current_stages/relate_stage.py::relate` (gate rejections only counted via `rejection_counts`),
-`runner.py::_persist_relate_artifacts` (writes empty `skipped_pairs.jsonl`).
-
-**Today**: gate rejections are logged at INFO with reason counts, then the per-pair detail is dropped. Stored counts only end up in stdout/log files, not artifacts.
-
-**Risk for threshold calibration**: we cannot answer "which pairs were filtered out by the gate vs the NLI threshold?" offline.
-
-**Options**:
-- (a) Change `RelateStage.relate()` signature to also return `skipped: list[SkippedPair]`. Persist directly. Most useful, smallest data; touches one stage signature + one Pydantic model.
-- (b) Add a `skipped_counts` summary field to the manifest (cheap, partial answer).
-- (c) Leave as TODO until calibration actually needs it.
-
-**Recommendation**: (a) once we start sweeping `entailment_threshold` / `contradiction_threshold` offline.
+`RelateStage.relate()` now returns `(relations, raw_pairs, skipped_pairs)`.
+`SkippedPair` records (rule ids, reason, category, relation_type, subject,
+outcome) are persisted to `skipped_pairs.jsonl` via
+`persist_relate_artifacts`.
 
 ---
 
@@ -124,13 +102,14 @@ instead of an env var.
 
 ---
 
-## 8. Manifest `pipeline_config_hash` — DECIDE
+## 8. Manifest `pipeline_config_hash` — CLOSED (shipped)
 
-**Spec asked for**: `pipeline_config_hash if available`.
-
-**Today**: not computed. The full config dict goes into `manifest.config` so the data is recoverable, but there's no stable short hash for cross-run comparisons.
-
-**Action** (small): compute `sha256(json.dumps(_to_jsonable(config), sort_keys=True))[:16]` in `_make_artifact_writer` and write to `manifest.extra["pipeline_config_hash"]`. ~5 lines.
+`compute_pipeline_config_hash` in `persistence.py` produces a stable
+16-char hash over `(config snapshot, thresholds, models, schema_version,
+prompt_version, cascade_signature)`. Both sync and batch runners write it
+into `manifest.extra["pipeline_config_hash"]` from `_make_artifact_writer`,
+and `BatchSummarizationRunner` uses it to invalidate stale cached results
+in `_load_result` / `_save_result`.
 
 ---
 
@@ -148,14 +127,14 @@ penalty), surface those fields in `score_trace.jsonl`. No writer change needed.
 
 ## Quick triage table
 
-| # | Item | Effort | Impact | Decision needed |
-|---|------|--------|--------|-----------------|
-| 1 | MAP `finding_id`             | S | High (lineage) | Before eval pipeline |
-| 2 | NF `source_finding_ids` fill | S | High (lineage) | After #1 |
-| 3 | RELATE skipped trace         | S | High (calibration) | Before threshold sweep |
+| # | Item | Effort | Impact | Status |
+|---|------|--------|--------|--------|
+| 1 | MAP `finding_id`             | S | High (lineage) | CLOSED — shipped |
+| 2 | NF `source_finding_ids` fill | S | High (lineage) | CLOSED — shipped |
+| 3 | RELATE skipped trace         | S | High (calibration) | CLOSED — shipped |
 | 4 | CANONICALIZE LLM trace       | — | N/A today | Reopen if LLM added |
 | 5 | Corpus relate file mirror    | S | Med | Soon |
 | 6 | CSV summaries                | M | Low | Defer to offline tool |
 | 7 | Log-dir env race             | S | Low | Only if concurrent |
-| 8 | `pipeline_config_hash`       | XS | Low | Cheap; just do it |
+| 8 | `pipeline_config_hash`       | XS | Low | CLOSED — shipped |
 | 9 | RESOLVE component breakdown  | — | Med | After stage exposes |

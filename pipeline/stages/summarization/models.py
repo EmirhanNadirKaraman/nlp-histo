@@ -21,7 +21,7 @@ _log = logging.getLogger(__name__)
 # behaviour-affecting way. They are included in cache keys / run metadata so
 # stale outputs don't collide with new ones.
 MAP_SCHEMA_VERSION: str = "map_v1_explicit_direction"
-MAP_PROMPT_VERSION: str = "map_prompt_v1_explicit_enums"
+MAP_PROMPT_VERSION: str = "map_prompt_v2_singular_demographic"
 MAP_STAGE_NAME:     str = "map"
 
 
@@ -160,18 +160,18 @@ class FindingScope(BaseModel):
 # ── MAP output ─────────────────────────────────────────────────────────────────
 
 _CATEGORY_ALIASES: dict[str, str] = {
-    "demographic": "demographics",  # LLM alias; category uses trailing 's', relation_type does not
+    "demographics": "demographic",  # legacy LLM alias from pre-alignment prompts
 }
 
 
 class Finding(BaseModel):
-    # NOTE: relation_type uses "demographic" (no 's'); category uses "demographics" (with 's').
-    # Some models emit the alias — _repair_category_alias normalises it before Pydantic validates.
+    # `category` and `relation_type` both use the singular "demographic".
+    # Legacy LLM output saying "demographics" is repaired by _repair_category_alias.
     #
     # Strict-schema invariant: no field has a Pydantic default. Optional fields
     # are typed as `X | None` so Pydantic emits anyOf:[X,null] and the OpenAI
     # strict schema can list every property in `required`.
-    category: Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"]
+    category: Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographic"]
     claim: str = Field(description="Atomic, telegraphic medical fact")
     evidence: List[str] = Field(description="Citation IDs, e.g. ['S1|PMC123|456']")
     confidence: Literal["high", "medium", "low"]
@@ -190,12 +190,54 @@ class Finding(BaseModel):
     # `finding_id` property.
     _finding_id: str | None = PrivateAttr(default=None)
 
+    # Raw LLM-emitted values, captured *before* any enum coercion or alias
+    # repair. PrivateAttrs so they never appear in the OpenAI strict schema.
+    # Populated by the wrap-validator below; persistence reads them via the
+    # raw_* properties and writes them to sum_map_findings.raw_*.
+    _raw_relation_type: str | None = PrivateAttr(default=None)
+    _raw_direction:     str | None = PrivateAttr(default=None)
+    _raw_category:      str | None = PrivateAttr(default=None)
+
     @property
     def finding_id(self) -> str | None:
         return self._finding_id
 
     def set_finding_id(self, value: str) -> None:
         self._finding_id = value
+
+    @property
+    def raw_relation_type(self) -> str | None:
+        return self._raw_relation_type
+
+    @property
+    def raw_direction(self) -> str | None:
+        return self._raw_direction
+
+    @property
+    def raw_category(self) -> str | None:
+        return self._raw_category
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _capture_raw_then_validate(cls, data, handler):
+        """Stash raw LLM-emitted relation_type/direction/category before any
+        coercion or alias repair runs, so the original strings survive on the
+        instance even when the field validators coerce them to enum members."""
+        raw_relation = None
+        raw_direction = None
+        raw_category = None
+        if isinstance(data, dict):
+            raw_relation = data.get("relation_type")
+            raw_direction = data.get("direction")
+            raw_category = data.get("category")
+        model = handler(data)
+        if raw_relation is not None:
+            model._raw_relation_type = str(raw_relation)
+        if raw_direction is not None:
+            model._raw_direction = str(raw_direction)
+        if raw_category is not None:
+            model._raw_category = str(raw_category)
+        return model
 
     @model_validator(mode="before")
     @classmethod
@@ -220,7 +262,7 @@ class Finding(BaseModel):
                 field_name="category",
                 raw_value=v,
                 valid_values=["morphology", "IHC", "molecular_genetics",
-                              "staging", "treatment", "prognosis", "demographics"],
+                              "staging", "treatment", "prognosis", "demographic"],
                 coerced_value=repaired,
                 reason="alias_repair",
             )
@@ -365,7 +407,7 @@ class Rule(BaseModel):
     type: Literal["Diagnostic", "Prognostic", "Management"]
     condition: str = Field(description="IF <observation>")
     action: str = Field(description="THEN <conclusion>")
-    confidence: Literal["High", "Medium", "Low"]
+    confidence: Literal["high", "medium", "low"]
     evidence_chain: List[EvidenceChainItem]
     contraindications: List[str]
 
@@ -438,7 +480,7 @@ class NormalFinding(BaseModel):
     outcome_cui:          str | None = None  # UMLS CUI resolved during NORMALIZE
     relation_type:        RelationTypeEnum  # groupability key; unclear = non-groupable
     direction:            DirectionEnum | None
-    category:             Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"]
+    category:             Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographic"]
     predicate_text:       str               # representative claim text
     scope:                FindingScope      # from the best-grounded source finding
     source_finding_ids:   List[str]         # Finding.finding_id values merged here (reserved for Phase 3+)
@@ -467,7 +509,7 @@ class FindingGroup(BaseModel):
     subject_entity:       str                    # always non-None (groupability invariant)
     outcome_entity:       str                    # always non-None (groupability invariant)
     relation_type:        RelationTypeEnum       # grouping key
-    category:             Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"]
+    category:             Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographic"]
     member_ids:           List[str]              # NormalFinding.normal_id values
     direction_counts:     dict[str, int]         # direction.value → count (None keys stored as "unclear")
     scope_heterogeneity:  float                  # 0.0 = all scope fields agree; 1.0 = maximum variation
@@ -481,7 +523,7 @@ class AtomicFinding(BaseModel):
     Not imported or used anywhere in Phase 1 runner/filter code.
     """
     finding_id:       str
-    category:         Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"]
+    category:         Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographic"]
     claim:            str
     subject_entity:   str | None
     outcome_entity:   str | None
@@ -508,10 +550,10 @@ class CanonicalRule(BaseModel):
     outcome_entity:      str
     relation_type:       RelationTypeEnum
     direction:           DirectionEnum | None  # dominant direction for this bin
-    predicate_text:      str                   # LLM-selected or best-score fallback
+    predicate_text:      str                   # highest mean_grounding_score predicate in the bin
     is_conflicted:       bool                  # True if ≥2 non-unclear opposing directions in bin
     study_coverage:      Literal["single_study", "multi_study", "unknown"]
-    category:            Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"]
+    category:            Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographic"]
     supporting_pmcids:   List[str]             # unique PMCIDs across member NFs
     member_normal_ids:   List[str]             # NormalFinding.normal_id values in this bin
     mean_grounding_score: float | None
@@ -525,17 +567,14 @@ class CanonicalRule(BaseModel):
 class RelationTypeLabel(str, Enum):
     SUPPORT        = "SUPPORT"
     CONTRADICT     = "CONTRADICT"
-    SCOPE_QUALIFY  = "SCOPE_QUALIFY"
     UNRELATED      = "UNRELATED"
 
 
 class Relation(BaseModel):
     """
     Output of the RELATE stage: a directional NLI-derived relation between
-    two CanonicalRules.
-
-    rule_id_a and rule_id_b are symmetric for SUPPORT; for SCOPE_QUALIFY the
-    rule with higher entailment score is rule_id_a (broader claim).
+    two CanonicalRules. ``rule_id_a`` and ``rule_id_b`` are symmetric for
+    SUPPORT.
     """
     rule_id_a:       str
     rule_id_b:       str
@@ -580,7 +619,7 @@ class FinalRule(BaseModel):
     predicate_text:        str
     is_conflicted:         bool
     study_coverage:        Literal["single_study", "multi_study", "unknown"]
-    category:              Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographics"]
+    category:              Literal["morphology", "IHC", "molecular_genetics", "staging", "treatment", "prognosis", "demographic"]
     supporting_pmcids:     List[str]
     member_normal_ids:     List[str]
     mean_grounding_score:  float | None
@@ -589,7 +628,11 @@ class FinalRule(BaseModel):
     final_score:           float                 # 0–1, higher is better
     support_count:         int                   # SUPPORT relations touching this rule
     contradict_count:      int                   # CONTRADICT relations touching this rule
-    scope_qualify_count:   int                   # SCOPE_QUALIFY relations touching this rule
+    # Always 0 since the SCOPE_QUALIFY branch in _classify_pair was removed
+    # (B-006). Field + DB column kept so existing readers (templates, DB
+    # downstream consumers) don't break; revive only if an asymmetric-
+    # entailment branch is reintroduced.
+    scope_qualify_count:   int = 0
     is_contradicted:       bool
     contradicted_by:       List[str]             # canonical_ids that contradict this rule
 

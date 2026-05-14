@@ -126,8 +126,11 @@ class SummarizationRunner:
         constants.  Use dataclasses.replace() to override specific fields.
     scorer:
         MapOutputScorer used to score voter agreement in the MAP stage.
-        Defaults to EmbeddingScorer.  Pass CascadedCompositeScorer for
-        embedding + LLM judge cascade.
+        Defaults to ``SemanticAgreementScorer(EmbeddingSimilarityStrategy)``
+        — Soiffer-style max-consensus with centrality-based best-output
+        selection. Pass ``EmbeddingScorer`` for the legacy mean-pairwise
+        behaviour, or ``CascadedCompositeScorer`` for the LP-thresholded
+        embedding + NER cascade.
     output_dir:
         Where to write per-concept result JSON files.
     cache_path:
@@ -173,6 +176,8 @@ class SummarizationRunner:
         cascade_profile:    str = "custom",
         artifact_root:      Path | None = None,
         artifact_run_id:    str | None = None,
+        enable_router:      bool = False,
+        router_single_voter_policy: str = "escalate",
     ) -> None:
         cfg = config or SummarizationConfig()
         self._output_dir = output_dir
@@ -182,11 +187,48 @@ class SummarizationRunner:
         cache_file = cache_path or (output_dir / "pipeline_cache.json")
         self._cache = PipelineCache(cache_file)
 
-        # If no explicit scorer but an embed_fn is provided, build EmbeddingScorer
-        # with that function so the agreement check never falls back to OpenAIEmbedder.
-        if scorer is None and embed_fn is not None:
-            from .agreement import EmbeddingScorer
-            scorer = EmbeddingScorer(embed_fn=embed_fn)
+        # Per-paper cascade decision log directory. One JSONL file per pmcid,
+        # appended to as L1/L2/L3 decisions are made. Surfaces cascade
+        # behaviour for offline analysis without depending on trace_enabled.
+        self._cascade_log_dir: Path = output_dir / "cascade_decisions"
+
+        # Default scorer: SemanticAgreementScorer over EmbeddingSimilarityStrategy.
+        # Centrality-based best-output selection (Soiffer 2025) — the previous
+        # default was EmbeddingScorer, which left best_index unset and forced
+        # AgreementChecker.best() to fall back to a (mean_evidence_len, n_findings)
+        # heuristic. Pass embed_fn through so we don't silently fall back to
+        # OpenAIEmbedder when the caller supplied a different embedder.
+        if scorer is None:
+            from .agreement import EmbeddingSimilarityStrategy, SemanticAgreementScorer
+            scorer = SemanticAgreementScorer(
+                strategy=EmbeddingSimilarityStrategy(embed_fn=embed_fn),
+            )
+
+        # Optional routing layer: grounding-first MapOutputRouter. Drops voters
+        # that fail schema or provenance validation before they enter the
+        # agreement matrix, and forwards per-voter grounding quality into
+        # AgreementContext so the scorer can use it for tie-breaking. Off by
+        # default — the legacy 3-tier L1 → L2 → L3 cascade is the default
+        # path. Enable with enable_router=True to switch to the L1 → L3 skip
+        # path described in MapStage._cascade.
+        router = None
+        if enable_router:
+            from .agreement import AgreementChecker
+            from .routing import MapOutputRouter
+            router_checker = AgreementChecker(
+                scorer=scorer,
+                theta=cfg.map.theta,
+                reject_theta=cfg.map.reject_theta,
+            )
+            router = MapOutputRouter(
+                agreement_checker=router_checker,
+                single_voter_policy=router_single_voter_policy,  # type: ignore[arg-type]
+            )
+        # Captured so _pipeline_config_hash can include router state — flipping
+        # this knob changes the cascade behaviour (L1→L3 skip vs L1→L2→L3) and
+        # must invalidate cached results.
+        self._enable_router = enable_router
+        self._router_single_voter_policy = router_single_voter_policy
 
         self._map = MapStage(
             voter_llms, level2_voter_llms, escalation_llm,
@@ -196,6 +238,7 @@ class SummarizationRunner:
             chunk_overlap=cfg.map.chunk_overlap,
             chunk_workers=cfg.map.chunk_workers,
             scorer=scorer,
+            router=router,
             voter_specs=voter_specs,
             level2_voter_specs=level2_voter_specs,
             escalation_spec=escalation_spec,
@@ -262,7 +305,7 @@ class SummarizationRunner:
         # Snapshot of config for traces (model introspection is best-effort)
         self._config_snapshot = {
             **dataclasses.asdict(cfg),
-            "scorer": type(scorer).__name__ if scorer else "EmbeddingScorer",
+            "scorer": type(scorer).__name__ if scorer else "SemanticAgreementScorer",
             "voter_model_count": len(voter_llms),
             "voter_models": [_model_name(m) for m in voter_llms],
             "level2_voter_model_count": len(level2_voter_llms),
@@ -353,11 +396,20 @@ class SummarizationRunner:
             # 1. MAP (ABC cascade per chunk)
             logger.info("[%s] MAP — %d sentences", pmcid, len(sentences))
             t0 = time.perf_counter()
+            # Per-paper cascade decision log: one JSONL row per L1/L2/L3
+            # decision. Always emitted (independent of trace_enabled) so
+            # cascade behaviour is inspectable on every run.
+            from .agreement import CascadeDecisionLog as _CascadeDecisionLog
+            cascade_log = _CascadeDecisionLog(
+                self._cascade_log_dir / f"{pmcid}.jsonl"
+            )
             with mem.stage("MAP"):
                 chunk_summaries = self._map.process(
                     sentences, pmcid, cache=self._cache, collector=collector,
                     start_chunk=start_chunk, limit_chunks=limit_chunks,
                     usage_collector=usage_collector,
+                    cascade_decision_log=cascade_log,
+                    run_id=run_id,
                 )
             logger.info("[%s] MAP done [%.1fs] — %d chunks, %d raw findings",
                         pmcid, time.perf_counter() - t0,
@@ -1077,16 +1129,11 @@ class SummarizationRunner:
                 thresholds=thresholds,
                 chunk_size=cfg.map.chunk_size,
             )
-            from .persistence import _try_git_commit, compute_pipeline_config_hash  # noqa: PLC0415
+            from .persistence import _try_git_commit  # noqa: PLC0415
             manifest.git_commit = _try_git_commit()
-            manifest.extra["pipeline_config_hash"] = compute_pipeline_config_hash(
-                config=self._config_snapshot,
-                thresholds=thresholds,
-                models=models,
-                schema_version=schema_version,
-                prompt_version=prompt_version,
-                cascade_signature=cascade_signature,
-            )
+            # Reuse the single source of truth so the manifest's hash matches
+            # the cache invalidation hash (B-007).
+            manifest.extra["pipeline_config_hash"] = self._pipeline_config_hash()
             writer = RunArtifactWriter(
                 run_id=run_id, root_dir=self._artifact_root, manifest=manifest,
             )
@@ -1147,6 +1194,9 @@ class SummarizationRunner:
                         "outcome_entity":        f.outcome_entity,
                         "relation_type":         f.relation_type.value,
                         "direction":             f.direction.value if f.direction else None,
+                        "raw_relation_type":     f.raw_relation_type,
+                        "raw_direction":         f.raw_direction,
+                        "raw_category":          f.raw_category,
                         "grounding_score":       f.grounding_score,
                         "evidence_refs":         list(f.evidence) if f.evidence else [],
                         "scope_disease_subtype":   scope.disease_subtype,
@@ -1565,13 +1615,86 @@ class SummarizationRunner:
     def _result_path(self, pmcid: str) -> Path:
         return self._summaries_dir / f"{pmcid}.json"
 
+    def _pipeline_config_hash(self) -> str:
+        """Hash of all knobs that should invalidate the cached result.
+
+        Mirrors ``BatchSummarizationRunner._pipeline_config_hash`` so the two
+        runners agree on what counts as a config change (cascade composition,
+        thresholds, schema/prompt versions). Any drift here re-opens B-007.
+        """
+        from .models import MAP_SCHEMA_VERSION, MAP_PROMPT_VERSION  # noqa: PLC0415
+        from .persistence import compute_pipeline_config_hash  # noqa: PLC0415
+        cfg = self._cfg
+        map_meta = self._map.run_metadata_summary() or {}
+        cascade_signature = (
+            map_meta.get("cascade_signature")
+            or self._config_snapshot.get("cascade_signature")
+        )
+        schema_version = map_meta.get("schema_version") or MAP_SCHEMA_VERSION
+        prompt_version = map_meta.get("prompt_version") or MAP_PROMPT_VERSION
+        thresholds = {
+            "grounding_threshold": (
+                self._grounding.threshold if self._grounding is not None else None
+            ),
+            "entailment_threshold":    cfg.relate.entailment_threshold,
+            "contradiction_threshold": cfg.relate.contradiction_threshold,
+            "map_theta":               cfg.map.theta,
+            "map_reject_theta":        cfg.map.reject_theta,
+            "contradiction_similarity_threshold": cfg.contradiction_similarity_threshold,
+            "enable_router":           self._enable_router,
+            "router_single_voter_policy": (
+                self._router_single_voter_policy if self._enable_router else None
+            ),
+        }
+        models = {
+            "voter_models":        self._config_snapshot.get("voter_models"),
+            "level2_voter_models": self._config_snapshot.get("level2_voter_models"),
+            "escalation_model":    self._config_snapshot.get("escalation_model"),
+            "scorer":              self._config_snapshot.get("scorer"),
+        }
+        return compute_pipeline_config_hash(
+            config=self._config_snapshot,
+            thresholds=thresholds,
+            models=models,
+            schema_version=schema_version,
+            prompt_version=prompt_version,
+            cascade_signature=cascade_signature,
+        )
+
     def _load_result(self, pmcid: str) -> dict | None:
         p = self._result_path(pmcid)
-        if p.exists():
-            return json.loads(p.read_text(encoding="utf-8"))
-        return None
+        if not p.exists():
+            return None
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("[%s] cached result unreadable, ignoring: %s", pmcid, exc)
+            return None
+        stored_hash = data.get("pipeline_config_hash")
+        try:
+            current_hash = self._pipeline_config_hash()
+        except Exception as exc:
+            logger.warning(
+                "[%s] could not compute current pipeline_config_hash (%s) — "
+                "ignoring cache for safety", pmcid, exc,
+            )
+            return None
+        if stored_hash != current_hash:
+            logger.info(
+                "[%s] cached result stale (config hash %s != %s) — re-running",
+                pmcid, stored_hash, current_hash,
+            )
+            return None
+        return data
 
     def _save_result(self, result: dict) -> None:
+        try:
+            result.setdefault("pipeline_config_hash", self._pipeline_config_hash())
+        except Exception as exc:
+            logger.warning(
+                "[%s] could not stamp pipeline_config_hash on result (%s) — "
+                "writing without it", result.get("pmcid"), exc,
+            )
         p = self._result_path(result["pmcid"])
         p.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
 

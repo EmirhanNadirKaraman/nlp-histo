@@ -1,6 +1,14 @@
 # PyMuPDF-Layout Integration
 
-## Status: ✅ INTEGRATED AND ACTIVE
+> **Status: legacy — superseded.** This document describes optional
+> `pymupdf-layout` integration inside `EnsemblePDFParser`. The production
+> pipeline now uses Docling directly via
+> `pipeline/stages/pdf_text_extraction/`; PyMuPDF is used only as a support
+> tool (region masking, evidence gathering, media cropping) and does not
+> drive layout detection. The references to `parse_single_pdf.py` below no
+> longer resolve. Kept for reference on what the ensemble parser does.
+
+## Original status (historical): INTEGRATED AND ACTIVE
 
 The medical-grade ensemble parser now uses **pymupdf-layout** for enhanced detection.
 

@@ -57,15 +57,15 @@ Single source of truth for all data shapes. Every stage reads from and writes to
 | `NormalFinding` | NORMALIZE output | Post-dedup, post-normalization finding. Has `mean_grounding_score`, `evidence: List[SourceSpan]`. |
 | `FindingGroup` | GROUP output | All `NormalFinding`s with the same `(subject, outcome, relation_type, category)`. May have mixed directions. |
 | `CanonicalRule` | CANONICALIZE output | One direction-bin of a `FindingGroup`. LLM-selected `predicate_text`. Has `canonical_scope`. |
-| `Relation` | RELATE output | NLI-derived relation between two `CanonicalRule`s: SUPPORT / CONTRADICT / SCOPE_QUALIFY. |
+| `Relation` | RELATE output | NLI-derived relation between two `CanonicalRule`s. Today only SUPPORT and CONTRADICT are emitted by `_classify_pair` (SCOPE_QUALIFY is defined in `RelationTypeLabel` but no branch produces it — see SCOPE_QUALIFY note in `relate_stage.py`). |
 | `FinalRule` | RESOLVE output | Scored `CanonicalRule` with `final_score`, `support_count`, `contradict_count`, `is_contradicted`. |
 | `ConsolidatedSummary` | REDUCE output | Four-section narrative summary. |
 | `ExtractedRules` | RULE stage output | IF-THEN clinical rules with `evidence_chain`. |
 
 ### Design decisions
-- `Finding.assertion_status` defaults to `uncertain`. NORMALIZE applies a keyword heuristic as a **recovery fallback** only when it is still `uncertain` after MAP — not as an overwrite.
+- `Finding.direction` is the structured polarity field (`positive`, `negative`, `absent`, `partial`, `unclear`, `no_direction`). NORMALIZE applies a keyword heuristic (`infer_direction`) as a recovery fallback only when the incoming `direction` is `None` or `unclear` — never as an overwrite.
 - `FindingGroup.group_id` is a hash of `(pmcid, subject, outcome, relation_type, category)` — deterministic, per-paper namespaced so the same (subject, outcome, relation, category) tuple in two papers produces distinct group_ids (and therefore distinct `canonical_id`s downstream).
-- `Relation.nli_score_a_to_b` stores the **entailment** score for SUPPORT/SCOPE_QUALIFY and the **contradiction** score for CONTRADICT. Do not conflate these.
+- `Relation.nli_score_a_to_b` stores the **entailment** score for SUPPORT and the **contradiction** score for CONTRADICT. Do not conflate these.
 - `AtomicFinding` is defined but unused — reserved schema for a planned refactor.
 
 ---
@@ -164,7 +164,7 @@ NLI-based filter. Applied twice: after MAP (on findings), after RULES (on IF-THE
 - `score_findings()` writes scores in-place without dropping anything (used after filtering to score all survivors)
 
 ### Windowed NLI
-Long premises are split into overlapping 400-char windows (200-char step). Max entailment score across windows is used. This prevents silent truncation by the 512-token NLI model — supporting evidence in the second half of a long paragraph would otherwise be cut off.
+`_split_windows` segments long premises at sentence boundaries, sized by a per-hypothesis token budget so the joint premise+hypothesis sequence never exceeds the NLI model's 512-token limit. Per-label scores are max-pooled across windows so a supporting sentence near a window boundary is not silently truncated.
 
 ### Shared NLI instance
 `_NLI_PIPE_CACHE` is a module-level dict. Both `GroundingFilter` and `RelateStage` pull from it via `_get_nli_pipe()` in `relate_stage.py`. Model loads exactly once per process.
@@ -186,8 +186,8 @@ Deterministic entity normalization + conditional deduplication. `Finding` → `N
 ### Junk semantic type blocklist
 UMLS concepts whose types are purely in `_JUNK_SEMANTIC_TYPES` (taxonomy: T001–T016, geography: T083, occupations: T097, etc.) are discarded. Short all-caps acronyms (≤5 chars) linked to any junk type are also discarded. This fixes the CEAN→Cetacea bug (CEAN was being linked to the mammalian order Cetacea via string similarity).
 
-### `assertion_status` handling
-`infer_assertion_status()` (keyword heuristic over negation/presence words) is applied **only when** the incoming `assertion_status == uncertain`. The LLM's `confirmed`/`negated`/`positive`/`negative` judgments are preserved unchanged. Applied in `_normalize_entities()`, `_merge()`, and `_wrap_single()`.
+### `direction` handling
+`infer_direction()` (keyword heuristic over negation/presence words) is applied **only when** the incoming `direction` is `None` or `DirectionEnum.unclear`. Concrete LLM directions (`positive`/`negative`/`absent`/`partial`/`no_direction`) are preserved unchanged. Applied in `_normalize_entities()`, `_merge()`, and `_wrap_single()`.
 
 ### Conditional dedup — `_dedup_key()`
 Findings sharing the same `(te_id, subject_entity, outcome_entity, relation_type)` after normalization are merged into one `NormalFinding`. Non-groupable conditions (any field is None, `te_id is None`, `relation_type == unclear`) route to `_wrap_single()` instead.
@@ -223,25 +223,24 @@ Float 0–1 measuring how many of the 8 scope fields have >1 distinct non-None v
 
 ## `canonicalize_stage.py` — `CanonicalizeStage`
 
-LLM-assisted reduction of `FindingGroup` → `CanonicalRule`.
+Deterministic reduction of `FindingGroup` → `CanonicalRule`. No LLM call today; `_select_predicate` is a thin wrapper that returns `_pick_best_predicate_deterministic` (highest `mean_grounding_score` wins). The LLM-selection hook is reserved for future use (see PERSISTENCE_TODOS #4).
 
 ### Per-group flow
 1. Split by direction via `_split_by_direction()` — a group with both positive and negative findings emits two `CanonicalRule` objects
-2. Build ranked candidate list of `predicate_text` by `mean_grounding_score`
-3. LLM picks the best candidate — **must be verbatim from the list**, not paraphrased
-4. If LLM returns out-of-set text or fails: deterministic fallback (highest-score candidate)
-5. Compute `canonical_scope` from direction_counts and PMCID coverage
+2. Build ranked candidate list of `(mean_grounding_score, predicate_text)`
+3. Pick the highest-scored candidate as `predicate_text` (deterministic)
+4. Compute `is_conflicted` + `study_coverage` from direction_counts and PMCID coverage
 
-### `canonical_scope`
-- `conflicted`: ≥2 non-unclear directions with count≥1
-- `multi_study`: ≥2 unique PMCIDs across member NFs
-- `single_study`: exactly 1 unique PMCID
-- `unknown`: no PMCID info
+### Scope fields on `CanonicalRule`
+- `is_conflicted`: True when ≥2 non-unclear directions appear in the bin
+- `study_coverage`:
+  - `multi_study`: ≥2 unique PMCIDs across member NFs
+  - `single_study`: exactly 1 unique PMCID
+  - `unknown`: no PMCID info
 
 ### Design decisions
-- LLM output validated against candidate set — prevents hallucination of combined/paraphrased predicates.
+- Predicate selection is deterministic — no LLM hallucination surface here.
 - `unclear` findings are assigned to the largest direction bin (known limitation — inflates majority count when there is a meaningful split).
-- `--no-canon` flag in `run_paper_single_model.py` skips LLM selection entirely (deterministic only). Useful when testing downstream stages.
 
 ---
 
@@ -262,8 +261,7 @@ A pair reaches NLI only if ALL four match:
 |--------|-----------|
 | CONTRADICT | mutual contradiction score ≥ threshold, AND rules do not share the same polarity direction |
 | SUPPORT | mutual entailment score ≥ threshold (both directions) |
-| SCOPE_QUALIFY | asymmetric entailment — one direction ≥ threshold, other not |
-| UNRELATED | none of the above — not stored |
+| UNRELATED (None) | none of the above — not stored. Asymmetric entailment collapses here today; `SCOPE_QUALIFY` was removed in B-006 along with its RESOLVE filter and log column. `FinalRule.scope_qualify_count` is retained as a hard-zero field for DB/template back-compat. |
 
 ### `contradict_allowed` gate (April 2026 fix)
 The old gate called `infer_assertion_status()` on predicate text to require one positive + one negative assertion. Since the keyword heuristic returns `uncertain` for most clinical language, this blocked nearly all contradictions (relations was always empty). Replaced with a direction-field check:
@@ -272,12 +270,11 @@ The old gate called `infer_assertion_status()` on predicate text to require one 
 
 ### Score storage
 `nli_score_a_to_b` / `nli_score_b_to_a` store:
-- **Entailment score** for SUPPORT and SCOPE_QUALIFY
+- **Entailment score** for SUPPORT
 - **Contradiction score** for CONTRADICT
 
 ### Known remaining issues
-- Exact string equality on `subject_entity` is too strict — should apply `_norm_outcome()` to subject comparison too
-- Pair truncation at `MAX_PAIRS=500` is index-ordered (first 500 by `itertools.combinations`), not importance-ordered
+- All eligible pairs are compared (no `MAX_PAIRS` cap today). Large rule sets do O(N²) NLI calls.
 
 ---
 
@@ -407,7 +404,7 @@ Invalid JSON files are skipped with a warning rather than stopping the batch.
 
 ### Flag types detected
 - `taxonomy-leak`: subject_entity matches known taxonomy strings
-- `polarity-mismatch`: assertion_status=uncertain but claim contains polarity words
+- `polarity-mismatch`: direction=unclear but claim contains polarity words
 - `generic-entity`: subject_entity is a generic term (patient, cell, lesion, etc.)
 - `low-grounding`: grounding_score or mean_grounding_score < threshold (default 0.4)
 - `empty-outcome`: outcome_entity is empty/None
@@ -420,18 +417,15 @@ Sentence text is mined from two sources in the JSON (without guessing):
 The lookup is serialised as a JS object (`SENTENCE_LOOKUP`) embedded in the HTML.
 
 ### Export flagged CSV columns
-`pmcid`, `run_id`, `stage`, `item_type`, `item_id`, `stable_key`, `category`, `relation_type`, `subject_entity`, `outcome_entity`, `predicate_text`, `direction`, `assertion_status`, `grounding_score`, `mean_grounding_score`, `final_score`, `flags`, `evidence_refs`, `verbatim_summary`
+`pmcid`, `run_id`, `stage`, `item_type`, `item_id`, `stable_key`, `category`, `relation_type`, `subject_entity`, `outcome_entity`, `predicate_text`, `direction`, `grounding_score`, `mean_grounding_score`, `final_score`, `flags`, `evidence_refs`, `verbatim_summary`
 
 Note: `--export-flagged-csv` is only supported in single-run mode. In diff mode, run each JSON separately.
 
 ---
 
-## Known remaining issues (as of April 2026)
+## Known remaining issues
 
 | # | File | Issue |
 |---|------|-------|
-| 1 | `relate_stage.py` | Exact string equality on `subject_entity` is too strict — `_norm_outcome()` should be applied to subject comparison too |
-| 2 | `relate_stage.py` | Pair truncation at `MAX_PAIRS=500` is index-ordered, not importance-ordered — high-grounding later rules may never be compared |
-| 3 | `canonicalize_stage.py` | `unclear` findings assigned to the largest direction bin — inflates majority count when the split is meaningful |
-| 4 | `relate_stage.py` | Same NLI model used for grounding (sentence↔claim) and rule-to-rule comparison — different tasks, different score distributions |
-| 5 | `normalize_stage.py` | `FindingGroup.group_id` comment in `models.py` still says 3-field hash — update to reflect 4-field hash after category fix |
+| 1 | `canonicalize_stage.py` | `unclear` findings assigned to the largest direction bin — inflates majority count when the split is meaningful |
+| 2 | `relate_stage.py` | Same NLI model used for grounding (sentence↔claim) and rule-to-rule comparison — different tasks, different score distributions |

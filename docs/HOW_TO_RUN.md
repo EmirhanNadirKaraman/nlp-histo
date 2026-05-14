@@ -77,11 +77,14 @@ Outputs land under `out/`:
 ## 3. Summarisation pipeline
 
 ```bash
-# Single paper (driven by scripts/run_paper.py)
-python scripts/run_paper.py --pmcid PMC7150310_main
+# Single paper, sync (live) mode — pmcid is positional, no --pmcid flag
+python scripts/run_paper.py PMC7150310_main --sync
 
-# Cheap-tier corpus run (matches configs/paper_selection/runA.yaml)
-python scripts/run_paper.py --config configs/paper_selection/runA.yaml
+# Single paper, default (batch / async) mode
+python scripts/run_paper.py PMC7150310_main
+
+# Cheap-tier corpus run from a YAML selection (matches configs/paper_selection/runA.yaml)
+python scripts/run_paper.py --from-selection configs/paper_selection/runA.yaml --sync
 ```
 
 Outputs land in `out/summaries/runs/<run_id>/`:
