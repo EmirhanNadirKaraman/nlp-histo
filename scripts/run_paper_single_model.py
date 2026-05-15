@@ -96,7 +96,7 @@ def build_llm(model: str = "gemini"):
     if model == "sonnet":
         from langchain_anthropic import ChatAnthropic
         return ChatAnthropic(
-            model="claude-sonnet-4-6-20251001",
+            model="claude-sonnet-4-6",
             temperature=0.1,
             timeout=60,
         )
@@ -132,7 +132,7 @@ def build_batch_runners(
     from database import get_db_connection
 
     haiku  = VoterBatchConfig(model="claude-haiku-4-5-20251001",  provider="claude")
-    sonnet = VoterBatchConfig(model="claude-sonnet-4-6-20251001", provider="claude")
+    sonnet = VoterBatchConfig(model="claude-sonnet-4-6", provider="claude")
     sync_llm = build_llm()  # Gemini Flash Lite — used for NORMALIZE/CANONICALIZE/REDUCE
 
     # Single voter → always KEEP, no escalation. Disable contradiction detector.
@@ -483,7 +483,7 @@ def main() -> None:
     # ── Batch mode (Claude Haiku batch API for MAP) ────────────────────────────
     if args.batch:
         results = run_batch_mode(pmcids, args)
-        n_ok = sum(1 for r in results if r["status"] == "success")
+        n_ok = sum(1 for r in results if r["status"] in ("success", "skipped"))
     else:
         # ── Sync mode (one paper at a time, single LLM wired into every slot) ──
         logger.info("Building single-model runner (model=%s)…", args.model)
@@ -520,7 +520,7 @@ def main() -> None:
                 _print_result(result)
             results.append(result)
 
-    n_ok = sum(1 for r in results if r["status"] == "success")
+    n_ok = sum(1 for r in results if r["status"] in ("success", "skipped"))
     if len(pmcids) > 1:
         logger.info("Batch complete: %d/%d succeeded", n_ok, len(pmcids))
 

@@ -239,6 +239,20 @@ def parse_result(result: BatchResult, strip_thinking: bool = False) -> Auditable
         return AuditableSummary.model_validate(json.loads(content))
     except Exception as exc:
         logger.warning("Failed to parse batch result %s: %s", result.custom_id, exc)
+        # Surface the malformed payload to bad_findings.jsonl so we can audit
+        # which voters / providers produce structurally bad output. Batch mode
+        # can't retry mid-stream (would need a fresh batch submission), so
+        # this is observability-only.
+        from ..enum_logging import log_bad_finding  # noqa: PLC0415
+        log_bad_finding(
+            raw=content[:2000] if isinstance(content, str) else None,
+            error=str(exc),
+            context={
+                "stage": "AuditableSummary",
+                "custom_id": result.custom_id,
+                "source": "batch.parse_result",
+            },
+        )
         return None
 
 
@@ -283,13 +297,19 @@ def submit_level(
     )
     if not all_requests:
         return []
-    by_provider: dict[str, list[BatchRequest]] = {}
+    # Group by (provider, model) — NOT just provider. OpenAI's Batch API
+    # rejects any batch that mixes models ("mismatched_model"); the entire
+    # batch then completes with output_file_id=None and every request is
+    # discarded silently. Other providers don't share this constraint today,
+    # but one-batch-per-model is uniformly safe and adds at most one extra
+    # batch submission per profile. See B-020 for the historical incident.
+    by_provider_model: dict[tuple[str, str], list[BatchRequest]] = {}
     for req in all_requests:
-        by_provider.setdefault(req.provider, []).append(req)
+        by_provider_model.setdefault((req.provider, req.model), []).append(req)
 
-    providers = build_providers(set(by_provider.keys()))
+    providers = build_providers({pname for (pname, _model) in by_provider_model})
     jobs: list[ProviderJob] = []
-    for pname, reqs in by_provider.items():
+    for (pname, _model), reqs in by_provider_model.items():
         job = providers[pname].submit(reqs, OPENAI_MAP_TOOL)
         jobs.append(job)
     return jobs

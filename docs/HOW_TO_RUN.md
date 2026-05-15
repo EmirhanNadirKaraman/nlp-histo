@@ -152,6 +152,31 @@ python scripts/inspect_phase123_pipeline.py --pmcid PMC7150310_main
 python scripts/test_map_schema.py
 ```
 
+### Pipeline telemetry — what to read after a run
+
+Append-only JSONL telemetry from the summarisation pipeline. See
+[`STRUCTURE.md` § Log files](STRUCTURE.md#log-files-logs) for the full
+contract and producer-site list.
+
+```bash
+# Enum coercions / alias repairs / case repairs on Finding fields (B-018, B-019).
+jq -r '.field_name + "\t" + (.raw_value|tostring) + "\t" + .reason' \
+  logs/enum_observations.jsonl | sort | uniq -c | sort -rn
+
+# Failed Findings / AuditableSummaries / chunk_id repairs.
+jq -r '(.context.stage // "-") + "\t" + (.context.level // "-") + "\t" + (.context.provider // "-") + "\t" + .error' \
+  logs/bad_findings.jsonl | sort | uniq -c | sort -rn
+
+# Per-chunk cascade decisions for one paper (voter_count, decision, gate_origin).
+jq -r '"level=" + .level + " voter_count=" + (.voter_count|tostring) + " decision=" + .decision' \
+  out/summaries/cascade_decisions/<PMCID>.jsonl
+
+# Latest cost / escalation report.
+ls -t out/summaries/reports/escalation_report_*.json | head -1 | xargs cat
+```
+
+Pre-2026-05-15 baselines live under `logs/archive/` for before/after comparison.
+
 ---
 
 ## 8. Database housekeeping

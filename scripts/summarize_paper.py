@@ -38,7 +38,7 @@ runner = SummarizationRunner(
 result = runner.process(file_data)
 
 print("=" * 70)
-if result["status"] == "success":
+if result["status"] in ("success", "skipped"):
     print(f"SUMMARY\n{result['summary']}\n")
     print(f"RULES ({len(result['rules'])})")
     for r in result["rules"]:

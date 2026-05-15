@@ -251,7 +251,6 @@ def test_profiles():
         get_profile, list_profiles,
         GEMINI_L1, OPENAI_L1, CLAUDE_L1,
         GEMINI_L2, OPENAI_L2, CLAUDE_L2, CLAUDE_L3,
-        DEFAULT_PROFILE_NAME,
     )
     for name in ("cheap", "real"):
         assert name in list_profiles(), f"profile {name!r} missing"
@@ -285,21 +284,21 @@ def test_profiles():
     assert real.l3_voter.model == CLAUDE_L3
     assert real.l3_voter.provider == "claude"
 
-    # Default fallback must be cheap, never anything more expensive.
-    assert DEFAULT_PROFILE_NAME == "cheap"
-
-
-def test_default_profile_is_cheap_when_unset():
-    """get_profile() with no arg and NLP_HISTO_PROFILE unset → cheap."""
+def test_no_profile_raises_when_unset():
+    """get_profile() with no arg and NLP_HISTO_PROFILE unset → ValueError."""
     import os as _os
     from pipeline.stages.summarization.batch.voter_configs import get_profile
 
     saved = _os.environ.pop("NLP_HISTO_PROFILE", None)
     try:
-        prof = get_profile(None)
-        assert prof.name == "cheap", (
-            f"unconfigured fallback must be cheap, got {prof.name!r}"
-        )
+        try:
+            get_profile(None)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                "get_profile(None) must raise when $NLP_HISTO_PROFILE is unset"
+            )
     finally:
         if saved is not None:
             _os.environ["NLP_HISTO_PROFILE"] = saved

@@ -349,12 +349,47 @@ class BatchSummarizationRunner:
 
         # Collect all results from completed jobs
         raw_results: list[BatchResult] = []
+        failed_job_summaries: list[dict] = []
         for job in handle.jobs:
             if job.status == "failed":
-                logger.warning("[%s] Job %s failed — skipping its results", handle.pmcid, job.job_id)
+                # Expand the failure log to include provider/model/request_count
+                # so a silent multi-model rejection (B-020 class) is obvious in
+                # stdout. Previously this said only "Job <id> failed" with no
+                # provider context.
+                logger.warning(
+                    "[%s] Batch job FAILED — provider=%s model=%s request_count=%d job_id=%s — "
+                    "skipping its %d result(s). This usually means a model mismatch (OpenAI), "
+                    "schema rejection, or rate-limit/quota error. See provider dashboard for details.",
+                    handle.pmcid, job.provider, job.model, job.request_count,
+                    job.job_id, job.request_count,
+                )
+                failed_job_summaries.append({
+                    "provider": job.provider, "model": job.model,
+                    "request_count": job.request_count, "job_id": job.job_id,
+                })
                 continue
             p = providers[job.provider]
             raw_results.extend(p.retrieve(job))
+
+        # All jobs failed → cascade cannot proceed. Raise rather than producing
+        # an empty result that the runner would treat as "every chunk had zero
+        # voters" and silently escalate the entire paper to L3. Better to fail
+        # loudly than to bill an L3-only re-run. See B-020.
+        if failed_job_summaries and len(failed_job_summaries) == len(handle.jobs):
+            raise RuntimeError(
+                f"[{handle.pmcid}] phase={handle.phase.value}: ALL "
+                f"{len(handle.jobs)} batch jobs failed. Cannot proceed. "
+                f"Failed jobs: {failed_job_summaries}"
+            )
+        if failed_job_summaries:
+            logger.warning(
+                "[%s] phase=%s — %d of %d batch jobs failed. Cascade will proceed "
+                "with reduced voter coverage; expect voter_count<expected warnings "
+                "downstream. Failed: %s",
+                handle.pmcid, handle.phase.value,
+                len(failed_job_summaries), len(handle.jobs),
+                failed_job_summaries,
+            )
 
         # Merge in any synthetic results produced by in-run voter dedup at the
         # prior phase. These are voters whose (provider, model, temperature)
@@ -644,6 +679,17 @@ class BatchSummarizationRunner:
             logger.info("[%s] Result saved to %s", pmcid, self._result_path(pmcid))
 
             self._write_batch_cost_artifacts(handle, writer, run_id, pmcid)
+
+            # Issue G — post-run row-count audit (batch parity with sync).
+            if self._db is not None:
+                try:
+                    from ..health_checks import assert_persistence_row_counts  # noqa: PLC0415
+                    assert_persistence_row_counts(self._db, pmcid)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[%s] Post-run row-count audit raised — ignored: %s",
+                        pmcid, exc,
+                    )
 
             self._finish_pipeline_run(
                 pipeline_run_db_id, "success",
@@ -1376,6 +1422,25 @@ class BatchSummarizationRunner:
                 strip = strip_flags[vi] if vi < len(strip_flags) else False
                 parsed = parse_result(res, strip_thinking=strip)
                 if parsed is not None:
+                    # Chunk_id round-trip: voters occasionally rename the
+                    # chunk (e.g. emit "C5" for an expected "C3"). Batch
+                    # mode can't re-submit, so log + repair in place.
+                    if parsed.chunk_id != chunk_id:
+                        from ..enum_logging import log_bad_finding  # noqa: PLC0415
+                        log_bad_finding(
+                            raw={"returned_chunk_id": parsed.chunk_id,
+                                 "expected_chunk_id": chunk_id},
+                            error=f"chunk_id mismatch: voter returned "
+                                  f"{parsed.chunk_id!r} for expected {chunk_id!r}",
+                            context={
+                                "stage": "AuditableSummary",
+                                "pmcid": pmcid, "chunk_id": chunk_id,
+                                "custom_id": res.custom_id,
+                                "voter_index": vi, "level": level,
+                                "source": "batch._process_level",
+                            },
+                        )
+                        parsed = parsed.model_copy(update={"chunk_id": chunk_id})
                     voters.append(parsed)
             chunk_voters[chunk_id] = voters
 
@@ -1471,6 +1536,23 @@ class BatchSummarizationRunner:
                 router=router,
             )
 
+            # Voter-count regression guard — see B-019/B-020. A shortfall
+            # almost always means the router classified voters as UNUSABLE
+            # or a batch job failed silently. Emit a WARNING per occurrence
+            # so the next regression surfaces immediately.
+            expected_voter_count = (
+                len(self._l1) if level == "l1"
+                else len(self._l2) if level == "l2"
+                else 1  # l3 single-voter by design
+            )
+            if len(voters) < expected_voter_count:
+                logger.warning(
+                    "[%s] cascade chunk %s %s ran with voter_count=%d expected=%d "
+                    "— %d voter(s) missing (UNUSABLE? failed batch job? router strip?)",
+                    pmcid, chunk_id, level.upper(),
+                    len(voters), expected_voter_count,
+                    expected_voter_count - len(voters),
+                )
             try:
                 cascade_log.record(make_decision_record(
                     outcome,

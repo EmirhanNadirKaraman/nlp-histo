@@ -37,7 +37,6 @@ from pipeline.stages.pdf_text_extraction.config import (
 from pipeline.stages.pdf_text_extraction.runner import PipelineRunner
 from pipeline.stages.pdf_text_extraction.batch import ParallelBatchRunner
 from pipeline.stages.pdf_text_extraction.blacklist import BlacklistManager
-from pipeline.stages.pdf_text_extraction.resources import ModelRegistry
 
 __all__ = [
     # Config
@@ -58,5 +57,4 @@ __all__ = [
     "PipelineRunner",
     "ParallelBatchRunner",
     "BlacklistManager",
-    "ModelRegistry",
 ]

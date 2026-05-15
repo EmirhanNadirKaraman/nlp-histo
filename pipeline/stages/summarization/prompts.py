@@ -56,18 +56,29 @@ subject_entity
   The entity being described, tested, or associated. This is the left-hand side of the relation.
   Can be: a lesion type, tumour entity, cell population, biomarker, protein, gene, or organism.
   Examples: "MGA", "CD30", "BCL2", "tumour cells", "Granuloma annulare", "Ki-67".
-  Output null only when no subject can be identified.
+  STRONGLY PREFER a non-null value. If the subject is implicit, copy the most
+  specific noun phrase from the claim or surrounding sentence. Only emit null
+  if the claim genuinely has no identifiable subject after best effort — null
+  causes the finding to be dropped at the GROUP stage.
 
 outcome_entity
   The feature, endpoint, expression, or attribute that is being observed or predicted. This is the right-hand side of the relation.
   Can be: a histological feature, clinical endpoint, expression marker, response measure, or demographic attribute.
   Examples: "mucin", "necrosis", "multinucleated giant cells", "overall survival", "CD30 expression", "R-CHOP response", "female predominance".
-  Output null only when no outcome can be identified — not as a default.
+  STRONGLY PREFER a non-null value. If the outcome is implicit, copy the most
+  specific noun phrase from the claim. Only emit null if the claim genuinely
+  has no identifiable outcome after best effort — null causes the finding to
+  be dropped at the GROUP stage.
 
 relation_type
   The type of relation. Must be EXACTLY one of:
     has_feature | expression | prognostic | comparative | demographic | treatment_response | unclear
   NEVER output null. Use "unclear" only when the relation genuinely does not fit any category.
+
+  Invalid relation_type values (these are CATEGORY names, not predicates):
+    "prognosis", "treatment", "staging", "molecular_genetics", "IHC", "morphology"
+  Pick the actual predicate that connects subject -> outcome instead
+  (e.g. "prognostic", "treatment_response", "expression", "has_feature").
 
   has_feature        : Entity exhibits, shows, or has a histological or morphological feature.
                        e.g. "idiopathic GA exhibits mucin", "MGA shows no particular pattern",
@@ -146,6 +157,49 @@ Field mapping examples:
   Treatment (treatment_response):
     "R-CHOP achieves complete remission in 75% of patients"
       → relation_type: treatment_response, direction: positive
+
+  Staging (has_feature for descriptive stage, prognostic when stage drives outcome):
+    "Stage III disease shows extranodal involvement"
+      → relation_type: has_feature, direction: positive
+    "Advanced stage associated with worse overall survival"
+      → relation_type: prognostic, direction: negative
+    NOTE: never emit relation_type="staging" — "staging" is a category, not a relation type.
+
+  Molecular genetics (expression for variant calls, has_feature for structural lesions):
+    "MYD88 L265P mutation present in 90% of cases"
+      → relation_type: expression, direction: positive
+    "Translocation t(11;14) characteristic of mantle cell lymphoma"
+      → relation_type: has_feature, direction: positive
+    "MYD88 L265P mutation associated with inferior overall survival"
+      → category: molecular_genetics, relation_type: prognostic, direction: negative
+      (category stays molecular_genetics because the evidence is genetic, but
+       relation_type is prognostic because the predicate links mutation to survival.)
+    NOTE: never emit relation_type="molecular_genetics" — "molecular_genetics" is a category.
+
+CRITICAL — `category` and `relation_type` are TWO INDEPENDENT axes, not paired labels.
+
+  `category` answers WHAT DOMAIN this evidence belongs to (morphology, IHC,
+  molecular_genetics, staging, treatment, prognosis, demographic).
+  `relation_type` answers WHAT PREDICATE connects subject and outcome
+  (has_feature, expression, prognostic, comparative, demographic,
+  treatment_response, unclear).
+
+  The same biomarker can appear in two findings with different category AND
+  different relation_type — pick each axis on its own merits:
+
+    "BCL2 stained 80% of cells"
+      → category: IHC, relation_type: expression, direction: positive
+    "BCL2-high cases had worse overall survival"
+      → category: prognosis, relation_type: prognostic, direction: negative
+    "Stage III disease had reduced 5-year OS"
+      → category: prognosis, relation_type: prognostic, direction: negative
+      (NOT category: staging — the claim is about prognosis driven by stage,
+       not a descriptive feature of stage III.)
+    "MYD88 mutation present in 90% of LBCL"
+      → category: molecular_genetics, relation_type: expression, direction: positive
+      (NOT relation_type: molecular_genetics — that is a category, not a predicate.)
+
+  Never copy the value of one field into the other. They are not synonyms.
 
 scope            : A structured object with the following sub-fields (all nullable):
   disease_subtype   : Specific disease subtype in scope, e.g. "GCB-DLBCL", "non-GCB DLBCL". null if not mentioned.
@@ -345,9 +399,20 @@ Do these rules contradict each other?"""
 # ── Chain factories ────────────────────────────────────────────────────────────
 
 def build_map_chain(llm):
-    """Return a runnable chain: prompt | llm (structured AuditableSummary)."""
+    """Return a runnable chain: ``prompt | llm (structured AuditableSummary)``.
+
+    Uses ``include_raw=True`` so the invoke result is a dict
+    ``{"raw": AIMessage, "parsed": AuditableSummary, "parsing_error": ...}``.
+    ``MapStage`` unwraps it via ``unwrap_structured_output`` and records
+    per-call ``usage_metadata`` straight from the raw message. Without
+    ``include_raw=True`` the AIMessage (and its token counts) is hidden
+    inside the structured-output wrapper and the cost report comes out
+    as $0.00. See the InvocationUsage docstring for the full rationale.
+    """
     prompt = ChatPromptTemplate([("system", _MAP_SYSTEM), ("user", _MAP_USER)])
-    return prompt | llm.with_structured_output(AuditableSummary, strict=True)
+    return prompt | llm.with_structured_output(
+        AuditableSummary, strict=True, include_raw=True,
+    )
 
 
 def build_reduce_chain(llm):

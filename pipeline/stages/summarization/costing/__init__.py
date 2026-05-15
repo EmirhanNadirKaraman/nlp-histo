@@ -12,12 +12,20 @@ Public surface
 from .models import LLMUsageRecord, append_records_jsonl, load_records
 from .pricing import PriceBook
 from .collector import UsageCollector, UsageCallbackHandler
+from .invocation_usage import (
+    InvocationUsage,
+    extract_usage_from_message,
+    unwrap_structured_output,
+)
 from .report import write_cost_reports, build_report_from_records
 
 __all__ = [
     "LLMUsageRecord",
     "UsageCollector",
     "UsageCallbackHandler",
+    "InvocationUsage",
+    "extract_usage_from_message",
+    "unwrap_structured_output",
     "PriceBook",
     "write_cost_reports",
     "build_report_from_records",

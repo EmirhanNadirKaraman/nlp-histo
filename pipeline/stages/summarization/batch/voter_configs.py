@@ -7,14 +7,15 @@ from here so the two are always in sync.
 
 Profiles
 --------
-Pick one with ``get_profile(name)`` (or set ``NLP_HISTO_PROFILE``).
+Pick one with ``get_profile(name)`` (or set ``NLP_HISTO_PROFILE``). There is
+no implicit default — callers must select a profile explicitly so accidental
+runs cannot silently burn an unintended cascade.
 
   cheap   — 2-tier smoke cascade across the OpenAI + Gemini providers.
             L1: Gemini-Flash-Lite, GPT-4o-mini, GPT-4.1-nano (no Claude voter).
             L2 and L3 are both GPT-4.1-mini: L3 is set equal to L2 so the
             structural 3-tier ``CascadeProfile`` dataclass still works, but
-            the cascade is effectively 2 distinct tiers. **DEFAULT when no
-            profile is explicitly selected** so accidental runs fail safe.
+            the cascade is effectively 2 distinct tiers.
   real    — 3-tier production cascade. L1: Gemini-Flash-Lite, GPT-4o-mini,
             GPT-4.1-nano (cheapest tier; no Claude voter at L1). L2:
             Gemini-Flash, GPT-4.1-mini, Claude-Haiku. L3: Claude-Sonnet
@@ -39,11 +40,14 @@ OPENAI_L2 = "gpt-4.1-mini"
 CLAUDE_L2 = "claude-haiku-4-5-20251001"   # no cheap step between Haiku and Sonnet
 
 # L3 — escalation
-CLAUDE_L3 = "claude-sonnet-4-6-20251001"
+# Sonnet 4.6 has no datestamped alias; only the bare ID resolves (verified
+# 2026-05-14 — datestamped form returns 404 from Anthropic). Haiku 4.5 accepts
+# both, kept datestamped for pin-stability.
+CLAUDE_L3 = "claude-sonnet-4-6"
 
 # Aliases kept for back-compat with tests / scripts that import these directly.
 CLAUDE_HAIKU  = "claude-haiku-4-5-20251001"
-CLAUDE_SONNET = "claude-sonnet-4-6-20251001"
+CLAUDE_SONNET = "claude-sonnet-4-6"
 
 
 # ── Voter list factories (back-compat for run_paper.py) ───────────────────────
@@ -134,13 +138,41 @@ def _make_real_profile() -> CascadeProfile:
     return CascadeProfile(name="real", l1_voters=l1, l2_voters=l2, l3_voter=l3)
 
 
-# Default fallback. Deliberately the cheapest profile so an unconfigured run
-# can never burn expensive models by accident.
-DEFAULT_PROFILE_NAME: str = "cheap"
+def _make_default_profile() -> CascadeProfile:
+    """3-provider heterogeneous cascade — single source of truth for what
+    sync runs used to hardcode in ``scripts/run_paper.py``.
+
+    L1: Gemini-Flash-Lite (gemini), GPT-4o-mini (openai), Claude-Haiku-4.5
+        (anthropic). temperature=0.1 across the board for sampling
+        diversity.
+    L2: Gemini-Flash (gemini), GPT-4.1-mini (openai), Claude-Haiku-4.5
+        (anthropic). temperature=0.1. Note: L2 Haiku stays at 0.1 so
+        ``MapStage``'s in-run voter cache treats it as the same call
+        as L1 Haiku for that chunk (avoids paying twice).
+    L3: Claude-Sonnet-4.6. temperature=0.0 (deterministic final escalation).
+
+    Different from ``real``: ``real`` has no Claude voter at L1.  Different
+    from ``cheap``: ``cheap`` has no Claude voters at any tier.
+    """
+    from .models import VoterBatchConfig
+    l1 = [
+        VoterBatchConfig(GEMINI_L1, provider="gemini",   temperature=0.1),
+        VoterBatchConfig(OPENAI_L1, provider="openai",   temperature=0.1),
+        VoterBatchConfig(CLAUDE_L1, provider="claude",   temperature=0.1),
+    ]
+    l2 = [
+        VoterBatchConfig(GEMINI_L2, provider="gemini",   temperature=0.1),
+        VoterBatchConfig(OPENAI_L2, provider="openai",   temperature=0.1),
+        VoterBatchConfig(CLAUDE_L2, provider="claude",   temperature=0.1),
+    ]
+    l3 = VoterBatchConfig(CLAUDE_L3, provider="claude",  temperature=0.0)
+    return CascadeProfile(name="default", l1_voters=l1, l2_voters=l2, l3_voter=l3)
+
 
 _PROFILE_BUILDERS = {
-    "cheap": _make_cheap_profile,
-    "real":  _make_real_profile,
+    "cheap":   _make_cheap_profile,
+    "real":    _make_real_profile,
+    "default": _make_default_profile,
 }
 
 
@@ -151,11 +183,18 @@ def list_profiles() -> list[str]:
 def get_profile(name: str | None = None) -> CascadeProfile:
     """Resolve a cascade profile by name.
 
-    Resolution order: explicit ``name`` arg → ``$NLP_HISTO_PROFILE`` →
-    ``DEFAULT_PROFILE_NAME`` ("cheap"). Raises ``ValueError`` for unknown
-    names so typos surface immediately rather than silently picking the default.
+    Resolution order: explicit ``name`` arg → ``$NLP_HISTO_PROFILE``. There is
+    no implicit fallback — if neither is set, ``ValueError`` is raised so
+    accidental runs cannot silently burn an unintended cascade. Unknown names
+    also raise so typos surface immediately.
     """
-    resolved = name or os.environ.get("NLP_HISTO_PROFILE") or DEFAULT_PROFILE_NAME
+    resolved = name or os.environ.get("NLP_HISTO_PROFILE")
+    if not resolved:
+        raise ValueError(
+            "No cascade profile selected. Pass an explicit name to "
+            "get_profile() or set $NLP_HISTO_PROFILE. "
+            f"Available: {sorted(_PROFILE_BUILDERS)}"
+        )
     if resolved not in _PROFILE_BUILDERS:
         raise ValueError(
             f"Unknown cascade profile {resolved!r}. "

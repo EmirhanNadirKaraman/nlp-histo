@@ -320,6 +320,19 @@ class SummarizationRunner:
         """Escalation counts from the most recent process() call's MAP stage."""
         return self._map.last_escalation_counts
 
+    @property
+    def last_map_invocation_usage_records(self) -> list:
+        """InvocationUsage records from the most recent process() call's MAP stage.
+
+        One record per LLM invocation (voter calls + L3 escalations).  Cache
+        hits add no record.  Reset at the start of every ``process()`` call.
+
+        Used by ``scripts/run_paper.py`` to build the cost report — these
+        records are the source of truth, replacing the LangChain callback
+        path that ``with_structured_output`` strips.
+        """
+        return self._map.invocation_usage_records()
+
     def process(
         self,
         file_data: dict,
@@ -723,6 +736,21 @@ class SummarizationRunner:
 
             self._write_cost_artifacts(usage_collector, writer, run_id, pmcid)
 
+            # Issue G — post-run row-count audit. Catches the partial-
+            # persistence failure mode (one _persist_* swallowed an
+            # exception, others wrote rows → tables out of sync). Never
+            # raises; emits WARNING if any table is below the expected
+            # row count for this paper.
+            if self._db is not None:
+                try:
+                    from .health_checks import assert_persistence_row_counts  # noqa: PLC0415
+                    assert_persistence_row_counts(self._db, pmcid)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[%s] Post-run row-count audit raised — ignored: %s",
+                        pmcid, exc,
+                    )
+
             if writer is not None:
                 writer.finalize("completed")
 
@@ -749,6 +777,34 @@ class SummarizationRunner:
                 writer.finalize("failed", error=str(exc))
             return {"status": "error", "run_id": run_id, "pmcid": pmcid, "error": str(exc)}
         finally:
+            # Flush MAP/REDUCE/RULE in-memory cache to disk on every exit path
+            # (success, error, or KeyboardInterrupt) so partially-completed
+            # paper runs don't re-pay for chunks already scored. Safe to call
+            # even on the success path — _save_result already returned and
+            # this is a second write to a separate file.
+            try:
+                self._cache.save()
+            except Exception as exc:
+                logger.warning("[%s] cache flush in finally: failed (non-fatal): %s", pmcid, exc)
+            # B-009 — drop per-paper state from the runner-level dicts after
+            # the result has been materialised.  Without this, process_batch
+            # accumulates every paper's NormalFindings, FindingGroups,
+            # CanonicalRules, Relations, raw NLI pairs, skipped pairs, and
+            # FinalRules on `self` for the lifetime of the runner — memory
+            # grows O(papers × avg eligible pairs).  Pop instead of clear
+            # so a re-entrant call for the same pmcid (force_rerun) starts
+            # from a clean slate.
+            for store in (
+                self._scored_map_findings,
+                self._normal_findings,
+                self._finding_groups,
+                self._canonical_rules,
+                self._relations,
+                self._relate_raw_pairs,
+                self._relate_skipped_pairs,
+                self._final_rules,
+            ):
+                store.pop(pmcid, None)
             # Restore NLP_HISTO_LOG_DIR — never leave global env state changed.
             if writer is not None:
                 if prev_log_dir is None:
@@ -768,7 +824,7 @@ class SummarizationRunner:
 
         n_ok = sum(1 for r in results if r["status"] == "success")
         n_err = sum(1 for r in results if r["status"] == "error")
-        n_skip = len(results) - n_ok - n_err
+        n_skip = sum(1 for r in results if r["status"] == "skipped")
         logger.info(
             "Batch complete: %d ok / %d skipped (cached) / %d errors",
             n_ok, n_skip, n_err,
@@ -1685,6 +1741,11 @@ class SummarizationRunner:
                 pmcid, stored_hash, current_hash,
             )
             return None
+        # Tag the returned dict so process_batch can distinguish cache hits
+        # ("skipped") from fresh runs ("success").  The on-disk JSON keeps
+        # whatever status was stamped at write time — this is an in-memory
+        # marker on the caller's copy only.
+        data["status"] = "skipped"
         return data
 
     def _save_result(self, result: dict) -> None:

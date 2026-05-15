@@ -231,7 +231,6 @@ The production pipeline that turns one PDF into rows in the database. Eight step
 | `config.py` | All sub-configs (`PathConfig`, `DoclingConfig`, `TATRConfig`, `MaskingConfig`, …) + `PipelineConfig`. |
 | `batch.py` | `ParallelBatchRunner` — `ThreadPoolExecutor` with per-thread `PipelineRunner` instances. |
 | `blacklist.py` | `BlacklistManager` — thread-safe JSON-backed skip list. |
-| `resources.py` | `ModelRegistry` — lazy loaders for Docling/TATR/scispaCy. |
 | `__init__.py` | Public exports (`PipelineRunner`, `PipelineConfig`, …). |
 | `models/` | DTOs: `BoundingBox`, `LayoutElement`, `LayoutResult`, `HierarchicalRow`, `ScoredNode`. |
 | `interfaces/` | Protocols for each replaceable stage. |
@@ -245,8 +244,7 @@ The production pipeline that turns one PDF into rows in the database. Eight step
 - **`config.py`** — Dataclass-based hierarchical configuration. Sub-configs: `PathConfig` (output dirs), `DoclingConfig` / `TATRConfig` (model knobs), `MaskingConfig` / `FilteringConfig` / `CroppingConfig` / `TextAssemblyConfig` / `VisualizationConfig` / `DatabaseConfig` / `RuntimeConfig`. Enums: `TableDetectorType` (`TATR`, `DOCLING`, `HYBRID`, `VLM`), `BaselineMode` (`MASKED`, `UNMASKED`, `BOTH`), `OcrEngine`. `PipelineConfig.prepare()` validates and creates output directories.
 - **`batch.py`** — `ParallelBatchRunner` builds one `PipelineRunner` per worker thread (Docling models are not thread-safe). Manages a shared `BlacklistManager`, locks for stats collection. Default `max_workers = cpu_count // 2`.
 - **`blacklist.py`** — `BlacklistManager` is a thread-safe set persisted to JSON. Used for "skip these PDFs" (failed) and "completed" lists.
-- **`resources.py`** — `ModelRegistry` lazily loads Docling, TATR (transformers), and scispaCy models. Avoids paying load cost when a stage is disabled.
-- **`__init__.py`** — Re-exports `PipelineRunner`, `PipelineConfig`, table-detector enums, etc., for clean imports.
+- **`__init__.py`** — Re-exports `PipelineRunner`, `PipelineConfig`, table-detector enums, etc., for clean imports. Each component lazy-loads its own ML model (Docling converter in `DoclingLayoutExtractor`, TATR in `TATRTableDetector`, scispaCy via `summarization/umls_resources.get_nlp()`); there is no shared model registry.
 
 ### `pipeline/stages/pdf_text_extraction/models/`
 

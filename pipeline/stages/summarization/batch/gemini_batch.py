@@ -36,6 +36,30 @@ class GeminiBatchProvider:
             )
         model = requests[0].model
 
+        # Strict-mode parity note (Issue D audit, 2026-05-15):
+        # OpenAI, Anthropic, Vertex Gemini, and Azure all pass `openai_tool`
+        # to their submit endpoint so the API enforces the AuditableSummary
+        # schema at generation time. The direct Gemini batch API
+        # (google.genai) supports `response_schema` / `response_json_schema`
+        # in GenerateContentConfig, but the OpenAI strict schema uses
+        # `anyOf: [X, null]` for nullable fields which Gemini's stricter
+        # validator historically rejects. We therefore submit with
+        # `response_mime_type='application/json'` only — the model returns
+        # JSON shape but format is not API-enforced. Downstream:
+        # `batch.dispatch.parse_result` runs Pydantic validation and logs
+        # any failure to `logs/bad_findings.jsonl` (per the 2026-05-15
+        # AuditableSummary parse-error logging fix), so malformed Gemini
+        # outputs ARE observable — they just don't get rejected at the
+        # API boundary. If yield disparity vs OpenAI/Anthropic becomes
+        # material, revisit by stripping `anyOf` from the schema before
+        # passing it through.
+        logger.info(
+            "Gemini batch: submitting %d requests without API-side schema "
+            "enforcement (model=%s) — relying on Pydantic validation in "
+            "parse_result(). See Issue D audit for details.",
+            len(requests), model,
+        )
+
         inline_requests = []
         custom_ids = []
         for req in requests:

@@ -168,13 +168,17 @@ class TestMapStageRoutingCollector:
         mock_voter_llm = MagicMock()
         mock_escalation_llm = MagicMock()
 
-        voter_summary = _make_summary("C1")
-        escalation_summary = _make_summary("C1")
+        # The MapStage's chunk_id round-trip check (added 2026-05-15) raises
+        # ValueError when a voter returns a summary whose chunk_id doesn't
+        # match the expected one. Return a fresh summary per invocation that
+        # echoes whatever chunk_id the caller passed in `inp`.
+        def _voter_side_effect(inp, **_kwargs):
+            return _make_summary(inp.get("chunk_id", "C1"))
 
         mock_voter_chain = MagicMock()
-        mock_voter_chain.invoke.return_value = voter_summary
+        mock_voter_chain.invoke.side_effect = _voter_side_effect
         mock_escalation_chain = MagicMock()
-        mock_escalation_chain.invoke.return_value = escalation_summary
+        mock_escalation_chain.invoke.side_effect = _voter_side_effect
 
         mock_checker = MagicMock(spec=AgreementChecker)
         mock_checker.compute.return_value = ScoreBundle(

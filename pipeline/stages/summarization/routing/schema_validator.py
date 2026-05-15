@@ -19,8 +19,12 @@ from pipeline.stages.summarization.models import AuditableSummary, Finding
 
 from .models import FindingValidation, ReasonCode
 
-# Citation IDs in Finding.evidence arrive without brackets: "S1|PMC123456|789"
-_CITATION_RE = re.compile(r"^S\d+\|PMC\d+\|\d+$")
+# Citation IDs in Finding.evidence arrive without brackets: "S1|PMC123456|789".
+# The PMC token tolerates word-chars + hyphens so document-id suffixes such as
+# `PMC10100421_HIS-82-393` or `PMC7150310_main` (used as opaque doc keys in the
+# DB) are accepted. Cross-document equality is enforced separately in
+# provenance_validator.py against the expected pmcid.
+_CITATION_RE = re.compile(r"^S\d+\|PMC[\w\-]+\|\d+$")
 
 _VALID_CATEGORIES = frozenset([
     "morphology",

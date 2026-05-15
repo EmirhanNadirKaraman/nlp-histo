@@ -79,6 +79,28 @@ def _make_token_callback(model_id: str, store: dict, lock: threading.Lock):
     return _CB()
 
 
+def _open_db_connection(caller_label: str):
+    """Return a DB connection or ``None`` if Postgres is unreachable.
+
+    Both the sync runner and the batch runner need a live DB connection to
+    persist per-paper ``sum_*`` rows AND to trigger
+    ``_corpus_relate_incremental`` cross-paper RELATE.  Without it, runs
+    succeed but write only to ``out/summaries/summaries/*.json`` — no DB
+    rows, no cross-paper edges.  Failure is non-fatal so smoke tests still
+    work on machines without a configured Postgres.
+    """
+    try:
+        from database import get_db_connection  # noqa: PLC0415
+        return get_db_connection()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "%s: DB connection unavailable (%s) — corpus_relate "
+            "and per-paper sum_* persistence will be skipped.",
+            caller_label, exc,
+        )
+        return None
+
+
 def build_runner(
     trace: bool,
     *,
@@ -88,16 +110,16 @@ def build_runner(
 ):
     """Return (runner, token_usage) where token_usage is {level: {model: {input, output}}}.
 
-    When ``profile_name`` is given, voters are built from
-    :func:`get_profile` instead of the hardcoded heterogeneous default.
-    ``artifact_root`` enables filesystem persistence (no-op when None).
+    The cascade is resolved entirely from
+    ``pipeline/stages/summarization/batch/voter_configs.py`` via
+    :func:`get_profile`. ``profile_name`` must be set (either directly or via
+    ``$NLP_HISTO_PROFILE``); there is no implicit default — see
+    :func:`get_profile`. ``artifact_root`` enables filesystem persistence
+    (no-op when None).
     """
     from pipeline.stages.summarization import SummarizationRunner
     from pipeline.stages.summarization.agreement.providers import OpenAIEmbedder
-    from pipeline.stages.summarization.batch.voter_configs import (
-        CLAUDE_L1, CLAUDE_L2, CLAUDE_L3, GEMINI_L1, GEMINI_L2, OPENAI_L1, OPENAI_L2,
-        get_profile,
-    )
+    from pipeline.stages.summarization.batch.voter_configs import get_profile
     from pipeline.stages.summarization.config import SummarizationConfig
     from pipeline.stages.summarization.llm_providers import (
         anthropic_direct_chat,
@@ -121,48 +143,28 @@ def build_runner(
         "gemini":    gemini_direct_chat,
     }
     _PROVIDER_SPEC = {
-        "claude": "anthropic", "anthropic": "anthropic",
-        "openai": "openai", "gemini": "gemini",
+        "claude":    "anthropic", "anthropic": "anthropic",
+        "openai":    "openai",    "gemini":    "gemini",
     }
 
-    if profile_name is not None:
-        prof = get_profile(profile_name)
+    prof = get_profile(profile_name)
 
-        def _build(vc, store):
-            factory = _PROVIDER_FACTORY[vc.provider]
-            llm = factory(vc.model, temperature=vc.temperature)
-            return with_cb(llm, vc.model, store)
+    def _build(vc, store):
+        factory = _PROVIDER_FACTORY[vc.provider]
+        llm = factory(vc.model, temperature=vc.temperature)
+        return with_cb(llm, vc.model, store)
 
-        voter_llms        = [_build(v, l1_store) for v in prof.l1_voters]
-        level2_voter_llms = [_build(v, l2_store) for v in prof.l2_voters]
-        escalation_llm    = _build(prof.l3_voter, l3_store)
-        voter_specs        = [(_PROVIDER_SPEC[v.provider], v.model) for v in prof.l1_voters]
-        level2_voter_specs = [(_PROVIDER_SPEC[v.provider], v.model) for v in prof.l2_voters]
-        escalation_spec    = (_PROVIDER_SPEC[prof.l3_voter.provider], prof.l3_voter.model)
-        active_profile_name = prof.name
-    else:
-        voter_llms = [                                        # Level 1 — cheapest
-            with_cb(gemini_direct_chat(GEMINI_L1,    temperature=0.1), GEMINI_L1, l1_store),
-            with_cb(openai_direct_chat(OPENAI_L1,    temperature=0.1), OPENAI_L1, l1_store),
-            with_cb(anthropic_direct_chat(CLAUDE_L1, temperature=0.1), CLAUDE_L1, l1_store),
-        ]
-        level2_voter_llms = [                                # Level 2 — mid-tier
-            with_cb(gemini_direct_chat(GEMINI_L2,    temperature=0.1), GEMINI_L2, l2_store),
-            with_cb(openai_direct_chat(OPENAI_L2,    temperature=0.1), OPENAI_L2, l2_store),
-            # L2 Haiku temp held at 0.1 to match L1 Haiku so MapStage's in-run
-            # voter cache reuses the L1 result instead of calling Haiku twice
-            # for the same chunk.
-            with_cb(anthropic_direct_chat(CLAUDE_L2, temperature=0.1), CLAUDE_L2, l2_store),
-        ]
-        escalation_llm = with_cb(                           # Level 3
-            anthropic_direct_chat(CLAUDE_L3, temperature=0.0), CLAUDE_L3, l3_store
-        )
-        voter_specs        = [("gemini", GEMINI_L1), ("openai", OPENAI_L1), ("anthropic", CLAUDE_L1)]
-        level2_voter_specs = [("gemini", GEMINI_L2), ("openai", OPENAI_L2), ("anthropic", CLAUDE_L2)]
-        escalation_spec    = ("anthropic", CLAUDE_L3)
-        active_profile_name = "default"
+    voter_llms          = [_build(v, l1_store) for v in prof.l1_voters]
+    level2_voter_llms   = [_build(v, l2_store) for v in prof.l2_voters]
+    escalation_llm      = _build(prof.l3_voter, l3_store)
+    voter_specs         = [(_PROVIDER_SPEC[v.provider], v.model) for v in prof.l1_voters]
+    level2_voter_specs  = [(_PROVIDER_SPEC[v.provider], v.model) for v in prof.l2_voters]
+    escalation_spec     = (_PROVIDER_SPEC[prof.l3_voter.provider], prof.l3_voter.model)
+    active_profile_name = prof.name
 
     token_usage = {"l1": l1_store, "l2": l2_store, "l3": l3_store}
+
+    db_conn = _open_db_connection("build_runner")
 
     runner = SummarizationRunner(
         voter_llms=voter_llms,
@@ -178,6 +180,7 @@ def build_runner(
         cascade_profile=active_profile_name,
         artifact_root=artifact_root,
         artifact_run_id=artifact_run_id,
+        db=db_conn,
     )
     return runner, token_usage
 
@@ -345,12 +348,27 @@ def main():
              "UMLS KB — useful on memory-constrained machines."
     )
     parser.add_argument(
-        "--profile", default=None, metavar="NAME",
-        help="Cascade profile: smoke_haiku (default — Haiku-only smoke) | "
-             "dev_sonnet (Haiku→Sonnet→Sonnet, dev quality) | "
-             "final_opus (Haiku→Sonnet→Opus, calibration only — never auto) | "
-             "default (legacy heterogeneous Gemini+OpenAI+Claude). "
-             "Falls back to $NLP_HISTO_PROFILE, then smoke_haiku.",
+        "--health-check", action="store_true",
+        help="Run startup health checks before any LLM call: NLI model load, "
+             "UMLS singleton, embedding provider, and (if --no-db unset) a "
+             "trivial DB query. Logs an aggregated OK/FAIL summary. Adds "
+             "~30-60s on first run while the NLI model downloads. Useful to "
+             "diagnose silent fallbacks (Issue G) before paying for a "
+             "calibration cascade."
+    )
+    parser.add_argument(
+        "--profile", required=True, metavar="NAME",
+        choices=["cheap", "real", "default"],
+        help="Cascade profile (required — no implicit default to prevent "
+             "accidental spend). Registered in "
+             "pipeline/stages/summarization/batch/voter_configs.py:\n"
+             "  cheap   — Gemini + OpenAI only, no Claude. Smoke/dev runs.\n"
+             "  real    — Gemini-Flash-Lite/GPT-4o-mini/GPT-4.1-nano at L1; "
+             "Gemini-Flash + GPT-4.1-mini + Claude-Haiku at L2; Claude-Sonnet "
+             "at L3. Production-quality eval runs.\n"
+             "  default — heterogeneous: Gemini-Flash-Lite + GPT-4o-mini + "
+             "Claude-Haiku at L1; mid-tier mirror at L2; Claude-Sonnet at L3. "
+             "Same shape as the historical hardcoded sync default.",
     )
     args = parser.parse_args()
 
@@ -368,6 +386,24 @@ def main():
     if args.skip_umls_enrichment:
         _os.environ["NLP_HISTO_SKIP_UMLS_ENRICHMENT"] = "1"
         logger.info("UMLS enrichment (post-CANONICALIZE) skipped via --skip-umls-enrichment")
+
+    if args.health_check:
+        # Run BEFORE any LLM call so operators see component-level health
+        # before paying for a cascade. Skipped by default to keep cheap
+        # smoke runs lightweight.
+        from pipeline.stages.summarization.health_checks import run_health_checks
+        # DB probe needs a real connection; reuse the run-side helper.
+        try:
+            db_for_health = _open_db_connection("health_check") if "_open_db_connection" in globals() else None
+        except Exception:  # noqa: BLE001
+            db_for_health = None
+        results = run_health_checks(db=db_for_health)
+        if any(not r.ok for r in results):
+            logger.warning(
+                "Health checks reported %d failure(s) — proceeding anyway. "
+                "Inspect the WARNING block above to decide whether to abort.",
+                sum(1 for r in results if not r.ok),
+            )
 
     if args.from_selection:
         pmcids = _load_selection_yaml(Path(args.from_selection))
@@ -484,7 +520,7 @@ _MODEL_PRICE: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5-20251001":  (0.80,   4.00),
     "gemini-2.5-flash":           (0.15,   0.60),
     "gpt-4.1-mini":               (0.20,   0.80),
-    "claude-sonnet-4-6-20251001": (3.00,  15.00),
+    "claude-sonnet-4-6":          (3.00,  15.00),
 }
 
 
@@ -518,7 +554,7 @@ def _baseline_cost(usage: dict) -> float | None:
     n_l1_voters = len(make_l1_voters())
     if not usage.get("l1"):
         return None
-    l3_model = next(iter(usage.get("l3", {}).keys()), "claude-sonnet-4-6-20251001")
+    l3_model = next(iter(usage.get("l3", {}).keys()), "claude-sonnet-4-6")
     l3_price = _MODEL_PRICE.get(l3_model)
     if l3_price is None:
         return None
@@ -565,11 +601,44 @@ def _escalation_stats(pmcid: str, handle) -> dict:
     }
 
 
+def _token_usage_from_records(records) -> dict:
+    """Aggregate ``InvocationUsage`` records into the
+    ``{level: {model: {input, output}}}`` shape consumed by ``_level_cost``.
+
+    Levels are lowercased ("l1" / "l2" / "l3") to match the historical
+    callback path's keys.  Empty input → empty dict.
+    """
+    usage: dict[str, dict[str, dict[str, int]]] = {"l1": {}, "l2": {}, "l3": {}}
+    missing_count = 0
+    for r in records or []:
+        level = (r.level or "").lower()
+        if level not in usage:
+            usage.setdefault(level, {})
+        entry = usage[level].setdefault(r.model, {"input": 0, "output": 0})
+        entry["input"] += int(r.input_tokens or 0)
+        entry["output"] += int(r.output_tokens or 0)
+        if r.usage_source == "missing":
+            missing_count += 1
+    if missing_count:
+        logger.warning(
+            "Cost report: %d MAP invocations had no usage_metadata "
+            "(usage_source='missing'). Cost is under-counted for those calls.",
+            missing_count,
+        )
+    return usage
+
+
 def _escalation_stats_sync(pmcid: str, token_usage: dict, runner) -> dict:
     """Compute cost stats for a sync (real-time) pipeline run.
 
     token_usage: {level: {model_id: {input, output}}} — same schema as batch.
-    runner: SummarizationRunner — used to read last_map_escalation_counts.
+        Kept as the fallback signal.  When the MAP stage emitted
+        ``InvocationUsage`` records (the case in production since the
+        ``include_raw=True`` change), those records are preferred because
+        ``with_structured_output(...)`` strips LangChain callbacks and the
+        callback-derived ``token_usage`` comes back empty.
+    runner: SummarizationRunner — used to read last_map_escalation_counts
+        and last_map_invocation_usage_records.
     """
     ec = runner.last_map_escalation_counts
     total     = ec.get("total", 0)
@@ -580,6 +649,17 @@ def _escalation_stats_sync(pmcid: str, token_usage: dict, runner) -> dict:
     l3_kept   = ec.get("l3_kept", 0)
     finalized = ec.get("finalized", 0)
     dropped   = ec.get("dropped", 0)
+
+    # Records-first: read directly from MapStage. Callback-derived
+    # token_usage is kept only as a fallback so older runners that don't
+    # populate records still produce *something*.
+    records = []
+    try:
+        records = runner.last_map_invocation_usage_records
+    except AttributeError:
+        records = []
+    if records:
+        token_usage = _token_usage_from_records(records)
 
     actual_cost = sum(_level_cost(token_usage, lvl) for lvl in ("l1", "l2", "l3"))
     baseline = _baseline_cost(token_usage)
@@ -713,6 +793,7 @@ def _run_all_batch(
         profile_name=profile_name,
         artifact_root=artifact_root,
         artifact_run_id=artifact_run_id,
+        db=_open_db_connection("build_batch_runner (multi)"),
     )
 
     # ── Phase 1: submit all papers in parallel ────────────────────────────────
@@ -764,19 +845,20 @@ def _run_all_batch(
         time.sleep(poll_interval)
 
     # ── Phase 3: finalize all ─────────────────────────────────────────────────
-    logger.info("All papers complete — finalising…")
-
-    def _finalize_one(pmcid: str) -> tuple[str, dict]:
-        return pmcid, runner.finalize(handles[pmcid])
+    # Sequential — finalize() is CPU/MPS-bound (NLI on a single device, UMLS
+    # lookups, DB writes); zero remote LLM calls.  Parallelising it serialises
+    # at the MPS device anyway while paying N× the model-load cost (each thread
+    # races _get_nli_pipe before the cache is populated → N copies of the NLI
+    # model load simultaneously, then N-1 are GC'd).  Phases 1 + 2 stay
+    # parallel because they are IO-bound (Anthropic/OpenAI batch APIs).
+    logger.info("All papers complete — finalising sequentially…")
 
     escalation_stats: list[dict] = []
     results: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=min(len(handles), _MAX_WORKERS)) as ex:
-        futures = {ex.submit(_finalize_one, p): p for p in handles}
-        for fut in as_completed(futures):
-            pmcid, result = fut.result()
-            escalation_stats.append(_escalation_stats(pmcid, handles[pmcid]))
-            results[pmcid] = result
+    for pmcid in handles:
+        result = runner.finalize(handles[pmcid])
+        escalation_stats.append(_escalation_stats(pmcid, handles[pmcid]))
+        results[pmcid] = result
 
     for pmcid in handles:
         result = results.get(pmcid, {})
@@ -809,6 +891,7 @@ def _run_batch(
         profile_name=profile_name,
         artifact_root=artifact_root,
         artifact_run_id=artifact_run_id,
+        db=_open_db_connection("build_batch_runner (single)"),
     )
 
     logger.info("Loading paper %s from database…", pmcid)

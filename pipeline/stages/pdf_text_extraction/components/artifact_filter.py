@@ -53,10 +53,15 @@ class ArtifactFilter:
         """
         nlp = self._nlp if self._config.apply_ner_filtering else None
         element_dicts = [el.to_dict() for el in elements]
+        # Identity map: object id → original LayoutElement.  filter_artifacts
+        # filters by reference (it never constructs new dicts), so id() of
+        # each kept dict matches an entry in this map regardless of any
+        # in-place mutation a future contributor might introduce.  Replaces
+        # the prior `dict in list` rebuild which was O(N²) and silently
+        # dropped elements the moment any kept dict was mutated.
+        dict_id_to_element = {id(d): el for d, el in zip(element_dicts, elements)}
         filtered_dicts = filter_artifacts(element_dicts, nlp=nlp)
-
-        # Rebuild LayoutElement objects preserving the original instances where possible
-        result = [el for i, el in enumerate(elements) if element_dicts[i] in filtered_dicts]
+        result = [dict_id_to_element[id(d)] for d in filtered_dicts]
         logger.debug(
             "ArtifactFilter: %d → %d elements (removed %d)",
             len(elements),

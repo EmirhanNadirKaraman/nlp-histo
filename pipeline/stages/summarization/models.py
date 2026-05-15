@@ -20,8 +20,8 @@ _log = logging.getLogger(__name__)
 # Bump these whenever the MAP output schema or prompt changes in a
 # behaviour-affecting way. They are included in cache keys / run metadata so
 # stale outputs don't collide with new ones.
-MAP_SCHEMA_VERSION: str = "map_v1_explicit_direction"
-MAP_PROMPT_VERSION: str = "map_prompt_v2_singular_demographic"
+MAP_SCHEMA_VERSION: str = "map_v6_cross_field_bleed_aliases"
+MAP_PROMPT_VERSION: str = "map_prompt_v4_relation_type_anti_pattern"
 MAP_STAGE_NAME:     str = "map"
 
 
@@ -159,8 +159,64 @@ class FindingScope(BaseModel):
 
 # ── MAP output ─────────────────────────────────────────────────────────────────
 
+_CATEGORY_VALID: tuple[str, ...] = (
+    "morphology", "IHC", "molecular_genetics", "staging",
+    "treatment", "prognosis", "demographic",
+)
+# Case-insensitive lookup for category repair (e.g. "Demographic" → "demographic",
+# "ihc" → "IHC"). Only `IHC` differs from its lowercase form, but LLMs emit
+# title-case and uppercase variants for every label.
+_CATEGORY_CANONICAL_BY_LOWER: dict[str, str] = {c.lower(): c for c in _CATEGORY_VALID}
+
 _CATEGORY_ALIASES: dict[str, str] = {
     "demographics": "demographic",  # legacy LLM alias from pre-alignment prompts
+}
+
+# `category` and `relation_type` are orthogonal axes, but LLMs frequently
+# bleed a category-name into relation_type ("prognosis", "molecular_genetics",
+# "IHC", "morphology"). Alias-repair recovers the finding rather than coercing
+# to "unclear" (which would drop it at GROUP).
+#
+# Keys are lowercase; case-folded raw values match via the case-folded branch
+# of `_coerce_invalid_relation_type`.
+#
+# "staging" is intentionally NOT aliased: descriptive (has_feature) vs
+# outcome-driven (prognostic) split needs claim context. Falls through to
+# "unclear" with reason="cross_field_bleed" so loss stays observable.
+_RELATION_TYPE_ALIASES: dict[str, str] = {
+    "prognosis":          "prognostic",
+    "treatment":          "treatment_response",
+    "morphology":         "has_feature",
+    "ihc":                "expression",
+    "molecular_genetics": "expression",
+}
+
+# Lowercase set of category names used to detect cross-field bleed during
+# relation_type coercion. Drives the `reason="cross_field_bleed"` log so we
+# can count exactly how many findings are lost (or recovered) due to this bug.
+_CATEGORY_NAMES_LOWER: frozenset[str] = frozenset(c.lower() for c in _CATEGORY_VALID)
+
+# Case-insensitive lookup for valid confidence literals.
+_CONFIDENCE_VALID: tuple[str, ...] = ("high", "medium", "low")
+_CONFIDENCE_LOWER_SET: frozenset[str] = frozenset(_CONFIDENCE_VALID)
+
+# LLMs reach for synonyms outside the {high, medium, low} vocabulary,
+# especially "moderate" (English-ese for medium) and "very high". Without an
+# alias map these silently drop the whole Finding via Literal validation.
+# Keys are lowercased so the case-repair branch matches them after case-fold.
+_CONFIDENCE_ALIASES: dict[str, str] = {
+    "moderate":       "medium",
+    "uncertain":      "low",
+    "weak":           "low",
+    "strong":         "high",
+    "very_high":      "high",
+    "very high":      "high",
+    "v_high":         "high",
+    "vhigh":          "high",
+    "very_low":       "low",
+    "very low":       "low",
+    "v_low":          "low",
+    "vlow":           "low",
 }
 
 
@@ -255,16 +311,41 @@ class Finding(BaseModel):
     @field_validator("category", mode="before")
     @classmethod
     def _repair_category_alias(cls, v: object) -> object:
-        if isinstance(v, str) and v in _CATEGORY_ALIASES:
+        if not isinstance(v, str):
+            return v
+        # Exact valid value — pass through.
+        if v in _CATEGORY_VALID:
+            return v
+        # Alias map (e.g. "demographics" → "demographic").
+        if v in _CATEGORY_ALIASES:
             repaired = _CATEGORY_ALIASES[v]
             _log.warning("Repaired category alias %r → %r", v, repaired)
             log_enum_observation(
-                field_name="category",
-                raw_value=v,
-                valid_values=["morphology", "IHC", "molecular_genetics",
-                              "staging", "treatment", "prognosis", "demographic"],
-                coerced_value=repaired,
-                reason="alias_repair",
+                field_name="category", raw_value=v,
+                valid_values=list(_CATEGORY_VALID),
+                coerced_value=repaired, reason="alias_repair",
+            )
+            return repaired
+        # Case-insensitive match against valid values (e.g. "Demographic" →
+        # "demographic", "ihc" → "IHC").
+        lowered = v.lower()
+        if lowered in _CATEGORY_CANONICAL_BY_LOWER:
+            repaired = _CATEGORY_CANONICAL_BY_LOWER[lowered]
+            _log.warning("Repaired category casing %r → %r", v, repaired)
+            log_enum_observation(
+                field_name="category", raw_value=v,
+                valid_values=list(_CATEGORY_VALID),
+                coerced_value=repaired, reason="case_repair",
+            )
+            return repaired
+        # Lowercase form may match an alias (e.g. "Demographics" → "demographics" → "demographic").
+        if lowered in _CATEGORY_ALIASES:
+            repaired = _CATEGORY_ALIASES[lowered]
+            _log.warning("Repaired category alias (case-folded) %r → %r", v, repaired)
+            log_enum_observation(
+                field_name="category", raw_value=v,
+                valid_values=list(_CATEGORY_VALID),
+                coerced_value=repaired, reason="alias_repair",
             )
             return repaired
         return v
@@ -273,6 +354,7 @@ class Finding(BaseModel):
     @classmethod
     def _coerce_invalid_relation_type(cls, v: object) -> object:
         valid = [e.value for e in RelationTypeEnum]
+        valid_set = set(valid)
         if v is None or v == "null" or v == "":
             _log.warning("Missing relation_type — coercing to 'unclear'")
             log_enum_observation(
@@ -280,19 +362,57 @@ class Finding(BaseModel):
                 coerced_value=RelationTypeEnum.unclear.value, reason="missing",
             )
             return RelationTypeEnum.unclear
-        if isinstance(v, str) and v not in set(valid):
-            _log.warning("Unknown relation_type %r — coercing to 'unclear'", v)
+        if not isinstance(v, str):
+            return v
+        # Exact valid value — pass through.
+        if v in valid_set:
+            return v
+        # Cross-field bleed: raw value is actually a category name. Tag the log
+        # with `cross_field_bleed` regardless of whether we recover via alias —
+        # `coerced_value` distinguishes recovered (valid enum) vs lost (unclear).
+        lowered = v.lower()
+        is_bleed = lowered in _CATEGORY_NAMES_LOWER
+        # Alias map (e.g. "prognosis" → "prognostic").
+        if v in _RELATION_TYPE_ALIASES:
+            repaired = _RELATION_TYPE_ALIASES[v]
+            _log.warning("Repaired relation_type alias %r → %r", v, repaired)
             log_enum_observation(
                 field_name="relation_type", raw_value=v, valid_values=valid,
-                coerced_value=RelationTypeEnum.unclear.value, reason="unknown_value",
+                coerced_value=repaired,
+                reason="cross_field_bleed" if is_bleed else "alias_repair",
             )
-            return RelationTypeEnum.unclear
-        return v
+            return repaired
+        # Case-insensitive match (e.g. "Has_Feature" → "has_feature").
+        if lowered in valid_set:
+            _log.warning("Repaired relation_type casing %r → %r", v, lowered)
+            log_enum_observation(
+                field_name="relation_type", raw_value=v, valid_values=valid,
+                coerced_value=lowered, reason="case_repair",
+            )
+            return lowered
+        # Lowercase form may match an alias.
+        if lowered in _RELATION_TYPE_ALIASES:
+            repaired = _RELATION_TYPE_ALIASES[lowered]
+            _log.warning("Repaired relation_type alias (case-folded) %r → %r", v, repaired)
+            log_enum_observation(
+                field_name="relation_type", raw_value=v, valid_values=valid,
+                coerced_value=repaired,
+                reason="cross_field_bleed" if is_bleed else "alias_repair",
+            )
+            return repaired
+        _log.warning("Unknown relation_type %r — coercing to 'unclear'", v)
+        log_enum_observation(
+            field_name="relation_type", raw_value=v, valid_values=valid,
+            coerced_value=RelationTypeEnum.unclear.value,
+            reason="cross_field_bleed" if is_bleed else "unknown_value",
+        )
+        return RelationTypeEnum.unclear
 
     @field_validator("direction", mode="before")
     @classmethod
     def _coerce_invalid_direction(cls, v: object) -> object:
         valid = [e.value for e in DirectionEnum]
+        valid_set = set(valid)
         # Old caches and lenient producers may emit null/""/"null" — those mean
         # "direction does not apply": coerce to no_direction.
         if v is None or v == "null" or v == "":
@@ -302,13 +422,51 @@ class Finding(BaseModel):
                 reason="null_to_no_direction",
             )
             return DirectionEnum.no_direction
-        if isinstance(v, str) and v not in set(valid):
-            _log.warning("Unknown direction %r — coercing to 'unclear'", v)
+        if not isinstance(v, str):
+            return v
+        if v in valid_set:
+            return v
+        # Case-insensitive match (e.g. "Positive" → "positive", "NEGATIVE" → "negative").
+        lowered = v.lower()
+        if lowered in valid_set:
+            _log.warning("Repaired direction casing %r → %r", v, lowered)
             log_enum_observation(
                 field_name="direction", raw_value=v, valid_values=valid,
-                coerced_value=DirectionEnum.unclear.value, reason="unknown_value",
+                coerced_value=lowered, reason="case_repair",
             )
-            return DirectionEnum.unclear
+            return lowered
+        _log.warning("Unknown direction %r — coercing to 'unclear'", v)
+        log_enum_observation(
+            field_name="direction", raw_value=v, valid_values=valid,
+            coerced_value=DirectionEnum.unclear.value, reason="unknown_value",
+        )
+        return DirectionEnum.unclear
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _repair_confidence_casing(cls, v: object) -> object:
+        if not isinstance(v, str):
+            return v
+        if v in _CONFIDENCE_LOWER_SET:
+            return v
+        lowered = v.lower()
+        if lowered in _CONFIDENCE_LOWER_SET:
+            _log.warning("Repaired confidence casing %r → %r", v, lowered)
+            log_enum_observation(
+                field_name="confidence", raw_value=v,
+                valid_values=list(_CONFIDENCE_VALID),
+                coerced_value=lowered, reason="case_repair",
+            )
+            return lowered
+        if lowered in _CONFIDENCE_ALIASES:
+            repaired = _CONFIDENCE_ALIASES[lowered]
+            _log.warning("Repaired confidence alias %r → %r", v, repaired)
+            log_enum_observation(
+                field_name="confidence", raw_value=v,
+                valid_values=list(_CONFIDENCE_VALID),
+                coerced_value=repaired, reason="alias_repair",
+            )
+            return repaired
         return v
 
     @field_validator("scope", "subject_entity", "outcome_entity",
@@ -337,6 +495,10 @@ class AuditableSummary(BaseModel):
     def _drop_invalid_findings(cls, v: object) -> object:
         if not isinstance(v, list):
             return v
+        valid_categories = [
+            "morphology", "IHC", "molecular_genetics", "staging",
+            "treatment", "prognosis", "demographic",
+        ]
         clean = []
         for item in v:
             try:
@@ -345,6 +507,25 @@ class AuditableSummary(BaseModel):
             except Exception as exc:
                 _log.warning("Dropping malformed finding: %s", exc)
                 log_bad_finding(raw=item, error=str(exc))
+                # Surface invalid category values in structured form so they
+                # show up in enum_observations.jsonl aggregations alongside
+                # relation_type / direction coercions. category="expression"
+                # and similar relation_type-bleed values would otherwise only
+                # appear in bad_findings.jsonl as free-form Pydantic errors.
+                if isinstance(item, dict):
+                    raw_category = item.get("category")
+                    if (
+                        isinstance(raw_category, str)
+                        and raw_category not in valid_categories
+                        and raw_category not in _CATEGORY_ALIASES
+                    ):
+                        log_enum_observation(
+                            field_name="category",
+                            raw_value=raw_category,
+                            valid_values=valid_categories,
+                            coerced_value=None,
+                            reason="invalid_literal_dropped",
+                        )
         return clean
 
 

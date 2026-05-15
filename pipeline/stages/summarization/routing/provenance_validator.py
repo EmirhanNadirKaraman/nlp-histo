@@ -24,7 +24,11 @@ from pipeline.stages.summarization.models import AuditableSummary, Finding
 
 from .models import FindingValidation, ReasonCode
 
-_CITATION_RE = re.compile(r"^S(\d+)\|(PMC\d+)\|(\d+)$")
+# PMC token accepts word-chars + hyphens so document-id suffixes such as
+# `PMC10100421_HIS-82-393` or `PMC7150310_main` parse correctly. The captured
+# pmcid is compared exactly against the expected doc id below, so the broader
+# regex doesn't widen the cross-document safety check.
+_CITATION_RE = re.compile(r"^S(\d+)\|(PMC[\w\-]+)\|(\d+)$")
 
 # Verbatim match thresholds.
 # Below FABRICATED_THRESHOLD: the quote is unrecognisable in the source → hard REJECT.

@@ -91,6 +91,9 @@ def test_run_voters_caches_l1_result_and_l2_haiku_reuses_it():
     l2_chain = MagicMock()
     l3_chain = MagicMock()
     l1_result = MagicMock(name="L1Result")
+    # chunk_id round-trip check (2026-05-15) compares parsed.chunk_id against
+    # the expected chunk_id. Configure the mock so the equality check matches.
+    l1_result.chunk_id = "C0"
     l1_chain.invoke.return_value = l1_result
 
     with patch(
@@ -138,8 +141,14 @@ def test_run_voters_does_not_dedup_different_temperatures():
     l1_chain = MagicMock()
     l2_chain = MagicMock()
     l3_chain = MagicMock()
-    l1_chain.invoke.return_value = MagicMock(name="L1Result")
-    l2_chain.invoke.return_value = MagicMock(name="L2Result")
+    l1_result = MagicMock(name="L1Result")
+    l2_result = MagicMock(name="L2Result")
+    # chunk_id round-trip check expects parsed.chunk_id to equal the chunk_id
+    # passed into _run_voters (test uses "C0").
+    l1_result.chunk_id = "C0"
+    l2_result.chunk_id = "C0"
+    l1_chain.invoke.return_value = l1_result
+    l2_chain.invoke.return_value = l2_result
 
     with patch(
         "pipeline.stages.summarization.current_stages.map_stage.build_map_chain"

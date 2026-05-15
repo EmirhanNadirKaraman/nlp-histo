@@ -52,6 +52,20 @@ def _quiet_nmslib() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
+def _quiet_sklearn_pickle_warnings() -> None:
+    """Silence the InconsistentVersionWarning emitted when scispaCy unpickles
+    its TfidfTransformer + TfidfVectorizer artifacts (pickled with sklearn
+    1.1.x; we run 1.6.x).  The TF-IDF data structures are stable across these
+    versions; the warning is cosmetic.  Two pickles are unpickled per linker
+    load, so without this filter every UMLS load emits two warnings."""
+    import warnings  # noqa: PLC0415
+    try:
+        from sklearn.exceptions import InconsistentVersionWarning  # noqa: PLC0415
+    except ImportError:
+        return
+    warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+
+
 def _log_memory(label: str) -> None:
     """Emit a MEMORY checkpoint with stage=UMLS for the given label.
 
@@ -91,6 +105,7 @@ def get_nlp(
         if _AVAILABLE is not None:        # raced another loader
             return _NLP
         _quiet_nmslib()
+        _quiet_sklearn_pickle_warnings()
         _log_memory("before scispaCy load")
         try:
             import spacy                                  # type: ignore

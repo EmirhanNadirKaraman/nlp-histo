@@ -2,35 +2,43 @@
 
 Captured 2026-05-13 during Run A smoke session.
 
-## Cascade option — router-on L1→L3 skip (default since 2026-05-14)
+## Cascade option — router-on L1→L3 skip (opt-in, default OFF as of 2026-05-14)
 
-Both `SummarizationRunner` and `BatchSummarizationRunner` now default to
-`enable_router=True`. `MapOutputRouter` runs `SchemaValidator` +
-`ProvenanceValidator` before the agreement gate; voters that fail either are
-dropped before scoring. On L1 rejection the cascade jumps **L1 → L3
-directly**, skipping L2 (mid-tier voters are same risk class as L1, so a
-grounding/schema failure they couldn't fix at L1 isn't worth paying L2 for).
+Both `SummarizationRunner` and `BatchSummarizationRunner` default to
+`enable_router=False`. The active cascade is the legacy 3-tier staircase:
+**L1 → L2 → L3**. L1 voters disagreeing escalates to a fresh set of L2
+mid-tier voters; if those also disagree, L3 (the strong model) fires.
 
-Trade-off the new default accepts:
+Opt in to the router path with `enable_router=True` on either runner.
+When enabled, `MapOutputRouter` runs `SchemaValidator` +
+`ProvenanceValidator` before the agreement gate; voters that fail either
+are dropped before scoring, and on L1 rejection the cascade jumps
+**L1 → L3 directly**, skipping L2 (mid-tier voters are same risk class
+as L1, so a grounding/schema failure they couldn't fix at L1 isn't worth
+paying L2 for).
 
-- Pros: filters fabricated-citation / schema-broken voters out of the
-  agreement matrix; cheaper escalation on hard-failure chunks; per-voter
-  grounding pass fraction flows into `AgreementContext` so
-  `SemanticAgreementScorer` tie-breaks with real validator output instead
-  of the structural proxy.
-- Cons: skips the L2 consensus-resolution opportunity on chunks where L1
-  voters merely *disagree* (soft failure), so L3 cost goes up there.
+Trade-offs of the two paths:
+
+- Default (legacy, router off): catches soft-disagreement chunks at L2
+  before they reach L3 → fewer L3 calls; but fabricated-citation /
+  schema-broken voters still enter the agreement matrix and can inflate
+  agreement (two equally-fabricated voters agree on a hallucinated claim).
+- Router on (`enable_router=True`): filters fabricated / schema-broken
+  voters out before scoring; per-voter grounding pass fraction flows into
+  `AgreementContext` so `SemanticAgreementScorer` tie-breaks with real
+  validator output. But L1 → L3 skip means L3 cost goes up on chunks
+  where L1 voters merely *disagree* (soft failure) instead of being given
+  an L2 consensus-resolution pass.
 
 Open work — track in `docs/THESIS.md ## TODOs`:
 
-- [ ] **Cascade A/B:** rerun Run A with `enable_router=False` (legacy
-  L1→L2→L3) and compare escalation rate, per-paper cost, and final-rule
-  precision vs. the new default. Cascade decision JSONL at
+- [ ] **Cascade A/B:** rerun Run A with `enable_router=True` (router
+  L1→L3 skip) and compare escalation rate, per-paper cost, and final-rule
+  precision vs. the current default. Cascade decision JSONL at
   `out/summaries/cascade_decisions/{pmcid}.jsonl` is the bucketing source.
-- [ ] **Legacy-path retirement:** if the A/B run shows the staircase doesn't
-  beat the router default on a precision-per-dollar basis, delete the
-  `enable_router=False` code paths in both runners to stop maintaining
-  two cascade shapes.
+- [ ] **Path retirement:** once the A/B run lands, drop whichever cascade
+  shape loses on a precision-per-dollar basis to stop maintaining two
+  code paths in both runners.
 
 ## Evaluation harness — NLI model comparison
 

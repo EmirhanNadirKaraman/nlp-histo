@@ -67,8 +67,8 @@ OUTPUT_TOKENS_PER_CHUNK = 800
 #   pipeline/stages/summarization/batch/voter_configs.py  (cascade structure)
 # and
 #   configs/model_prices.json via PriceBook  (per-model prices).
-# Pick the cascade with ``--profile {cheap|real}`` (default mirrors
-# ``voter_configs.DEFAULT_PROFILE_NAME``).
+# Pick the cascade with ``--profile {cheap|real|default}`` (required —
+# no implicit default).
 
 @dataclass
 class VoterPricing:
@@ -315,10 +315,9 @@ def main() -> int:
     parser.add_argument("--l3-rate", type=float, action="append", default=None,
                         metavar="FRAC", help="L3 escalation fraction "
                                               "(repeatable; matched to --l2-rate).")
-    parser.add_argument("--profile", default=None,
-                        help="Cascade profile name (cheap | real). "
-                             "Defaults to voter_configs.DEFAULT_PROFILE_NAME "
-                             "(currently 'cheap') / $NLP_HISTO_PROFILE.")
+    parser.add_argument("--profile", required=True,
+                        help="Cascade profile name (cheap | real | default). "
+                             "Required — no implicit default.")
     parser.add_argument("--prices", default=None,
                         help="Path to model_prices.json. "
                              "Defaults to configs/model_prices.json.")

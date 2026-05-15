@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # all Claude voters use the direct Anthropic API (ANTHROPIC_API_KEY).
 _VERTEX_TO_DIRECT: dict[str, str] = {
     "claude-haiku-4-5@20251001": "claude-haiku-4-5-20251001",
-    "claude-sonnet-4-6@default": "claude-sonnet-4-6-20251001",
+    "claude-sonnet-4-6@default": "claude-sonnet-4-6",
 }
 
 

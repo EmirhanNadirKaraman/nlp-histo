@@ -12,9 +12,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
+
+# Disable scispaCy/UMLS load before any pipeline import — these tests synthesise
+# a completed BatchHandle and never need real CUI lookups; loading the linker
+# would add 5-30s per test process for nothing. The env vars are read at call
+# time, so setting them here is sufficient.
+os.environ.setdefault("NLP_HISTO_DISABLE_UMLS", "1")
+os.environ.setdefault("NLP_HISTO_SKIP_UMLS_ENRICHMENT", "1")
 
 import pytest
 
@@ -37,7 +45,6 @@ from pipeline.stages.summarization.batch.models import (
     VoterBatchConfig,
 )
 from pipeline.stages.summarization.batch.runner import BatchSummarizationRunner
-from pipeline.stages.summarization.batch.voter_configs import CLAUDE_HAIKU
 from pipeline.stages.summarization.config import SummarizationConfig
 from pipeline.stages.summarization.models import (
     AuditableSummary,
@@ -45,11 +52,18 @@ from pipeline.stages.summarization.models import (
     DirectionEnum,
     Finding,
     FindingScope,
+    MAP_PROMPT_VERSION,
+    MAP_SCHEMA_VERSION,
     RelationTypeEnum,
 )
 
 
 PMCID = "PMC9000099"
+
+# Fake voter identifier — these tests bypass the provider batch APIs entirely
+# (synthesised completed BatchHandle → finalize()), so the model string is just
+# a label for VoterBatchConfig and never reaches an LLM.
+FAKE_MODEL = "fake-model-batch-persistence-test"
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -85,7 +99,7 @@ def _audit_summary() -> AuditableSummary:
 
 
 def _voter(temperature: float = 0.0) -> VoterBatchConfig:
-    return VoterBatchConfig(CLAUDE_HAIKU, provider="claude", temperature=temperature)
+    return VoterBatchConfig(FAKE_MODEL, provider="claude", temperature=temperature)
 
 
 def _build_runner(tmp_path: Path) -> BatchSummarizationRunner:
@@ -107,7 +121,7 @@ def _build_runner(tmp_path: Path) -> BatchSummarizationRunner:
         config=cfg,
         output_dir=tmp_path / "out",
         embed_fn=fake_embed,
-        cascade_profile="smoke_haiku",
+        cascade_profile="smoke_fake",
         artifact_root=tmp_path / "runs",
         artifact_run_id="batch_test_run",
         run_modern_pipeline=True,
@@ -126,7 +140,7 @@ def _completed_handle(audit: AuditableSummary) -> BatchHandle:
                             "text_element_id": 101,
                             "sentence": "CD30 was associated with worse OS."}]},
         finalized={audit.chunk_id: audit.model_dump()},
-        cascade_profile="smoke_haiku",
+        cascade_profile="smoke_fake",
         cascade_signature="testsig",
     )
 
@@ -144,8 +158,8 @@ def test_batch_finalize_writes_full_artifact_layout(tmp_path: Path):
     _trace(f"runner built in {time.perf_counter() - t0:.1f}s")
 
     handle = _completed_handle(_audit_summary())
-    _trace("calling finalize() — modern chain runs NORMALIZE→...→RESOLVE; "
-           "first-time scispacy/UMLS load can take 5-30s")
+    _trace("calling finalize() — modern chain runs NORMALIZE→...→RESOLVE "
+           "(scispaCy/UMLS disabled at module top for speed)")
     t0 = time.perf_counter()
     result = runner.finalize(handle)
     _trace(f"finalize() returned in {time.perf_counter() - t0:.1f}s")
@@ -182,11 +196,11 @@ def test_batch_finalize_writes_full_artifact_layout(tmp_path: Path):
     assert set(payload["stages_completed"]) == {
         "map", "normalize", "group", "canonicalize", "relate", "resolve",
     }
-    assert payload["schema_version"] == "map_v1_explicit_direction"
-    assert payload["prompt_version"] == "map_prompt_v2_singular_demographic"
+    assert payload["schema_version"] == MAP_SCHEMA_VERSION
+    assert payload["prompt_version"] == MAP_PROMPT_VERSION
     assert payload["cascade_signature"] == "testsig"
     # Cascade profile name set on the runner ends up in config snapshot
-    assert payload["config"]["cascade_profile"] == "smoke_haiku"
+    assert payload["config"]["cascade_profile"] == "smoke_fake"
 
 
 def test_batch_finalize_lineage_chain_is_intact(tmp_path: Path):
@@ -238,7 +252,7 @@ def test_batch_finalize_disabled_when_artifact_root_none(tmp_path: Path):
         config=SummarizationConfig(),
         output_dir=tmp_path / "out",
         embed_fn=lambda texts: [[0.0]] * len(texts),
-        cascade_profile="smoke_haiku",
+        cascade_profile="smoke_fake",
         artifact_root=None,                     # disabled
         run_modern_pipeline=True,
         run_reduce=False,
@@ -259,7 +273,7 @@ def test_batch_finalize_legacy_only_when_modern_disabled(tmp_path: Path):
         config=SummarizationConfig(),
         output_dir=tmp_path / "out",
         embed_fn=lambda texts: [[0.0]] * len(texts),
-        cascade_profile="smoke_haiku",
+        cascade_profile="smoke_fake",
         artifact_root=tmp_path / "runs",
         artifact_run_id="legacy_run",
         run_modern_pipeline=False,

@@ -35,6 +35,7 @@ from ..agreement import (
     producer_from_outcome,
 )
 from ..cache import PipelineCache
+from ..enum_logging import log_bad_finding
 from ..llm_errors import is_non_retryable_llm_error
 from ..models import (
     AuditableSummary,
@@ -174,6 +175,18 @@ class MapStage:
             self._voter_specs + self._l2_specs + [self._l3_spec]
         )
 
+        # ── Invocation-time usage capture ──────────────────────────────────────
+        # Records one InvocationUsage per chain.invoke() call. Populated in
+        # _run_voters and _invoke_l3 by reading usage_metadata directly off
+        # the raw AIMessage returned by build_map_chain's include_raw=True
+        # structured-output chain. Cache hits do NOT add a record (no API
+        # call happened). See pipeline/stages/summarization/costing/
+        # invocation_usage.py for the rationale.
+        from ..costing import InvocationUsage  # noqa: PLC0415 — local import
+        self._InvocationUsage = InvocationUsage
+        self._invocation_usage_records: list = []
+        self._invocation_usage_lock = threading.Lock()
+
     # ── Run-metadata helpers ────────────────────────────────────────────────────
 
     def _make_metadata(self, provider: str, model: str) -> MapRunMetadata:
@@ -246,6 +259,10 @@ class MapStage:
                 "total": 0, "l1_kept": 0, "l2_escalated": 0, "l2_kept": 0,
                 "l3_escalated": 0, "l3_kept": 0, "finalized": 0, "dropped": 0,
             }
+        # Reset invocation-usage records for this paper so the runner reads
+        # only the current MAP run's records.
+        with self._invocation_usage_lock:
+            self._invocation_usage_records = []
 
         # Thread the usage collector onto the instance for the duration of
         # this paper. Reset in a finally so an exception cannot leave a stale
@@ -646,12 +663,44 @@ class MapStage:
                 cascade_level=3, substage="l3", item_id=chunk_id,
                 was_escalation=True,
             )
-        result = (
+        raw_result = (
             self._escalation_chain.invoke(inp, config=cfg_l3)
             if cfg_l3 else self._escalation_chain.invoke(inp)
         )
-        self._voter_cache_set(l3_cache_key, result)
-        return result
+        from ..costing.invocation_usage import unwrap_structured_output  # noqa: PLC0415
+        parsed, raw_msg, parsing_error = unwrap_structured_output(raw_result)
+        if parsing_error is not None and parsed is None:
+            log_bad_finding(
+                raw=getattr(raw_msg, "content", str(raw_msg)) if raw_msg else None,
+                error=str(parsing_error),
+                context={
+                    "stage": "AuditableSummary", "chunk_id": chunk_id,
+                    "level": "L3", "provider": p_l3, "model": m_l3,
+                },
+            )
+            # Match pre-include_raw behaviour: raise so the caller's retry /
+            # cascade-handling sees a real exception rather than a None result.
+            raise parsing_error if isinstance(parsing_error, BaseException) else RuntimeError(str(parsing_error))
+        if parsed is not None and parsed.chunk_id != chunk_id:
+            log_bad_finding(
+                raw={"returned_chunk_id": parsed.chunk_id,
+                     "expected_chunk_id": chunk_id},
+                error=f"chunk_id mismatch: L3 returned "
+                      f"{parsed.chunk_id!r} for expected {chunk_id!r}",
+                context={
+                    "stage": "AuditableSummary", "chunk_id": chunk_id,
+                    "level": "L3", "provider": p_l3, "model": m_l3,
+                },
+            )
+            # Repair in place rather than raising — L3 has no further
+            # escalation tier, so dropping the result would lose the only
+            # available finding for this chunk.
+            parsed = parsed.model_copy(update={"chunk_id": chunk_id})
+        self._record_invocation_usage(
+            level="L3", provider=p_l3, model=m_l3, chunk_id=chunk_id, raw_msg=raw_msg,
+        )
+        self._voter_cache_set(l3_cache_key, parsed)
+        return parsed
 
     def _record_cascade_decision(
         self,
@@ -669,6 +718,27 @@ class MapStage:
         ``process()``).  Failures during logging are swallowed so a flaky
         filesystem cannot kill an otherwise-successful MAP run.
         """
+        # Voter-count regression guard: profile defines N voters; the cascade
+        # should always run with exactly N at L1/L2 (L3 is single-voter by
+        # design). A shortfall almost always means the router classified one
+        # or more voters as UNUSABLE, a provider failed at submit time, or a
+        # batch-job grouping bug stripped them silently. Emit a single WARNING
+        # line so the next regression surfaces immediately instead of weeks
+        # later. See B-019, B-020.
+        expected: int | None = None
+        if level == "l1":
+            expected = len(self._voter_specs)
+        elif level == "l2":
+            expected = len(self._l2_specs)
+        elif level == "l3":
+            expected = 1
+        if expected is not None and voter_count < expected:
+            logger.warning(
+                "[%s] cascade chunk %s %s ran with voter_count=%d expected=%d "
+                "— %d voter(s) missing (UNUSABLE? failed batch job? router strip?)",
+                pmcid, chunk_id, level.upper(),
+                voter_count, expected, expected - voter_count,
+            )
         log = getattr(self, "_cascade_decision_log", None)
         if log is None:
             return
@@ -847,6 +917,55 @@ class MapStage:
             escalation_level=escalation_level,
         ))
 
+    # ── Invocation-time usage capture (sole source of truth for cost) ────────
+
+    def _record_invocation_usage(
+        self,
+        *,
+        level: str,
+        provider: str,
+        model: str,
+        chunk_id: str | None,
+        raw_msg,
+    ) -> None:
+        """Append one InvocationUsage record for a freshly-completed call.
+
+        ``raw_msg`` is the AIMessage from ``build_map_chain``'s
+        ``include_raw=True`` output (``result["raw"]``).  If ``raw_msg`` is
+        ``None`` (e.g. structured-output dict had no raw, or the chain
+        wasn't include_raw for any reason) the record is still appended
+        with ``usage_source="missing"`` and a warning is logged — silent
+        zeros corrupt cost reports far more than a noisy log line.
+        """
+        from ..costing.invocation_usage import extract_usage_from_message  # noqa: PLC0415
+        if raw_msg is None:
+            inp_tok, out_tok, src = 0, 0, "missing"
+        else:
+            inp_tok, out_tok, src = extract_usage_from_message(raw_msg)
+        if src == "missing":
+            logger.warning(
+                "MAP invocation usage missing: level=%s provider=%s model=%s chunk=%s "
+                "(raw_msg=%s) — cost report will under-count this call",
+                level, provider, model, chunk_id,
+                type(raw_msg).__name__ if raw_msg is not None else "None",
+            )
+        rec = self._InvocationUsage(
+            level=level, provider=provider, model=model, chunk_id=chunk_id,
+            input_tokens=inp_tok, output_tokens=out_tok, usage_source=src,
+        )
+        with self._invocation_usage_lock:
+            self._invocation_usage_records.append(rec)
+
+    def invocation_usage_records(self) -> list:
+        """Return a snapshot of the current paper's invocation-usage records.
+
+        Empty until ``process()`` is called.  Reset at the start of every
+        ``process()`` invocation, so the caller should read this between
+        papers (it carries the MAP usage for the most recent paper only).
+        """
+        with self._invocation_usage_lock:
+            return list(self._invocation_usage_records)
+
     @staticmethod
     def _voter_cache_key(provider: str, model: str, temperature: float, inp: dict) -> tuple:
         """Cache key for one voter call.
@@ -949,15 +1068,59 @@ class MapStage:
                             cascade_level=cascade_level, substage=level.lower(),
                             item_id=chunk_id,
                         )
-                    out = chain.invoke(inp, config=cfg) if cfg else chain.invoke(inp)
+                    raw_out = chain.invoke(inp, config=cfg) if cfg else chain.invoke(inp)
                     elapsed_ms = (time.monotonic() - t0) * 1000.0
+                    from ..costing.invocation_usage import unwrap_structured_output  # noqa: PLC0415
+                    parsed_out, raw_msg, parsing_error = unwrap_structured_output(raw_out)
+                    if parsing_error is not None and parsed_out is None:
+                        # Log structurally before raising so the bad payload
+                        # survives in bad_findings.jsonl even if the retry
+                        # succeeds (gives us frequency-per-voter data).
+                        log_bad_finding(
+                            raw=getattr(raw_msg, "content", str(raw_msg)) if raw_msg else None,
+                            error=str(parsing_error),
+                            context={
+                                "stage": "AuditableSummary",
+                                "pmcid": pmcid, "chunk_id": chunk_id, "level": level,
+                                "voter_index": i, "provider": provider, "model": model,
+                                "attempt": attempt,
+                            },
+                        )
+                        # Surface the parsing error as an exception so the
+                        # retry / failure path below handles it the same way
+                        # it did before include_raw=True was introduced.
+                        raise parsing_error if isinstance(parsing_error, BaseException) else RuntimeError(str(parsing_error))
+                    # Chunk_id round-trip — fail-fast if the voter renamed the
+                    # chunk. Triggers the existing 2-attempt retry; if retry
+                    # also mismatches the voter is excluded from agreement.
+                    if parsed_out is not None and parsed_out.chunk_id != chunk_id:
+                        log_bad_finding(
+                            raw={"returned_chunk_id": parsed_out.chunk_id,
+                                 "expected_chunk_id": chunk_id},
+                            error=f"chunk_id mismatch: voter returned "
+                                  f"{parsed_out.chunk_id!r} for expected {chunk_id!r}",
+                            context={
+                                "stage": "AuditableSummary",
+                                "pmcid": pmcid, "chunk_id": chunk_id, "level": level,
+                                "voter_index": i, "provider": provider, "model": model,
+                                "attempt": attempt,
+                            },
+                        )
+                        raise ValueError(
+                            f"chunk_id mismatch: voter returned "
+                            f"{parsed_out.chunk_id!r}, expected {chunk_id!r}"
+                        )
+                    self._record_invocation_usage(
+                        level=level, provider=provider, model=model,
+                        chunk_id=chunk_id, raw_msg=raw_msg,
+                    )
                     logger.debug(
                         "[%s] MAP chunk %s %s voter %d — OK  [%.0fms]",
                         pmcid, chunk_id, level, i, elapsed_ms,
                     )
                     timings[i] = elapsed_ms
-                    self._voter_cache_set(cache_key, out)
-                    return out
+                    self._voter_cache_set(cache_key, parsed_out)
+                    return parsed_out
                 except Exception as exc:
                     last_exc = exc
                     if _LengthFinishReasonError is not None and isinstance(exc, _LengthFinishReasonError):

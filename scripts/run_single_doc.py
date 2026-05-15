@@ -66,7 +66,7 @@ result = runner.process(file_data)
 
 # ── save per-stage outputs ─────────────────────────────────────────────────────
 pmcid = file_data["pmcid"]
-if result["status"] == "success":
+if result["status"] in ("success", "skipped"):
     (MAP_DIR / f"{pmcid}.json").write_text(
         json.dumps(result["audit_trail"]["map_chunks"], indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -87,7 +87,7 @@ if result["status"] == "success":
 
 # ── print result ───────────────────────────────────────────────────────────────
 print("\n" + "=" * 70)
-if result["status"] == "success":
+if result["status"] in ("success", "skipped"):
     print("STATUS : success")
     print(f"PAPER  : {result['pmcid']}")
     print(f"SUMMARY:\n{result['summary']}\n")
